@@ -191,6 +191,30 @@ export function BackupsPage() {
     }
   }
 
+
+  async function restoreBackup(backup: PakBackupInfo) {
+    const confirmed = window.confirm(
+      `Restore backup "${backup.displayName}"?\n\nThis will copy the backup PAK files back into ~mods. If matching files already exist, Tsuki will move the current files into its uninstalled/conflict folder first.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setStatus(`Restoring ${backup.displayName}...`);
+
+    try {
+      const result = await invoke<string>("restore_pak_backup", {
+        fileName: backup.fileName,
+      });
+      setStatus(result);
+      window.dispatchEvent(new CustomEvent("tsuki-data-refresh"));
+      await refreshBackups();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function deleteBackup(backup: PakBackupInfo) {
     const confirmed = window.confirm(
       `Delete backup "${backup.displayName}"?\n\nThis deletes the backup zip permanently.`,
@@ -375,6 +399,14 @@ export function BackupsPage() {
                     onClick={() => openBackupFile(backup)}
                   >
                     Explorer
+                  </button>
+                  <button
+                    className="ghost-button compact"
+                    type="button"
+                    onClick={() => restoreBackup(backup)}
+                    disabled={isBusy}
+                  >
+                    Restore
                   </button>
                   <button
                     className="ghost-button compact danger"

@@ -1,4 +1,4 @@
-﻿import "./App.css";
+import "./App.css";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -313,7 +313,7 @@ function sourceSummaryFromInstalledRecord(record: InstalledStateRecord): SourceM
     updatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
     downloads: null,
     likes: null,
-    shortDescription: `Installed by Tsuki Â· ${fileAliases.length} tracked file${fileAliases.length === 1 ? "" : "s"}.`,
+    shortDescription: `Installed by Tsuki · ${fileAliases.length} tracked file${fileAliases.length === 1 ? "" : "s"}.`,
     tags: [...new Set([record.location, record.fileType, record.filename, ...fileAliases.slice(0, 8)].filter(Boolean))],
   };
 }
@@ -398,7 +398,7 @@ function SourceMiniCard({
       </div>
       <div className="home-card-body">
         <h3>{mod.name}</h3>
-        <p className="home-card-author">{mod.author ? `by ${mod.author}` : "Community mod"}{homeUpdatedLabel(mod) ? ` Â· ${homeUpdatedLabel(mod)}` : ""}</p>
+        <p className="home-card-author">{mod.author ? `by ${mod.author}` : "Community mod"}{homeUpdatedLabel(mod) ? ` · ${homeUpdatedLabel(mod)}` : ""}</p>
         <p>{mod.shortDescription || "Review the files, install safely, and keep your PAYDAY 3 setup organized."}</p>
         <div className="home-card-tags">
           {tags.length > 0 ? tags.map((tag) => <span key={tag}>{tag}</span>) : <span>No tags cached</span>}
@@ -857,7 +857,7 @@ function LocalPakSection({ mods, onBrowse }: { mods: PakModFile[]; onBrowse: () 
         {shown.map((pak) => (
           <button className="home-local-chip" type="button" key={`${pak.fullPath}-${pak.fileName}`} onClick={onBrowse}>
             <strong>{pakDisplayName(pak.fileName)}</strong>
-            <span>{pak.extension.toUpperCase()} Â· {(pak.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
+            <span>{pak.extension.toUpperCase()} · {(pak.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
           </button>
         ))}
         {mods.length > shown.length && (
@@ -1013,7 +1013,7 @@ function RepairPage() {
 
           {dependencies && dependencies.warnings.length > 0 && (
             <div className="repair-warning-list">
-              {dependencies.warnings.map((warning) => <p key={warning}>âš  {warning}</p>)}
+              {dependencies.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}
             </div>
           )}
         </article>
@@ -1033,7 +1033,7 @@ function RepairPage() {
                 <div>
                   <strong>{receipt.displayName}</strong>
                   <p>
-                    {receipt.source} #{receipt.sourceModId ?? "?"} Â· live {receipt.liveFiles} Â· disabled {receipt.disabledFiles} Â· missing {receipt.missingFiles}
+                    {receipt.source} #{receipt.sourceModId ?? "?"} · live {receipt.liveFiles} · disabled {receipt.disabledFiles} · missing {receipt.missingFiles}
                   </p>
                   {receipt.missingPaths.slice(0, 2).map((path) => <small key={path}>{path}</small>)}
                 </div>
@@ -1178,7 +1178,7 @@ function ProfilesPage() {
               <div className="managed-row" key={profile.id}>
                 <div>
                   <strong>{profile.name}</strong>
-                  <p>{profile.enabledPakFiles.length} PAK files Â· {profile.enabledReceiptIds.length} Tsuki installs</p>
+                  <p>{profile.enabledPakFiles.length} PAK files · {profile.enabledReceiptIds.length} Tsuki installs</p>
                 </div>
                 <button className="ghost-button compact" disabled={busyId === `profile-${profile.id}`} type="button" onClick={() => applyProfile(profile)}>
                   {busyId === `profile-${profile.id}` ? "Applying..." : "Apply"}
@@ -1203,7 +1203,7 @@ function ProfilesPage() {
                 <div>
                   <strong>{install.displayName}</strong>
                   <p>
-                    {install.source} #{install.sourceModId ?? "?"} Â· {install.fileCount} files Â· {install.nonPakFileCount} non-PAK
+                    {install.source} #{install.sourceModId ?? "?"} · {install.fileCount} files · {install.nonPakFileCount} non-PAK
                   </p>
                   {!install.enabled && <small>Disabled folder: {install.disabledFolder}</small>}
                 </div>
@@ -1745,7 +1745,7 @@ function BootScreen({ label, detail, progress }: BootStatus) {
     <main className="boot-screen">
       <div className="boot-card">
         <div className="boot-logo-orb">
-          <span>æœˆ</span>
+          <span>月</span>
         </div>
         <div>
           <p className="eyebrow">TSUKI MOD MANAGER</p>
@@ -1992,15 +1992,3 @@ export default function App() {
     </div>
   );
 }
-
-/* Tsuki release noUnusedLocals guard
-   These helpers are kept dormant after the startup/debug-window rollback.
-   Do not call them during release startup. This only satisfies TypeScript noUnusedLocals. */
-void TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS;
-void readReceiptUpdateCheckCache;
-void writeReceiptUpdateCheckCache;
-void startupTimeout;
-void refreshHomeLiveCacheForStartup;
-void createDebugWindowHtml;
-void DebugWindowApp;
-

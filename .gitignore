@@ -4,8 +4,6 @@ src-tauri/target/
 PUBLIC_RELEASE/
 NEXUS_UPLOAD/
 RELEASE_UPLOAD/
-docs/
-.vscode/
 .env
 .env.*
 .pd3mm.json
@@ -13,3 +11,11 @@ docs/
 *.zip
 *.msi
 *.exe
+
+# Tsuki local release/test artifacts
+PUBLIC_RELEASE/
+tsuki-*-updated-files/
+tsuki_*_updated_files/
+tsuki-*-patch/
+tsuki-*.zip
+*.release-backup

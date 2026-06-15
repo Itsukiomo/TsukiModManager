@@ -63,9 +63,9 @@ export function Sidebar({ activePage, onChangePage, taskProgress }: SidebarProps
       )}
 
       <div className="sidebar-footer">
-        <strong>v1.0.7.27.3</strong>
+        <strong>v1.8.1</strong>
         <br />
-        Build fix.</div>
+        No startup repair.</div>
     </aside>
   );
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -21,7 +22,7 @@ mod source_http;
 mod nexus;
 mod modworkshop;
 
-const APP_VERSION: &str = "1.0.7.27.3-release-unused-state-fix";
+const APP_VERSION: &str = "1.8.1";
 const APP_DIR_NAME: &str = "Tsuki Mod Manager";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const DEFAULT_THEME_ID: &str = "moonveil";
@@ -29,6 +30,25 @@ const DEFAULT_THEME_ID: &str = "moonveil";
 // or set it in Settings -> App Update on the user's machine.
 // Example: https://raw.githubusercontent.com/<you>/<repo>/main/latest.json
 const DEFAULT_APP_UPDATE_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Itsukiomo/TsukiModManager/main/latest.json";
+
+static LAUNCH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+struct LaunchProgressGuard;
+
+impl Drop for LaunchProgressGuard {
+    fn drop(&mut self) {
+        LAUNCH_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
+
+fn acquire_launch_guard() -> Result<LaunchProgressGuard, String> {
+    if LAUNCH_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return Err("PAYDAY 3 is already launching. Wait a few seconds before trying again.".to_string());
+    }
+
+    Ok(LaunchProgressGuard)
+}
+
 
 #[derive(Debug, Clone)]
 struct PaydayPaths {
@@ -308,7 +328,9 @@ fn disable_mods_for_vanilla_launch() -> Result<String, String> {
     let mut temp_files = Vec::<DisabledInstallFileRecord>::new();
     let mut hidden_receipt_files = 0usize;
     let mut hidden_loose_paks = 0usize;
+    let mut hidden_runtime_files = 0usize;
     let mut skipped = Vec::new();
+    let mut move_errors = Vec::new();
 
     // Restore any previous unfinished temp session before making a new one.
     let _ = restore_mods_after_vanilla_launch();
@@ -352,7 +374,7 @@ fn disable_mods_for_vanilla_launch() -> Result<String, String> {
                     });
                     hidden_receipt_files += 1;
                 }
-                Err(error) => skipped.push(error),
+                Err(error) => move_errors.push(error),
             }
         }
     }
@@ -389,9 +411,11 @@ fn disable_mods_for_vanilla_launch() -> Result<String, String> {
                 });
                 hidden_loose_paks += 1;
             }
-            Err(error) => skipped.push(error),
+            Err(error) => move_errors.push(error),
         }
     }
+
+    hidden_runtime_files += disable_vanilla_runtime_surfaces(&paths, &mut temp_files, &mut move_errors);
 
     if !temp_files.is_empty() {
         write_vanilla_launch_session(&VanillaLaunchSession {
@@ -402,10 +426,18 @@ fn disable_mods_for_vanilla_launch() -> Result<String, String> {
         })?;
     }
 
+    if !move_errors.is_empty() {
+        return Err(format!(
+            "Vanilla launch blocked because Tsuki could not move every active mod surface away. Nothing will launch until this is fixed. Move errors: {}",
+            move_errors.join(" | ")
+        ));
+    }
+
     let mut message = format!(
-        "Vanilla mode prepared temporarily: hidden {} receipt file(s) and {} loose PAK-family file(s). Mods remain logically On and will restore after PAYDAY 3 closes.",
+        "Vanilla mode prepared temporarily: hidden {} receipt file(s), {} loose PAK-family file(s), and {} UE4SS/runtime loader item(s). Mods remain logically On and will restore after PAYDAY 3 closes.",
         hidden_receipt_files,
-        hidden_loose_paks
+        hidden_loose_paks,
+        hidden_runtime_files
     );
 
     if !skipped.is_empty() {
@@ -417,7 +449,21 @@ fn disable_mods_for_vanilla_launch() -> Result<String, String> {
 
 fn restore_mods_after_vanilla_launch() -> Result<String, String> {
     let Some(session) = read_vanilla_launch_session() else {
-        return Ok("No previous vanilla launch session needed restoring.".to_string());
+        let (restored, skipped) = restore_orphaned_vanilla_temp_files()?;
+
+        if restored == 0 {
+            if skipped.is_empty() {
+                return Ok("No previous vanilla launch session needed restoring.".to_string());
+            }
+
+            return Ok(format!("No previous vanilla launch session needed restoring. {}", skipped.join(" | ")));
+        }
+
+        let mut message = format!("Restored orphaned vanilla temp folders on startup/manual repair: {} item(s).", restored);
+        if !skipped.is_empty() {
+            message.push_str(&format!(" Notes: {}", skipped.join(" | ")));
+        }
+        return Ok(message);
     };
 
     let mut restored_temp = 0usize;
@@ -434,16 +480,8 @@ fn restore_mods_after_vanilla_launch() -> Result<String, String> {
             continue;
         }
 
-        if destination.exists() && destination.is_file() {
-            if let Ok(holding_root) = uninstalled_dir().map(|root| root.join(format!("vanilla_restore_conflict_{}", current_timestamp()))) {
-                if let Some(moved) = move_path_to_uninstalled(&destination, &holding_root)? {
-                    skipped.push(format!("Moved existing restore conflict to {}", moved));
-                }
-            }
-        }
-
-        match move_file_to_target(&source_path, &destination) {
-            Ok(_) => restored_temp += 1,
+        match restore_path_merge(&source_path, &destination, &mut skipped) {
+            Ok(count) => restored_temp += count,
             Err(error) => skipped.push(error),
         }
     }
@@ -480,6 +518,184 @@ fn restore_mods_after_vanilla_launch() -> Result<String, String> {
     }
 
     Ok(message)
+}
+
+
+fn restore_path_merge(source: &Path, destination: &Path, skipped: &mut Vec<String>) -> Result<usize, String> {
+    if !source.exists() {
+        return Ok(0);
+    }
+
+    if source.is_dir() {
+        fs::create_dir_all(destination)
+            .map_err(|err| format!("Failed to create restore folder {}: {}", destination.display(), err))?;
+
+        let mut restored = 0usize;
+        let entries = fs::read_dir(source)
+            .map_err(|err| format!("Failed to read vanilla temp folder {}: {}", source.display(), err))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("Failed to read vanilla temp entry: {}", err))?;
+            let child_source = entry.path();
+            let child_destination = destination.join(entry.file_name());
+            restored += restore_path_merge(&child_source, &child_destination, skipped)?;
+        }
+
+        let _ = fs::remove_dir(source);
+        return Ok(restored);
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create restore parent {}: {}", parent.display(), err))?;
+    }
+
+    if destination.exists() {
+        let holding_root = uninstalled_dir()?.join(format!("vanilla_restore_conflict_{}", current_timestamp()));
+        fs::create_dir_all(&holding_root)
+            .map_err(|err| format!("Failed to create restore conflict folder {}: {}", holding_root.display(), err))?;
+
+        let fallback_name = destination
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("unknown_restore_conflict"));
+        let conflict_destination = unique_destination_path(&holding_root.join(fallback_name));
+
+        move_path_to_target(destination, &conflict_destination).map_err(|err| {
+            format!(
+                "Could not move existing restore conflict {} out of the way before restoring {}: {}",
+                destination.display(),
+                source.display(),
+                err
+            )
+        })?;
+
+        skipped.push(format!("Moved existing restore conflict to {}", conflict_destination.display()));
+    }
+
+    move_path_to_target(source, destination)?;
+    Ok(1)
+}
+
+fn restore_temp_children_to(source_root: &Path, destination_root: &Path, skipped: &mut Vec<String>) -> Result<usize, String> {
+    if !source_root.exists() {
+        return Ok(0);
+    }
+
+    let entries = fs::read_dir(source_root)
+        .map_err(|err| format!("Failed to read vanilla temp folder {}: {}", source_root.display(), err))?;
+    let mut restored = 0usize;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Failed to read vanilla temp entry: {}", err))?;
+        let source = entry.path();
+        let destination = destination_root.join(entry.file_name());
+        restored += restore_path_merge(&source, &destination, skipped)?;
+    }
+
+    let _ = fs::remove_dir(source_root);
+    Ok(restored)
+}
+
+
+fn restore_pak_temp_tree(source_root: &Path, pak_mods_root: &Path, skipped: &mut Vec<String>) -> Result<usize, String> {
+    if !source_root.exists() {
+        return Ok(0);
+    }
+
+    let mut restored = 0usize;
+    let entries = fs::read_dir(source_root)
+        .map_err(|err| format!("Failed to read vanilla PAK temp folder {}: {}", source_root.display(), err))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Failed to read vanilla PAK temp entry: {}", err))?;
+        let source = entry.path();
+
+        if source.is_dir() {
+            restored += restore_pak_temp_tree(&source, pak_mods_root, skipped)?;
+            let _ = fs::remove_dir(&source);
+            continue;
+        }
+
+        let Some(file_name) = source.file_name().map(PathBuf::from) else { continue; };
+        let lower = file_name.to_string_lossy().to_lowercase();
+
+        if !(lower.ends_with(".pak") || lower.ends_with(".ucas") || lower.ends_with(".utoc") || lower.ends_with(".sig")) {
+            skipped.push(format!("Skipped non-PAK vanilla temp file {}", source.display()));
+            continue;
+        }
+
+        restored += restore_path_merge(&source, &pak_mods_root.join(file_name), skipped)?;
+    }
+
+    let _ = fs::remove_dir(source_root);
+    Ok(restored)
+}
+
+fn restore_orphaned_vanilla_temp_files() -> Result<(usize, Vec<String>), String> {
+    if payday_process_running() {
+        return Ok((0, vec!["PAYDAY 3 is still running, so startup restore skipped to avoid changing files while the game is open.".to_string()]));
+    }
+
+    let Some(paths) = detect_payday3_paths_internal() else {
+        return Ok((0, vec!["PAYDAY 3 path was not detected, so no orphaned vanilla temp folders could be checked.".to_string()]));
+    };
+
+    let mut restored = 0usize;
+    let mut skipped = Vec::new();
+
+    let pak_temp_roots = [
+        vanilla_pak_temp_root(&paths),
+        legacy_vanilla_pak_temp_root(&paths),
+    ];
+
+    // PAK temp files always belong back in Content/Paks/~mods. Check both the new safe AppData
+    // temp root and the legacy ~mods/.tsuki-vanilla-temp root so older test builds never strand PAKs.
+    for pak_temp in pak_temp_roots {
+        restored += restore_pak_temp_tree(&pak_temp, &paths.pak_mods, &mut skipped)?;
+    }
+
+    let win64_temp_roots = [
+        vanilla_temp_root(&paths),
+        legacy_vanilla_temp_root(&paths),
+    ];
+
+    // Win64 temp has named buckets. Merge children back instead of replacing existing folders.
+    for win64_temp in win64_temp_roots {
+        if win64_temp.exists() {
+            let entries = fs::read_dir(&win64_temp)
+                .map_err(|err| format!("Failed to read vanilla temp folder {}: {}", win64_temp.display(), err))?;
+
+            for entry in entries {
+                let entry = entry.map_err(|err| format!("Failed to read vanilla temp entry: {}", err))?;
+                let source = entry.path();
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+
+                let destination_root = if name == "runtime loaders" {
+                    paths.win64.clone()
+                } else if name == "ue4ss mods" {
+                    paths.ue4ss_mods.clone()
+                } else {
+                    // Receipt temp folders store paths relative to Win64, for example Mods/SomeUE4SSMod.
+                    paths.win64.clone()
+                };
+
+                if source.is_dir() {
+                    restored += restore_temp_children_to(&source, &destination_root, &mut skipped)?;
+                } else {
+                    restored += restore_path_merge(&source, &destination_root.join(entry.file_name()), &mut skipped)?;
+                }
+            }
+
+            let _ = fs::remove_dir(&win64_temp);
+        }
+    }
+
+    if restored > 0 {
+        let _ = sync_installed_state_database();
+    }
+
+    Ok((restored, skipped))
 }
 
 #[tauri::command]
@@ -1860,11 +2076,29 @@ fn disabled_manifest_path(paths: &PaydayPaths, receipt: &InstallReceipt) -> Path
     primary
 }
 
+fn vanilla_temp_base_root(paths: &PaydayPaths) -> PathBuf {
+    // Never store hidden vanilla files inside PAYDAY3/Content/Paks or ~mods.
+    // Unreal still discovers PAK files inside nested folders like ~mods/.tsuki-vanilla-temp,
+    // which causes "Pak master signature table check failed" crashes on vanilla launch.
+    match ensure_app_data_dirs() {
+        Ok(root) => root.join("vanilla-temp"),
+        Err(_) => paths.game_root.join(".tsuki-vanilla-temp-outside-paks"),
+    }
+}
+
 fn vanilla_temp_root(paths: &PaydayPaths) -> PathBuf {
-    paths.win64.join(".tsuki-vanilla-temp")
+    vanilla_temp_base_root(paths).join("win64")
 }
 
 fn vanilla_pak_temp_root(paths: &PaydayPaths) -> PathBuf {
+    vanilla_temp_base_root(paths).join("paks")
+}
+
+fn legacy_vanilla_temp_root(paths: &PaydayPaths) -> PathBuf {
+    paths.win64.join(".tsuki-vanilla-temp")
+}
+
+fn legacy_vanilla_pak_temp_root(paths: &PaydayPaths) -> PathBuf {
     paths.pak_mods.join(".tsuki-vanilla-temp")
 }
 
@@ -1967,6 +2201,209 @@ fn move_file_to_target(source: &Path, destination: &Path) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+
+fn move_path_to_target(source: &Path, destination: &Path) -> Result<(), String> {
+    if source.is_file() {
+        return move_file_to_target(source, destination);
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create folder {}: {}", parent.display(), err))?;
+    }
+
+    if destination.exists() {
+        if destination.is_dir() {
+            fs::remove_dir_all(destination)
+                .map_err(|err| format!("Failed to clear existing folder {}: {}", destination.display(), err))?;
+        } else {
+            fs::remove_file(destination)
+                .map_err(|err| format!("Failed to clear existing file {}: {}", destination.display(), err))?;
+        }
+    }
+
+    fs::rename(source, destination)
+        .map_err(|err| format!("Failed to move {} to {}: {}", source.display(), destination.display(), err))
+}
+
+fn vanilla_runtime_loader_names() -> &'static [&'static str] {
+    &[
+        "xinput1_3.dll",
+        "UE4SS.dll",
+        "ue4ss.dll",
+        "UE4SS-settings.ini",
+        "ue4ss-settings.ini",
+        "mods.txt",
+        "winmm.dll",
+        "dinput8.dll",
+        "dsound.dll",
+        "d3d11.dll",
+        "dxgi.dll",
+    ]
+}
+
+fn track_vanilla_temp_move(
+    source: &Path,
+    destination: &Path,
+    temp_files: &mut Vec<DisabledInstallFileRecord>,
+    move_errors: &mut Vec<String>,
+) -> bool {
+    if !source.exists() {
+        return false;
+    }
+
+    match move_path_to_target(source, destination) {
+        Ok(_) => {
+            temp_files.push(DisabledInstallFileRecord {
+                original_path: source.display().to_string(),
+                disabled_path: destination.display().to_string(),
+            });
+            true
+        }
+        Err(error) => {
+            move_errors.push(error);
+            false
+        }
+    }
+}
+
+fn disable_vanilla_runtime_surfaces(
+    paths: &PaydayPaths,
+    temp_files: &mut Vec<DisabledInstallFileRecord>,
+    move_errors: &mut Vec<String>,
+) -> usize {
+    let mut moved = 0usize;
+
+    // True vanilla means UE4SS/ReShade/proxy loader files in Win64 must be gone too.
+    for name in vanilla_runtime_loader_names() {
+        let original = paths.win64.join(name);
+        if !original.exists() || !original.is_file() {
+            continue;
+        }
+
+        let temp_path = vanilla_temp_root(paths)
+            .join("Runtime Loaders")
+            .join(name);
+
+        if track_vanilla_temp_move(&original, &temp_path, temp_files, move_errors) {
+            moved += 1;
+        }
+    }
+
+    // UE4SS loads everything under Binaries/Win64/Mods. Move the children, not the Mods folder itself.
+    if paths.ue4ss_mods.exists() && paths.ue4ss_mods.is_dir() {
+        match fs::read_dir(&paths.ue4ss_mods) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let original = entry.path();
+                    let Some(name) = original.file_name().map(PathBuf::from) else { continue; };
+                    let temp_path = vanilla_temp_root(paths)
+                        .join("UE4SS Mods")
+                        .join(name);
+
+                    if track_vanilla_temp_move(&original, &temp_path, temp_files, move_errors) {
+                        moved += 1;
+                    }
+                }
+            }
+            Err(error) => move_errors.push(format!(
+                "Failed to inspect UE4SS Mods folder {}: {}",
+                paths.ue4ss_mods.display(),
+                error
+            )),
+        }
+    }
+
+    moved
+}
+
+fn active_ue4ss_mod_surface_count(paths: &PaydayPaths) -> usize {
+    if !paths.ue4ss_mods.exists() || !paths.ue4ss_mods.is_dir() {
+        return 0;
+    }
+
+    fs::read_dir(&paths.ue4ss_mods)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0)
+}
+
+fn active_runtime_loader_files(paths: &PaydayPaths) -> Vec<String> {
+    vanilla_runtime_loader_names()
+        .iter()
+        .filter_map(|name| {
+            let path = paths.win64.join(name);
+            if path.exists() && path.is_file() {
+                Some((*name).to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn collect_pak_family_files_under(root: &Path, limit: usize) -> Vec<String> {
+    let mut found = Vec::new();
+
+    fn visit(path: &Path, found: &mut Vec<String>, limit: usize) {
+        if found.len() >= limit || !path.exists() {
+            return;
+        }
+
+        if path.is_file() {
+            let lower = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            if lower.ends_with(".pak") || lower.ends_with(".ucas") || lower.ends_with(".utoc") || lower.ends_with(".sig") {
+                found.push(path.display().to_string());
+            }
+            return;
+        }
+
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                visit(&entry.path(), found, limit);
+                if found.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    visit(root, &mut found, limit);
+    found
+}
+
+fn verify_vanilla_mod_surfaces_clean(paths: &PaydayPaths) -> Result<String, String> {
+    let scan = scan_pak_mods_internal()?;
+    let enabled_paks = scan
+        .pak_mods
+        .iter()
+        .filter(|file| file.enabled)
+        .map(|file| file.file_name.clone())
+        .collect::<Vec<_>>();
+
+    let runtime_loaders = active_runtime_loader_files(paths);
+    let ue4ss_items = active_ue4ss_mod_surface_count(paths);
+    let legacy_temp_paks = collect_pak_family_files_under(&legacy_vanilla_pak_temp_root(paths), 12);
+    let legacy_temp_win64_paks = collect_pak_family_files_under(&legacy_vanilla_temp_root(paths), 12);
+
+    if !enabled_paks.is_empty() || !runtime_loaders.is_empty() || ue4ss_items > 0 || !legacy_temp_paks.is_empty() || !legacy_temp_win64_paks.is_empty() {
+        return Err(format!(
+            "Vanilla launch blocked because mod surfaces are still active or still inside a game-scanned temp folder. Enabled PAK files: {}. Runtime loaders: {}. UE4SS Mods folder items: {}. Old ~mods temp PAKs: {}. Old Win64 temp PAKs: {}. Press Restore Mods, close anything locking the files, then try again.",
+            if enabled_paks.is_empty() { "none".to_string() } else { enabled_paks.into_iter().take(12).collect::<Vec<_>>().join(", ") },
+            if runtime_loaders.is_empty() { "none".to_string() } else { runtime_loaders.join(", ") },
+            ue4ss_items,
+            if legacy_temp_paks.is_empty() { "none".to_string() } else { legacy_temp_paks.join(", ") },
+            if legacy_temp_win64_paks.is_empty() { "none".to_string() } else { legacy_temp_win64_paks.join(", ") }
+        ));
+    }
+
+    Ok("Vanilla clean check passed: no enabled ~mods files, no UE4SS Mods children, no known Win64 loader files, and no old PAK files inside game-scanned temp folders remained active.".to_string())
 }
 
 fn vanilla_session_contains_original(original_path: &Path) -> bool {
@@ -3272,18 +3709,56 @@ fn launch_steam_payday3_modded() -> Result<String, String> {
     Ok("Asked Steam to launch PAYDAY 3. Modded launch uses the saved Steam Launch Options instead of a one-time custom argument prompt.".to_string())
 }
 
+fn launch_payday3_vanilla_direct(paths: &PaydayPaths) -> Result<String, String> {
+    let candidates = payday_exe_candidates(paths);
+    let mut checked = Vec::new();
+
+    for exe in candidates {
+        checked.push(exe.display().to_string());
+
+        if !exe.exists() || !exe.is_file() {
+            continue;
+        }
+
+        let working_dir = exe
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.win64.clone());
+
+        Command::new(&exe)
+            .current_dir(&working_dir)
+            .spawn()
+            .map_err(|err| format!("Failed to launch PAYDAY 3 vanilla executable {}: {}", exe.display(), err))?;
+
+        return Ok(format!(
+            "Launched PAYDAY 3 directly from {} for vanilla mode. This avoids Steam Launch Options like -fileopenlog.",
+            exe.display()
+        ));
+    }
+
+    Err(format!(
+        "Could not find a PAYDAY 3 executable for direct vanilla launch. Checked: {}",
+        checked.join(" | ")
+    ))
+}
+
 #[cfg(target_os = "windows")]
 fn payday_process_running() -> bool {
-    let output = Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq PAYDAY3Client-Win64-Shipping.exe", "/FO", "CSV", "/NH"])
-        .output();
-
-    let Ok(output) = output else {
-        return false;
+    let output = match Command::new("tasklist").output() {
+        Ok(output) => output,
+        Err(_) => return false,
     };
 
     let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    text.contains("payday3client-win64-shipping.exe")
+    [
+        "payday3client-win64-shipping.exe",
+        "payday3-win64-shipping.exe",
+        "payday3_win64_shipping.exe",
+        "payday3client.exe",
+        "payday3.exe",
+    ]
+    .iter()
+    .any(|name| text.contains(name))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -3293,38 +3768,31 @@ fn payday_process_running() -> bool {
 
 fn start_vanilla_restore_watcher() {
     std::thread::spawn(|| {
-        // Give Steam time to start the game.
+        // Release v1.8.1: faster restore watcher with a shorter no-process fallback window.
+        // If PAYDAY 3 closes/crashes, restore shortly after the process disappears.
+        // If the process never appears, give it a short launch window and then restore.
         let mut saw_game = false;
 
-        for _ in 0..240 {
+        for _ in 0..24 {
             if payday_process_running() {
                 saw_game = true;
                 break;
             }
 
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
 
         if saw_game {
-            let mut not_running_ticks = 0u8;
-
             loop {
-                if payday_process_running() {
-                    not_running_ticks = 0;
-                } else {
-                    not_running_ticks = not_running_ticks.saturating_add(1);
-                }
-
-                // Avoid restoring during a tiny crash/restart gap. Require about 15 seconds closed.
-                if not_running_ticks >= 3 {
+                if !payday_process_running() {
+                    // Crash/close recovery: restore on the first confirmed missing process tick.
                     break;
                 }
 
-                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
         }
 
-        // If the game never appears, restore anyway so the user is not stuck with disabled mods.
         let _ = restore_mods_after_vanilla_launch();
     });
 }
@@ -3340,11 +3808,17 @@ fn payday_exe_candidates(paths: &PaydayPaths) -> Vec<PathBuf> {
 }
 
 fn launch_payday3_with_mode(modded: bool) -> Result<String, String> {
+    let _launch_guard = acquire_launch_guard()?;
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?;
 
     if modded {
-        let restore_message = restore_mods_after_vanilla_launch()?;
+        let restore_message = if read_vanilla_launch_session().is_some() {
+            restore_mods_after_vanilla_launch()?
+        } else {
+            "No pending vanilla temp session needed restoring.".to_string()
+        };
         let options_message = ensure_steam_payday3_fileopenlog_launch_option(&paths)?;
         let launch_message = launch_steam_payday3_modded()?;
 
@@ -3356,19 +3830,47 @@ fn launch_payday3_with_mode(modded: bool) -> Result<String, String> {
         ));
     }
 
+    // Always restore any old crashed vanilla session before preparing a fresh one.
+    let pre_restore_message = if read_vanilla_launch_session().is_some() {
+        restore_mods_after_vanilla_launch()?
+    } else {
+        "No stale vanilla temp session found.".to_string()
+    };
+
     let disable_message = disable_mods_for_vanilla_launch()?;
-    let options_message = ensure_steam_payday3_vanilla_launch_option(&paths)?;
-    let launch_message = launch_steam_payday3()?;
+    let clean_check_message = verify_vanilla_mod_surfaces_clean(&paths)?;
+
+    // Try to clear Steam's saved -fileopenlog, but do not strand the user if Steam keeps stale
+    // launch options in memory. Vanilla launches the game executable directly so no custom
+    // Steam arguments are injected into this run.
+    let options_message = match ensure_steam_payday3_vanilla_launch_option(&paths) {
+        Ok(message) => message,
+        Err(error) => format!("Warning: could not fully clear/verify Steam Launch Options before direct vanilla launch: {}", error),
+    };
+
+    let launch_message = match launch_payday3_vanilla_direct(&paths) {
+        Ok(message) => message,
+        Err(direct_error) => {
+            let steam_message = launch_steam_payday3()?;
+            format!(
+                "Direct vanilla executable launch failed: {}. Fell back to Steam launch: {}",
+                direct_error,
+                steam_message
+            )
+        }
+    };
+
     start_vanilla_restore_watcher();
 
     Ok(format!(
-        "{} {} {} Vanilla launch disables active Tsuki mods first, launches through Steam, then automatically restores those mods after PAYDAY 3 closes.",
+        "{} {} {} {} {} Vanilla launch temporarily moves active Tsuki mods fully outside the game-scanned Paks/Win64 folders first, launches without one-time -fileopenlog arguments when direct launch is available, then restores those mods after PAYDAY 3 closes/crashes.",
+        pre_restore_message,
         disable_message,
+        clean_check_message,
         options_message,
         launch_message
     ))
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3400,13 +3902,8 @@ struct AppUpdateStatus {
 }
 
 fn app_update_manifest_url_from_settings() -> Option<String> {
-    load_settings_internal()
-        .app_update_manifest_url
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            let value = DEFAULT_APP_UPDATE_MANIFEST_URL.trim();
-            if value.is_empty() { None } else { Some(value.to_string()) }
-        })
+    let value = DEFAULT_APP_UPDATE_MANIFEST_URL.trim();
+    if value.is_empty() { None } else { Some(value.to_string()) }
 }
 
 fn extract_version_numbers(value: &str) -> Vec<u64> {
@@ -3510,7 +4007,7 @@ fn check_app_update_internal(manifest_url_override: Option<String>) -> Result<Ap
     let manifest_url = manifest_url_override
         .filter(|value| !value.trim().is_empty())
         .or_else(app_update_manifest_url_from_settings)
-        .ok_or_else(|| "No app update manifest URL configured. Set one in Settings -> App Update.".to_string())?;
+        .ok_or_else(|| "No built-in app update manifest URL is configured.".to_string())?;
 
     if !manifest_url.starts_with("https://") && !manifest_url.starts_with("http://") {
         return Err("Update manifest URL must be http(s). HTTPS is recommended.".to_string());
@@ -4087,6 +4584,103 @@ fn inspect_pak_backup(file_name: String) -> Result<PakBackupInspectResult, Strin
 }
 
 #[tauri::command]
+fn restore_pak_backup(file_name: String) -> Result<String, String> {
+    let backup = backup_info_for_file(&file_name)?;
+    let paths = detect_payday3_paths_internal()
+        .ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?;
+
+    fs::create_dir_all(&paths.pak_mods)
+        .map_err(|err| format!("Failed to create pak mods folder {}: {}", paths.pak_mods.display(), err))?;
+
+    let backup_file = File::open(&backup.full_path)
+        .map_err(|err| format!("Failed to open backup zip: {}", err))?;
+
+    let mut archive = ZipArchive::new(backup_file)
+        .map_err(|err| format!("Failed to read backup zip: {}", err))?;
+
+    let holding_root = uninstalled_dir()?.join(format!("backup_restore_conflict_{}", current_timestamp()));
+    let mut restored = 0usize;
+    let mut moved_conflicts = 0usize;
+    let mut notes = Vec::new();
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("Failed to read backup zip entry: {}", err))?;
+
+        if entry.is_dir() {
+            continue;
+        }
+
+        let zip_path = entry.name().replace('\\', "/");
+        let file_name = Path::new(&zip_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        if file_name.trim().is_empty()
+            || file_name.contains("..")
+            || file_name.contains('/')
+            || file_name.contains('\\')
+        {
+            notes.push(format!("Skipped unsafe backup entry {}", zip_path));
+            continue;
+        }
+
+        let extension = Path::new(&file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if extension != "pak" && extension != "ucas" && extension != "utoc" {
+            continue;
+        }
+
+        let destination = paths.pak_mods.join(&file_name);
+
+        if destination.exists() && destination.is_file() {
+            if let Some(moved) = move_path_to_uninstalled(&destination, &holding_root)? {
+                moved_conflicts += 1;
+                notes.push(format!("Moved existing {} to {}", file_name, moved));
+            }
+        }
+
+        let mut output = File::create(&destination)
+            .map_err(|err| format!("Failed to restore {}: {}", destination.display(), err))?;
+
+        io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("Failed to write {}: {}", destination.display(), err))?;
+
+        output
+            .flush()
+            .map_err(|err| format!("Failed to flush {}: {}", destination.display(), err))?;
+
+        restored += 1;
+    }
+
+    if restored == 0 {
+        return Err(format!("Backup '{}' did not contain any .pak/.ucas/.utoc files to restore.", backup.file_name));
+    }
+
+    let _ = sync_installed_state_database();
+
+    let mut message = format!(
+        "Restored {} PAK-family file(s) from backup '{}'. Moved {} conflicting current file(s) to Tsuki's uninstalled/conflict folder.",
+        restored,
+        backup.file_name,
+        moved_conflicts
+    );
+
+    if !notes.is_empty() {
+        message.push_str(&format!(" Notes: {}", notes.into_iter().take(8).collect::<Vec<_>>().join(" | ")));
+    }
+
+    Ok(message)
+}
+
+#[tauri::command]
 fn delete_pak_backup(file_name: String) -> Result<String, String> {
     let backup_root = backups_dir()?;
     let candidate = backup_root.join(&file_name);
@@ -4304,7 +4898,7 @@ Recent Logs:\n\
         modworkshop_key_saved = settings.modworkshop_api_key.as_ref().map(|key| !key.is_empty()).unwrap_or(false),
         nexus_key_saved = settings.nexus_api_key.as_ref().map(|key| !key.is_empty()).unwrap_or(false),
         show_age_restricted_nexus = settings.show_age_restricted_nexus,
-        app_update_manifest_url = settings.app_update_manifest_url.as_deref().unwrap_or("not set"),
+        app_update_manifest_url = format!("built-in {}", DEFAULT_APP_UPDATE_MANIFEST_URL),
         logs = app_root.join("logs").display(),
         backups_folder = app_root.join("backups").display(),
         backup_count = backup_count,
@@ -7012,6 +7606,60 @@ fn is_likely_source_download_file(file: &SourceFileItem) -> bool {
     .any(|extension| combined.ends_with(extension))
 }
 
+fn looks_like_external_mod_manager_download(
+    source: &str,
+    mod_name: &str,
+    file_name: &str,
+    description: &str,
+    download_url: Option<&str>,
+) -> bool {
+    let combined = format!(
+        "{} {} {} {} {}",
+        source,
+        mod_name,
+        file_name,
+        description,
+        download_url.unwrap_or("")
+    )
+    .to_lowercase();
+
+    let manager_markers = [
+        "mod manager",
+        "modmanager",
+        "mod-manager",
+        "payday 3 mod manager",
+        "payday3 mod manager",
+        "pd3 mod manager",
+        "moolah mod manager",
+        "moolah",
+        "tsuki mod manager",
+        "tsukimodmanager",
+        "vortex",
+        "mod organizer",
+        "modorganizer",
+        "mod organizer 2",
+        "mo2",
+        "r2modman",
+        "gale mod manager",
+        "thunderstore mod manager",
+        "frosty mod manager",
+        "fluffy mod manager",
+        "fluffy manager",
+        "vortex installer",
+        "mod manager installer",
+        "manager setup",
+        "setup wizard",
+        "installer",
+    ];
+
+    if manager_markers.iter().any(|marker| combined.contains(marker)) {
+        return true;
+    }
+
+    let lower_file = file_name.to_lowercase();
+    lower_file.ends_with(".exe") || lower_file.ends_with(".msi") || lower_file.ends_with(".appinstaller") || lower_file.ends_with(".msix") || lower_file.ends_with(".bat") || lower_file.ends_with(".cmd")
+}
+
 fn filter_source_download_files(files: Vec<SourceFileItem>) -> Vec<SourceFileItem> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -8854,9 +9502,53 @@ fn ensure_steam_payday3_fileopenlog_launch_option(paths: &PaydayPaths) -> Result
     ensure_steam_payday3_launch_option(paths, "-fileopenlog")
 }
 
-fn ensure_steam_payday3_vanilla_launch_option(paths: &PaydayPaths) -> Result<String, String> {
-    ensure_steam_payday3_launch_option(paths, "")
+fn steam_payday3_launch_options_contain(paths: &PaydayPaths, needle: &str) -> Result<bool, String> {
+    let needle = needle.to_lowercase();
+
+    for steam_root in steam_root_candidates(paths) {
+        let userdata = steam_root.join("userdata");
+        if !userdata.exists() {
+            continue;
+        }
+
+        let entries = fs::read_dir(&userdata)
+            .map_err(|err| format!("Failed to read Steam userdata folder {}: {}", userdata.display(), err))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| format!("Failed to read Steam userdata entry: {}", err))?;
+            let localconfig = entry.path().join("config").join("localconfig.vdf");
+            if !localconfig.exists() {
+                continue;
+            }
+
+            let contents = fs::read_to_string(&localconfig)
+                .map_err(|err| format!("Failed to read {}: {}", localconfig.display(), err))?;
+
+            if let Some((_key_pos, open_pos, close_pos)) = find_vdf_block_range(&contents, "1272080", 0) {
+                let block = contents[open_pos..=close_pos].to_lowercase();
+                if block.contains(&needle) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
 }
+
+fn ensure_steam_payday3_vanilla_launch_option(paths: &PaydayPaths) -> Result<String, String> {
+    let message = ensure_steam_payday3_launch_option(paths, "")?;
+
+    if steam_payday3_launch_options_contain(paths, "-fileopenlog")? {
+        return Ok(format!(
+            "{} Steam localconfig still appears to mention -fileopenlog, so Tsuki will use direct vanilla executable launch to avoid passing Steam launch options.",
+            message
+        ));
+    }
+
+    Ok(format!("{} Confirmed PAYDAY 3 Steam launch options do not contain -fileopenlog.", message))
+}
+
 
 
 fn relaunch_current_exe_as_admin_internal() -> Result<(), String> {
@@ -10318,6 +11010,10 @@ async fn stage_source_file_download(
     tauri::async_runtime::spawn_blocking(move || {
         if is_image_or_page_asset_name(&file_name) || download_url.as_deref().map(is_image_or_page_asset_name).unwrap_or(false) {
             return Err("That item is a page image/thumbnail, not a downloadable mod file. Refresh this mod page with v0.59 so Tsuki can use the real Files endpoint.".to_string());
+        }
+
+        if looks_like_external_mod_manager_download(&source, &mod_name, &file_name, &description, download_url.as_deref()) {
+            return Err("Blocked external mod manager download. Tsuki does not download/install other mod managers; open that page manually if you intentionally need it.".to_string());
         }
 
         if source.eq_ignore_ascii_case("modworkshop")
@@ -13445,6 +14141,11 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+        // v1.8.2: restore any crashed vanilla temp session when Tsuki starts and PAYDAY 3 is not running.
+            if read_vanilla_launch_session().is_some() && !payday_process_running() {
+                let _ = restore_mods_after_vanilla_launch();
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -13541,6 +14242,7 @@ pub fn run() {
             list_pak_backups,
             open_backup_file,
             inspect_pak_backup,
+            restore_pak_backup,
             get_backup_status,
             create_pak_backup,
             delete_pak_backup

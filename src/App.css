@@ -2446,3 +2446,261 @@ html[data-theme="basic-light"] .settings-section-card {
     display: none !important;
   }
 }
+
+
+
+
+.debug-window-shell {
+  min-height: 100vh;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(136, 93, 255, 0.34), transparent 34%),
+    radial-gradient(circle at 92% 10%, rgba(88, 222, 204, 0.16), transparent 36%),
+    linear-gradient(135deg, #120d27, #050b19 64%, #030712);
+}
+
+.debug-window-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(4, 7, 22, 0.62);
+  backdrop-filter: blur(16px);
+  user-select: none;
+}
+
+.debug-window-header h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.debug-window-header p:not(.eyebrow) {
+  margin: 8px 0 0;
+  color: rgba(247, 242, 255, 0.68);
+}
+
+.debug-window-status {
+  display: inline-flex;
+  margin-top: 12px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(247, 242, 255, 0.72);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.debug-close-button,
+.debug-tool-grid button,
+.debug-tab-list button,
+.debug-output-head button {
+  border: 1px solid rgba(255,255,255,0.11);
+  border-radius: 12px;
+  color: #f7f2ff;
+  background: rgba(255,255,255,0.07);
+  cursor: pointer;
+  font-weight: 850;
+  transition: 120ms ease;
+}
+
+.debug-close-button:hover,
+.debug-tool-grid button:hover,
+.debug-tab-list button:hover,
+.debug-output-head button:hover {
+  border-color: rgba(150, 119, 255, 0.58);
+  background: rgba(150, 119, 255, 0.15);
+}
+
+.debug-close-button { padding: 10px 14px; }
+
+.debug-window-grid {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) minmax(330px, 0.95fr);
+  gap: 16px;
+  padding: 18px;
+  min-height: calc(100vh - 116px);
+}
+
+.debug-tab-list,
+.debug-tool-panel,
+.debug-output-panel {
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: 0 20px 70px rgba(0,0,0,0.22);
+}
+
+.debug-tab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  align-self: start;
+}
+
+.debug-tab-list button {
+  padding: 11px 12px;
+  text-align: left;
+}
+
+.debug-tab-list button.active {
+  border-color: rgba(141, 104, 255, 0.72);
+  background: rgba(141, 104, 255, 0.24);
+}
+
+.debug-tool-panel {
+  padding: 16px;
+  align-self: start;
+}
+
+.debug-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.debug-tool-grid button {
+  min-height: 48px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.debug-tool-grid button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
+.debug-output-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.debug-output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.debug-output-head button { padding: 8px 11px; }
+
+.debug-output-panel pre {
+  margin: 0;
+  padding: 14px;
+  flex: 1;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(247, 242, 255, 0.86);
+  font: 12px/1.5 "Cascadia Code", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (max-width: 980px) {
+  .debug-window-grid { grid-template-columns: 1fr; }
+  .debug-tab-list { flex-direction: row; flex-wrap: wrap; }
+}
+
+/* v1.8.1 debug window hardening: prevent white/black unstyled flashes in the separate debug window. */
+html, body, #root {
+  min-height: 100%;
+  background: #050b19;
+}
+
+.debug-window-shell {
+  background-color: #050b19;
+}
+
+
+/* v1.8.1 stable debug panel: separate Tauri debug windows were failing on some dev/build configs.
+   This panel is non-modal and only captures clicks inside itself, so the rest of Tsuki remains usable. */
+.debug-floating-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.debug-floating-panel {
+  position: absolute;
+  left: 18px;
+  top: 50px;
+  width: min(1160px, calc(100vw - 36px));
+  height: min(790px, calc(100vh - 70px));
+  min-width: min(620px, calc(100vw - 36px));
+  min-height: 420px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  resize: both;
+  pointer-events: auto;
+  color: var(--text);
+  border: 1px solid rgba(166, 126, 255, 0.34);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 8% 0%, rgba(136, 93, 255, 0.34), transparent 34%),
+    radial-gradient(circle at 92% 10%, rgba(88, 222, 204, 0.16), transparent 36%),
+    linear-gradient(135deg, rgba(18, 13, 39, 0.98), rgba(5, 11, 25, 0.98) 64%, rgba(3, 7, 18, 0.98));
+  box-shadow: 0 28px 110px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.debug-floating-panel .debug-window-header {
+  flex: 0 0 auto;
+  padding: 16px 18px;
+}
+
+.debug-floating-panel .debug-window-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  padding: 14px;
+  grid-template-columns: 160px minmax(0, 0.9fr) minmax(320px, 1.1fr);
+}
+
+.debug-floating-panel .debug-tab-list,
+.debug-floating-panel .debug-tool-panel,
+.debug-floating-panel .debug-output-panel {
+  min-height: 0;
+}
+
+.debug-floating-panel .debug-output-panel pre {
+  min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .debug-floating-panel {
+    left: 12px;
+    top: 46px;
+    width: calc(100vw - 24px);
+    min-width: 0;
+  }
+}
+
+
+.debug-floating-drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.debug-floating-drag-handle.dragging {
+  cursor: grabbing;
+}
+
+.debug-floating-drag-handle button,
+.debug-floating-drag-handle a,
+.debug-floating-drag-handle input,
+.debug-floating-drag-handle textarea,
+.debug-floating-drag-handle select {
+  cursor: auto;
+  user-select: auto;
+}

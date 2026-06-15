@@ -74,7 +74,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
   const [saveStatus, setSaveStatus] = useState("Settings loaded from AppData when available.");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("game");
   const [adminStatus, setAdminStatus] = useState("Admin state not checked yet.");
-  const [appUpdateManifestUrl, setAppUpdateManifestUrl] = useState("");
   const [appUpdateStatus, setAppUpdateStatus] = useState("App update check has not run yet.");
   const [appUpdateBusy, setAppUpdateBusy] = useState(false);
 
@@ -93,7 +92,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       setModworkshopApiKey(settings.modworkshopApiKey ?? "");
       setNexusApiKey(settings.nexusApiKey ?? "");
       setShowAgeRestrictedNexus(settings.showAgeRestrictedNexus ?? true);
-      setAppUpdateManifestUrl(settings.appUpdateManifestUrl ?? "");
       // Theme is loaded once by App. Do not re-apply it here or Settings can snap back when reopened.
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
@@ -313,18 +311,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     setSourceStatus("Copied Nexus API key.");
   }
 
-
-  async function saveAppUpdateManifestUrl() {
-    try {
-      const result = await invoke<string>("save_app_update_settings", { manifestUrl: appUpdateManifestUrl });
-      setAppUpdateStatus(result);
-      setSaveStatus(result);
-      await refreshDebugReport();
-    } catch (error) {
-      setAppUpdateStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   function formatAppUpdateStatus(result: AppUpdateStatus) {
     if (result.error) return result.error;
 
@@ -346,7 +332,7 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     setAppUpdateStatus("Checking app update manifest...");
 
     try {
-      const result = await invoke<AppUpdateStatus>("check_app_update", { manifestUrl: appUpdateManifestUrl || null });
+      const result = await invoke<AppUpdateStatus>("check_app_update", { manifestUrl: null });
       setAppUpdateStatus(formatAppUpdateStatus(result));
     } catch (error) {
       setAppUpdateStatus(error instanceof Error ? error.message : String(error));
@@ -361,7 +347,7 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     setAppUpdateStatus("Downloading latest Tsuki installer...");
 
     try {
-      const result = await invoke<string>("download_and_launch_app_update", { manifestUrl: appUpdateManifestUrl || null });
+      const result = await invoke<string>("download_and_launch_app_update", { manifestUrl: null });
       setAppUpdateStatus(result);
     } catch (error) {
       setAppUpdateStatus(error instanceof Error ? error.message : String(error));
@@ -600,25 +586,11 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
           an Update Available pill appears in the title bar.
         </p>
 
-        <div className="setting-block">
-          <label htmlFor="appUpdateManifestUrl">Public update manifest URL</label>
-          <input
-            id="appUpdateManifestUrl"
-            className="setting-input"
-            value={appUpdateManifestUrl}
-            onChange={(event) => setAppUpdateManifestUrl(event.target.value)}
-            placeholder="https://raw.githubusercontent.com/your-name/your-repo/main/latest.json"
-          />
-        </div>
-
         <p className="source-mini-note">
-          Recommended: host latest.json on GitHub Releases, a GitHub repo, or a public gist. The manifest can point to your latest Windows setup .exe.
+          Update checks use Tsuki's built-in GitHub latest.json URL. There is no editable update URL setting anymore.
         </p>
 
         <div className="button-row">
-          <button className="ghost-button" type="button" onClick={saveAppUpdateManifestUrl}>
-            Save Update URL
-          </button>
           <button className="ghost-button" type="button" onClick={checkAppUpdateFromSettings} disabled={appUpdateBusy}>
             {appUpdateBusy ? "Checking..." : "Check for Updates"}
           </button>

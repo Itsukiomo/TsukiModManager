@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { buildNexusBrowseKey, normalizeNexusId } from "../../sources/nexus/ids";
+import type { AppSettings } from "../../models/settings";
 import type {
   ModSourceKind,
   SourceModDetail,
@@ -445,6 +446,40 @@ function fileHasRouteHint(file: SourceModFile) {
   ].some((token) => text.includes(token));
 }
 
+
+function looksLikeExternalModManager(mod: SourceModDetail, file: SourceModFile) {
+  const text = [
+    mod.source,
+    mod.name,
+    mod.description,
+    file.name,
+    file.downloadUrl ?? "",
+    ...(mod.tags ?? []),
+  ].join(" ").toLowerCase();
+
+  const markers = [
+    "mod manager",
+    "modmanager",
+    "mod-manager",
+    "payday 3 mod manager",
+    "payday3 mod manager",
+    "pd3 mod manager",
+    "moolah mod manager",
+    "tsuki mod manager",
+    "vortex",
+    "mod organizer",
+    "modorganizer",
+    "mo2",
+    "r2modman",
+    "thunderstore mod manager",
+  ];
+
+  return markers.some((marker) => text.includes(marker))
+    || file.name.toLowerCase().endsWith(".exe")
+    || file.name.toLowerCase().endsWith(".msi")
+    || file.name.toLowerCase().endsWith(".appinstaller");
+}
+
 function filterModWorkshopFileChoices(files: SourceModFile[]) {
   const installable = newestFiles(files).filter(isInstallableSourceFile);
   const hasNamedRouteFile = installable.some((file) => !isGenericModWorkshopPlaceholder(file) && fileHasRouteHint(file));
@@ -534,6 +569,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
   const [failedImages, setFailedImages] = useState<Record<string, number>>(() => readThumbnailFailures());
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [cacheNote, setCacheNote] = useState("");
+  const [nexusApiKeySaved, setNexusApiKeySaved] = useState(false);
   const browseRequestSeqRef = useRef(0);
 
   const modworkshopCategories = useMemo(() => {
@@ -565,6 +601,14 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         );
       });
   }, [activeTab, categoryFilter, mods, searchQuery, sortMode]);
+
+
+
+  useEffect(() => {
+    invoke<AppSettings>("get_app_settings")
+      .then((settings) => setNexusApiKeySaved(Boolean(settings.nexusApiKey?.trim())))
+      .catch(() => setNexusApiKeySaved(false));
+  }, []);
 
   // v0.57: disabled automatic source-detail card enrichment.
   // It was fetching descriptions while scrolling and causing stutter/freezes.
@@ -801,6 +845,12 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     // After the early ModWorkshop return, this generic loader is Nexus-only.
     // Keeping old source === "modworkshop" checks here made TypeScript narrow
     // source to "nexus" and reject those dead branches during release build.
+    if (!nexusApiKeySaved) {
+      setStatus("Nexus browsing needs an API key. Add one in Settings → Sources.");
+      setHasMore((current) => ({ ...current, nexus: false }));
+      return;
+    }
+
     if (loadingSource && loadingSource !== source) return;
     if (!reset && !hasMore[source]) return;
 
@@ -978,6 +1028,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
   async function searchNexus() {
     const query = sourceSearchQuery.trim();
 
+    if (!nexusApiKeySaved) {
+      setStatus("Nexus search needs an API key. Add one in Settings → Sources.");
+      return;
+    }
+
     if (query.length < 2) {
       setStatus("Type at least 2 characters to search Nexus.");
       return;
@@ -1102,6 +1157,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
   async function stageFile(mod: SourceModDetail, file: SourceModFile, replaceFileNames: string[] = []) {
     if (mod.source === "modworkshop" && isGenericModWorkshopPlaceholder(file) && !fileHasRouteHint(file)) {
       setStatus(`Blocked ${file.name}. It is a generic ModWorkshop placeholder, not a safe named mod file.`);
+      return;
+    }
+
+    if (looksLikeExternalModManager(mod, file)) {
+      setStatus("Blocked external mod manager download. Tsuki only downloads PAYDAY 3 mods, not mod-manager installers.");
       return;
     }
 
@@ -1474,13 +1534,13 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
               onChange={(event) => setSourceSearchQuery(event.target.value)}
               placeholder={activeTab === "nexus" ? "Search Nexus Mods..." : "Search ModWorkshop..."}
             />
-            <button className="ghost-button" type="submit" disabled={sourceSearching}>
+            <button className="ghost-button" type="submit" disabled={sourceSearching || (activeTab === "nexus" && !nexusApiKeySaved)}>
               {sourceSearching ? "Searching..." : "Search"}
             </button>
           </form>
 
           {activeTab === "nexus" && (
-            <button className="ghost-button" type="button" onClick={() => {
+            <button className="ghost-button" type="button" disabled={!nexusApiKeySaved} onClick={() => {
               setSortMode("updated");
               setActiveNexusSearch("");
               void loadPage("nexus", true);
@@ -1501,6 +1561,16 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
           <strong>Loading {sourceLabel(activeTab)}</strong>
           <span>{cacheNote || status}</span>
           <small>Live request has a timeout. If it stalls, Tsuki will show indexed/cache fallback cards instead of spinning forever.</small>
+        </div>
+      )}
+
+
+
+      {activeTab === "nexus" && !nexusApiKeySaved && (
+        <div className="safe-result warning">
+          <strong>Nexus API key required</strong>
+          <span>Add a Nexus API key in Settings → Sources before browsing or searching Nexus Mods.</span>
+          <small>ModWorkshop browsing still works without a key.</small>
         </div>
       )}
 
@@ -1598,7 +1668,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
             </button>
           </>
         ) : (
-          <button className="ghost-button compact" type="button" onClick={() => loadPage(activeTab)} disabled={loadingSource !== null || !hasMore[activeTab]}>
+          <button className="ghost-button compact" type="button" onClick={() => loadPage(activeTab)} disabled={loadingSource !== null || !hasMore[activeTab] || (activeTab === "nexus" && !nexusApiKeySaved)}>
             {loadingSource === activeTab ? "Loading..." : hasMore[activeTab] ? "Load More" : "No More"}
           </button>
         )}
@@ -1608,7 +1678,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         <article className="card">
           <h2>No mods loaded</h2>
           <p>{status}</p>
-          <button className="ghost-button" type="button" onClick={() => activeTab === "modworkshop" ? loadModWorkshopLivePage(true, sortMode, 1) : loadPage(activeTab, true)}>Try loading again</button>
+          <button className="ghost-button" type="button" onClick={() => activeTab === "modworkshop" ? loadModWorkshopLivePage(true, sortMode, 1) : loadPage(activeTab, true)} disabled={activeTab === "nexus" && !nexusApiKeySaved}>Try loading again</button>
         </article>
       )}
 

@@ -222,3 +222,37 @@
     display: none;
   }
 }
+
+
+/* v1.9.1: true custom titlebar drag/no-drag regions */
+.window-titlebar,
+.window-titlebar [data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+.window-actions,
+.window-actions *,
+.window-launch-actions,
+.window-launch-actions *,
+.window-update-actions,
+.window-update-actions *,
+button,
+input,
+select,
+textarea {
+  -webkit-app-region: no-drag;
+}
+
+.window-logo-image {
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.window-launch-button:disabled,
+.window-update-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}

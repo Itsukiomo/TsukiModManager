@@ -1279,3 +1279,37 @@
   font-size: 0.82rem;
   white-space: nowrap;
 }
+
+
+/* v1.8.8 Browse card overflow fix: keep the three-dot menu above nearby cards instead of clipped/covered. */
+.safe-browse-page,
+.source-mod-grid.cleaner-grid,
+.source-mod-card.cleaner-card,
+.source-mod-body,
+.source-card-actions {
+  overflow: visible;
+}
+
+.source-mod-card.cleaner-card {
+  position: relative;
+  z-index: 1;
+}
+
+.source-mod-card.cleaner-card:has(.card-more-menu[open]) {
+  z-index: 1200;
+}
+
+.card-more-menu {
+  position: relative;
+  z-index: 20;
+}
+
+.card-more-menu[open] {
+  z-index: 1300;
+}
+
+.card-more-menu > div {
+  z-index: 1400;
+  max-height: min(360px, 70vh);
+  overflow-y: auto;
+}

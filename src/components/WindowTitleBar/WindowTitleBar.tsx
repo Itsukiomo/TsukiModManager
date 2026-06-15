@@ -1,5 +1,6 @@
 import "./WindowTitleBar.css";
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import type { AppPage } from "../../models/navigation";
 import tsukiLogo from "../../assets/tsuki-logo.png";
 
@@ -45,6 +46,7 @@ async function safeInvoke(command: string) {
 }
 
 export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdate, onInstallUpdate }: WindowTitleBarProps) {
+  const [launchBusy, setLaunchBusy] = useState(false);
   async function minimizeWindow() {
     await safeInvoke("window_minimize");
   }
@@ -58,11 +60,32 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
   }
 
   async function launchVanilla() {
-    await safeInvoke("launch_payday3_vanilla");
+    if (launchBusy) return;
+    setLaunchBusy(true);
+    try {
+      await safeInvoke("launch_payday3_vanilla");
+    } finally {
+      window.setTimeout(() => setLaunchBusy(false), 7000);
+    }
   }
 
   async function launchModded() {
-    await safeInvoke("launch_payday3_modded");
+    if (launchBusy) return;
+    setLaunchBusy(true);
+    try {
+      await safeInvoke("launch_payday3_modded");
+    } finally {
+      window.setTimeout(() => setLaunchBusy(false), 7000);
+    }
+  }
+
+  async function handleTitlebarMouseDown(event: React.MouseEvent<HTMLElement>) {
+    if (event.button !== 0) return;
+
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) return;
+
+    await safeInvoke("window_start_dragging");
   }
 
   async function handleTitlebarDoubleClick(event: React.MouseEvent<HTMLElement>) {
@@ -74,7 +97,7 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
   }
 
   return (
-    <header className="window-titlebar" data-tauri-drag-region onDoubleClick={handleTitlebarDoubleClick}>
+    <header className="window-titlebar" data-tauri-drag-region onMouseDown={handleTitlebarMouseDown} onDoubleClick={handleTitlebarDoubleClick}>
       <div className="window-brand" data-tauri-drag-region>
         <img className="window-logo-image" src={tsukiLogo} alt="" />
         <div>
@@ -100,10 +123,10 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
       </div>
 
       <div className="window-launch-actions">
-        <button type="button" className="window-launch-button" onClick={launchVanilla}>
-          Launch Vanilla
+        <button type="button" className="window-launch-button" onClick={launchVanilla} disabled={launchBusy}>
+          {launchBusy ? "Launching..." : "Launch Vanilla"}
         </button>
-        <button type="button" className="window-launch-button primary" onClick={launchModded}>
+        <button type="button" className="window-launch-button primary" onClick={launchModded} disabled={launchBusy}>
           Launch Modded
         </button>
       </div>

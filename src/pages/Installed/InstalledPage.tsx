@@ -2694,6 +2694,23 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
   }
 
+
+  async function restoreVanillaTempMods() {
+    setBusyKey("restore-vanilla-temp");
+    setStatus("Restoring mods from Tsuki vanilla temp folders...");
+
+    try {
+      const result = await invoke<string>("restore_mods_after_vanilla");
+      setStatus(result);
+      window.dispatchEvent(new CustomEvent("tsuki-data-refresh"));
+      await refreshInstalled();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   useEffect(() => {
     void refreshInstalled();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2812,6 +2829,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               </button>
               <button className="ghost-button compact" type="button" onClick={() => pairSource("nexus")} disabled={busyKey === "pair-nexus"}>
                 {busyKey === "pair-nexus" ? "Pairing..." : "Pair All Nexus"}
+              </button>
+              <button className="ghost-button compact" type="button" onClick={restoreVanillaTempMods} disabled={busyKey === "restore-vanilla-temp"}>
+                {busyKey === "restore-vanilla-temp" ? "Restoring..." : "Restore Mods"}
               </button>
               <button className="ghost-button compact" type="button" onClick={() => refreshInstalled()}>
                 Refresh Only
