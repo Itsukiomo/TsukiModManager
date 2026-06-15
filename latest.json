@@ -1,8 +1,8 @@
 {
-  "version": "1.0.7.27.3",
-  "notes": "Initial public updater release.",
-  "pubDate": "2026-06-14T00:00:00Z",
-  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/latest",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.0.7.27.3/Tsuki_Mod_Manager_v1.0.7.27.3_Setup.exe",
-  "sha256": ""
+  "version": "1.8.1",
+  "notes": "Vanilla launch safety fixes, AppData vanilla-temp restore, Browse polish, stable debug panel, and release cleanup.",
+  "pubDate": "2026-06-15T20:48:42Z",
+  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v1.8.1",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.8.1/TsukiModManager-1.8.1-Setup.exe",
+  "sha256": "0d7b73f71e97b4b674cabd7237fb38ddf5db0c483c8cecefa24195df34613ab9"
 }
