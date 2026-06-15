@@ -1,0 +1,224 @@
+.window-titlebar {
+  height: 44px;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(90deg, rgba(15, 10, 33, 0.96), rgba(8, 17, 42, 0.96)),
+    rgba(4, 6, 18, 0.96);
+  user-select: none;
+}
+
+.window-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 14px;
+}
+
+.window-logo {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(170, 145, 255, 0.38);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(142, 89, 255, 0.85), rgba(57, 155, 255, 0.65));
+  box-shadow: 0 0 20px rgba(142, 89, 255, 0.22);
+}
+
+.window-brand strong,
+.window-brand span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-brand strong {
+  font-size: 0.88rem;
+  letter-spacing: -0.01em;
+}
+
+.window-brand span,
+.window-titlebar-center {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.window-titlebar-center {
+  min-width: 0;
+  text-align: center;
+}
+
+.window-titlebar-center span {
+  display: inline-block;
+  max-width: 100%;
+  padding: 5px 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-actions {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+}
+
+.window-control {
+  width: 46px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.window-control:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.window-control.close:hover {
+  background: #e5484d;
+  color: white;
+}
+
+@media (max-width: 760px) {
+  .window-titlebar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .window-titlebar-center {
+    display: none;
+  }
+
+  .window-control {
+    width: 42px;
+  }
+}
+
+
+/* v0.46: backend-driven controls, keep buttons clickable */
+.window-titlebar {
+  cursor: default;
+}
+
+.window-brand,
+.window-brand *,
+.window-titlebar-center,
+.window-titlebar-center * {
+  pointer-events: none;
+}
+
+.window-actions,
+.window-actions * {
+  pointer-events: auto;
+}
+
+
+/* v0.59 launch buttons */
+.window-launch-actions {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-right: 10px;
+}
+
+.window-launch-button {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.055);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.window-launch-button:hover {
+  border-color: color-mix(in srgb, var(--accent-a) 55%, transparent);
+  background: rgba(255, 255, 255, 0.085);
+}
+
+.window-launch-button.primary {
+  border-color: color-mix(in srgb, var(--accent-a) 62%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-a) 28%, transparent), color-mix(in srgb, var(--accent-b) 15%, transparent));
+}
+
+@media (max-width: 980px) {
+  .window-launch-button {
+    max-width: 95px;
+    padding-inline: 9px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 720px) {
+  .window-launch-actions {
+    display: none;
+  }
+}
+
+
+/* v1.0.7.27 app update titlebar controls */
+.window-update-actions {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+  pointer-events: auto;
+}
+
+.window-update-actions * {
+  pointer-events: auto;
+}
+
+.window-update-button {
+  height: 30px;
+  max-width: 220px;
+  padding: 0 12px;
+  border: 1px solid rgba(129, 255, 193, 0.45);
+  border-radius: 999px;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 12% 20%, rgba(129, 255, 193, 0.18), transparent 40%),
+    rgba(129, 255, 193, 0.11);
+  cursor: pointer;
+  font-size: 0.77rem;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-update-button.subtle {
+  border-color: rgba(255, 255, 255, 0.075);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.035);
+  font-weight: 700;
+}
+
+.window-update-button:hover {
+  border-color: rgba(129, 255, 193, 0.72);
+  background: rgba(129, 255, 193, 0.16);
+}
+
+@media (max-width: 1160px) {
+  .window-update-actions {
+    display: none;
+  }
+}

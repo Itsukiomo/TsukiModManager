@@ -1,0 +1,92 @@
+.source-key-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.source-card-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.source-status-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.source-status-line span {
+  color: var(--muted);
+}
+
+.source-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.source-mini-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.receipt-preview-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.receipt-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+@media (max-width: 1100px) {
+  .source-key-grid,
+  .source-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.source-toggle-row {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--muted-strong);
+  line-height: 1.4;
+}
+
+.source-toggle-row input {
+  margin-top: 3px;
+}
+
+
+/* v1.0.7.27 app update settings */
+.debug-box.mini {
+  margin-top: 14px;
+  max-height: 240px;
+  white-space: pre-wrap;
+  font-size: 0.82rem;
+}

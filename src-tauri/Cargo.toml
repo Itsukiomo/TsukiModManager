@@ -1,0 +1,26 @@
+[package]
+name = "tsukimodmanagerapp"
+version = "0.1.0"
+description = "Tsuki Mod Manager"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "tsukimodmanagerapp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = "2"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
+
+# Built-in 7z extraction. RAR still uses external/bundled tools unless a safe pure-Rust option is added.
+sevenz-rust = "0.6.1"
+
+sha2 = "0.10"
