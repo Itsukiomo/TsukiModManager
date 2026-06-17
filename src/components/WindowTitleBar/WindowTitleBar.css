@@ -256,3 +256,26 @@ textarea {
   opacity: 0.55;
   transform: none;
 }
+
+/* v1.8.24: safe borderless titlebar. Only the brand/center strips drag.
+   Never make the full app or controls a drag region, because that can steal input. */
+.window-titlebar,
+.window-titlebar *,
+.window-actions,
+.window-actions *,
+.window-launch-actions,
+.window-launch-actions *,
+.window-update-actions,
+.window-update-actions *,
+.window-control,
+.window-launch-button,
+.window-update-button {
+  -webkit-app-region: no-drag !important;
+}
+
+.window-brand,
+.window-brand *,
+.window-titlebar-center,
+.window-titlebar-center * {
+  -webkit-app-region: drag !important;
+}

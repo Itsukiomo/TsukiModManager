@@ -38,6 +38,8 @@ export interface SourceModFile {
   sizeLabel?: string | null;
   uploadedAt?: string | null;
   downloadUrl?: string | null;
+  fileType?: string | null;
+  downloadCount?: number | null;
 }
 
 export interface SourceModImage {
@@ -56,6 +58,10 @@ export interface SourceModDetail extends SourceModSummary {
   bugs?: string[];
   logs: string[];
   stats: Array<{ label: string; value: string }>;
+  dataSource?: "live" | "cache" | "fallback";
+  detailDataSource?: "live" | "cache" | "fallback";
+  fileListDataSource?: "live" | "cache" | "fallback" | "unavailable";
+  cacheFallbackReason?: string | null;
 }
 
 
@@ -112,6 +118,11 @@ export interface InstalledSourceMatch {
   sourceUpdatedAt?: string | null;
   sourceUpdatedUnix?: number | null;
   matchKind: string;
+  sourceFileId?: string | null;
+  sourceFileName?: string | null;
+  sourceFileCategory?: string | null;
+  sourceFileUploadedAt?: string | null;
+  sourceFileVersion?: string | null;
 }
 
 

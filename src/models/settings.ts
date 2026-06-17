@@ -4,4 +4,6 @@ export interface AppSettings {
   modworkshopApiKey?: string | null;
   nexusApiKey?: string | null;
   showAgeRestrictedNexus?: boolean;
+  keepDownloadedArchives?: boolean;
+  keepUninstalledMods?: boolean;
 }

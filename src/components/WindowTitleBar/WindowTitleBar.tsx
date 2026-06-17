@@ -79,14 +79,6 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
     }
   }
 
-  async function handleTitlebarMouseDown(event: React.MouseEvent<HTMLElement>) {
-    if (event.button !== 0) return;
-
-    const target = event.target as HTMLElement;
-    if (target.closest("button")) return;
-
-    await safeInvoke("window_start_dragging");
-  }
 
   async function handleTitlebarDoubleClick(event: React.MouseEvent<HTMLElement>) {
     const target = event.target as HTMLElement;
@@ -97,7 +89,7 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
   }
 
   return (
-    <header className="window-titlebar" data-tauri-drag-region onMouseDown={handleTitlebarMouseDown} onDoubleClick={handleTitlebarDoubleClick}>
+    <header className="window-titlebar" onDoubleClick={handleTitlebarDoubleClick}>
       <div className="window-brand" data-tauri-drag-region>
         <img className="window-logo-image" src={tsukiLogo} alt="" />
         <div>

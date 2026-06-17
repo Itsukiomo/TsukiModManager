@@ -1,15 +1,14 @@
-﻿import "./App.css";
+import "./App.css";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode, PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { WindowTitleBar } from "./components/WindowTitleBar/WindowTitleBar";
 import type { AppPage } from "./models/navigation";
 import type { AppSettings } from "./models/settings";
-import type { SourceModSummary, InstalledSourceMatch, SourceUpdateStatus } from "./models/source";
-import type { PakModFile, PakScanResult } from "./models/mod";
-import tsukiLogo from "./assets/tsuki-logo.png";
+import type { SourceModSummary, SourceUpdateStatus } from "./models/source";
+import type { InstallReceipt } from "./models/receipt";
+import { HomePage } from "./pages/Home/HomePage";
 import { BrowsePage } from "./pages/Browse/BrowsePage";
 import { InstalledPage } from "./pages/Installed/InstalledPage";
 import { BackupsPage } from "./pages/Backups/BackupsPage";
@@ -38,11 +37,12 @@ interface TaskProgressState {
   progress?: number | null;
 }
 
-interface BootStatus {
-  label: string;
+interface DebugFeatureTestResult {
+  name: string;
+  status: "passed" | "failed" | "warning";
   detail: string;
-  progress: number;
 }
+
 
 class PageCrashGuard extends Component<{ pageName: string; children: ReactNode }, { error: string | null }> {
   constructor(props: { pageName: string; children: ReactNode }) {
@@ -81,66 +81,6 @@ class PageCrashGuard extends Component<{ pageName: string; children: ReactNode }
   }
 }
 
-interface ManagedInstallInfo {
-  id: string;
-  displayName: string;
-  source: string;
-  sourceModId?: string | null;
-  sourceFileId?: string | null;
-  pageUrl?: string | null;
-  enabled: boolean;
-  fileCount: number;
-  pakFileCount: number;
-  nonPakFileCount: number;
-  disabledFolder: string;
-}
-
-interface InstalledStateFile {
-  relativePath: string;
-  location: string;
-  fileName: string;
-  fileType: string;
-  sizeBytes?: number | null;
-  sha256?: string | null;
-  live: boolean;
-}
-
-interface InstalledStateRecord {
-  uid: string;
-  id: string;
-  name: string;
-  source: string;
-  version?: string | null;
-  author?: string | null;
-  filename: string;
-  fileId?: string | null;
-  fileType: string;
-  sha256?: string | null;
-  folderId: string;
-  location: string;
-  receiptId?: string | null;
-  sourceModId?: string | null;
-  sourceFileId?: string | null;
-  pageUrl?: string | null;
-  thumbnailUrl?: string | null;
-  bannerUrl?: string | null;
-  enabled: boolean;
-  installedAtUnix?: number | null;
-  files: InstalledStateFile[];
-}
-
-
-interface HomeLiveCache {
-  savedAt: number;
-  nexusMods: SourceModSummary[];
-  modworkshopMods: SourceModSummary[];
-  installedMods: SourceModSummary[];
-  installedSourceKeys: string[];
-  installedNames: string[];
-  localPakMods: PakModFile[];
-}
-
-const HOME_LIVE_CACHE_KEY = "tsuki-home-live-state:v1.9.2-no-boot-tasks";
 
 const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v1";
 const TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS = 30 * 60 * 1000;
@@ -185,43 +125,6 @@ function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "la
   } catch {
     // Optional launch update cache.
   }
-}
-
-
-function readHomeLiveCache(): HomeLiveCache | null {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(HOME_LIVE_CACHE_KEY) ?? "null");
-    if (!parsed || typeof parsed !== "object") return null;
-
-    return {
-      savedAt: typeof parsed.savedAt === "number" ? parsed.savedAt : 0,
-      nexusMods: Array.isArray(parsed.nexusMods) ? parsed.nexusMods : [],
-      modworkshopMods: Array.isArray(parsed.modworkshopMods) ? parsed.modworkshopMods : [],
-      installedMods: Array.isArray(parsed.installedMods) ? parsed.installedMods : [],
-      installedSourceKeys: Array.isArray(parsed.installedSourceKeys) ? parsed.installedSourceKeys.filter((value: unknown) => typeof value === "string") : [],
-      installedNames: Array.isArray(parsed.installedNames) ? parsed.installedNames.filter((value: unknown) => typeof value === "string") : [],
-      localPakMods: Array.isArray(parsed.localPakMods) ? parsed.localPakMods : [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writeHomeLiveCache(cache: HomeLiveCache) {
-  try {
-    window.localStorage.setItem(HOME_LIVE_CACHE_KEY, JSON.stringify(cache));
-  } catch {
-    // Optional dashboard cache.
-  }
-}
-
-function pakDisplayName(fileName: string) {
-  return fileName
-    .replace(/\.disabled$/i, "")
-    .replace(/\.(pak|ucas|utoc)$/i, "")
-    .replace(/[_-]+P$/i, "")
-    .replace(/[_-]+/g, " ")
-    .trim() || fileName;
 }
 
 
@@ -274,604 +177,6 @@ interface MovieValidationItem {
   sameFileNameMatches: string[];
   verdict: string;
 }
-
-function compactHomeName(value: string) {
-  return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
-}
-
-function homeModKey(mod: SourceModSummary) {
-  return `${mod.source}-${mod.sourceId}`;
-}
-
-function installedKeyFromRecord(record: InstalledStateRecord) {
-  const sourceId = record.sourceModId ?? record.id;
-  return `${record.source}-${sourceId}`;
-}
-
-function installedKeyFromManaged(install: ManagedInstallInfo) {
-  return install.sourceModId ? `${install.source}-${install.sourceModId}` : null;
-}
-
-function sourceSummaryFromInstalledRecord(record: InstalledStateRecord): SourceModSummary | null {
-  const sourceId = record.sourceModId ?? record.id;
-
-  if (!record.source || !sourceId) return null;
-
-  const fileAliases = (record.files ?? [])
-    .map((file) => file.fileName)
-    .filter((name) => name && name.trim().length > 0);
-
-  return {
-    source: record.source as SourceModSummary["source"],
-    sourceId,
-    name: record.name || record.filename || `${record.source} ${sourceId}`,
-    author: record.author,
-    version: record.version,
-    thumbnailUrl: record.thumbnailUrl,
-    bannerUrl: record.bannerUrl,
-    pageUrl: record.pageUrl,
-    updatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
-    downloads: null,
-    likes: null,
-    shortDescription: `Installed by Tsuki Â· ${fileAliases.length} tracked file${fileAliases.length === 1 ? "" : "s"}.`,
-    tags: [...new Set([record.location, record.fileType, record.filename, ...fileAliases.slice(0, 8)].filter(Boolean))],
-  };
-}
-
-
-function homeTimeValue(mod: SourceModSummary) {
-  const raw = String(mod.updatedAt ?? "").trim();
-
-  if (!raw) return 0;
-
-  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) return numeric < 4_000_000_000 ? numeric * 1000 : numeric;
-  }
-
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function sortHomeSourceMods(mods: SourceModSummary[]) {
-  return [...mods].sort((a, b) => homeTimeValue(b) - homeTimeValue(a));
-}
-
-function homeUpdatedLabel(mod: SourceModSummary) {
-  const timestamp = homeTimeValue(mod);
-
-  if (!timestamp) return null;
-
-  const diff = Math.max(0, Date.now() - timestamp);
-  const hour = 60 * 60 * 1000;
-  const day = 24 * hour;
-  const month = 30 * day;
-
-  if (diff < hour) return "Updated under 1h ago";
-  if (diff < day) return `Updated ${Math.max(1, Math.floor(diff / hour))}h ago`;
-  if (diff < month) return `Updated ${Math.max(1, Math.floor(diff / day))}d ago`;
-
-  return new Date(timestamp).toLocaleDateString();
-}
-
-function mergeHomeMods(source: "nexus" | "modworkshop", ...groups: SourceModSummary[][]) {
-  const seen = new Set<string>();
-  const result: SourceModSummary[] = [];
-
-  for (const group of groups) {
-    for (const mod of group) {
-      if (!mod || mod.source !== source || !mod.sourceId || !mod.name) continue;
-
-      const key = homeModKey(mod);
-      if (seen.has(key)) continue;
-
-      seen.add(key);
-      result.push(mod);
-    }
-  }
-
-  return sortHomeSourceMods(result).slice(0, 8);
-}
-
-function SourceMiniCard({
-  mod,
-  onBrowse,
-  installed,
-  onOpenMod,
-}: {
-  mod: SourceModSummary;
-  onBrowse: () => void;
-  installed: boolean;
-  onOpenMod: (mod: SourceModSummary) => void;
-}) {
-  const tags = (mod.tags ?? []).filter(Boolean).slice(0, 3);
-  const sourceLabel = mod.source === "nexus" ? "Nexus Mods" : "ModWorkshop";
-
-  return (
-    <article className={`home-showcase-card ${installed ? "installed" : ""}`} role="button" tabIndex={0} onClick={() => onOpenMod(mod)} onKeyDown={(event) => {
-      if (event.key === "Enter" || event.key === " ") onOpenMod(mod);
-    }}>
-      <div className="home-card-thumb">
-        {mod.thumbnailUrl ? <img src={mod.thumbnailUrl} alt="" /> : <div className="home-source-fallback">{mod.source === "nexus" ? "NX" : "MW"}</div>}
-        <span>{sourceLabel}</span>
-        {installed && <strong className="home-installed-badge">Installed</strong>}
-      </div>
-      <div className="home-card-body">
-        <h3>{mod.name}</h3>
-        <p className="home-card-author">{mod.author ? `by ${mod.author}` : "Community mod"}{homeUpdatedLabel(mod) ? ` Â· ${homeUpdatedLabel(mod)}` : ""}</p>
-        <p>{mod.shortDescription || "Review the files, install safely, and keep your PAYDAY 3 setup organized."}</p>
-        <div className="home-card-tags">
-          {tags.length > 0 ? tags.map((tag) => <span key={tag}>{tag}</span>) : <span>No tags cached</span>}
-        </div>
-      </div>
-      <button className={`home-install-button ${installed ? "installed" : ""}`} type="button" onClick={(event) => {
-        event.stopPropagation();
-        if (installed) onOpenMod(mod);
-        else onBrowse();
-      }}>
-        {installed ? "Installed" : "Install"}
-      </button>
-    </article>
-  );
-}
-
-function loadCachedHomeMods(source: "nexus" | "modworkshop") {
-  const mods: SourceModSummary[] = [];
-
-  for (const key of Object.keys(window.localStorage)) {
-    if (!key.toLowerCase().includes("source-cache")) continue;
-
-    try {
-      const parsed = JSON.parse(window.localStorage.getItem(key) ?? "{}");
-      const candidates = Array.isArray(parsed.mods) ? parsed.mods : [];
-
-      for (const mod of candidates) {
-        if (!mod || mod.source !== source || !mod.sourceId) continue;
-        mods.push(mod);
-      }
-    } catch {
-      // Cache format changed or is not a source cache.
-    }
-  }
-
-  return mergeHomeMods(source, mods);
-}
-
-
-function startupTimeout<T>(task: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(() => resolve(fallback), timeoutMs);
-
-    task
-      .then((value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      })
-      .catch(() => {
-        window.clearTimeout(timer);
-        resolve(fallback);
-      });
-  });
-}
-
-async function refreshHomeLiveCacheForStartup(onDetail?: (detail: string) => void) {
-  onDetail?.("Loading installed receipts, installed-state records, local PAK files, and source cache...");
-
-  const [nexus, modworkshop, installs, state, sourceIndex, pakScan] = await Promise.allSettled([
-    invoke<SourceModSummary[]>("fetch_source_mods_page", { source: "nexus", page: 1, sort: "updated" }),
-    invoke<SourceModSummary[]>("fetch_modworkshop_browse_live_page", { page: 1, sort: "updated" }),
-    invoke<ManagedInstallInfo[]>("list_managed_installs"),
-    invoke<InstalledStateRecord[]>("list_installed_state_records"),
-    invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 600 }).catch(() => []),
-    invoke<PakScanResult>("scan_pak_mods").catch(() => null),
-  ]);
-
-  const cachedHome = readHomeLiveCache();
-  const stateRecords = state.status === "fulfilled" ? state.value : [];
-  const liveStateRecords = stateRecords.filter((record) => (record.files ?? []).some((file) => file.live));
-  const installedSummaries = liveStateRecords
-    .map(sourceSummaryFromInstalledRecord)
-    .filter((mod): mod is SourceModSummary => Boolean(mod));
-  const uniqueInstalled = [...new Map(installedSummaries.map((mod) => [homeModKey(mod), mod])).values()];
-  const indexed = sourceIndex.status === "fulfilled" ? sourceIndex.value : [];
-  const nextLocalPakMods = pakScan.status === "fulfilled" && pakScan.value
-    ? pakScan.value.pakMods.filter((pak) => pak.enabled).slice(0, 200)
-    : cachedHome?.localPakMods ?? [];
-
-  const liveNexus = nexus.status === "fulfilled" ? nexus.value : [];
-  const liveModworkshop = modworkshop.status === "fulfilled" ? modworkshop.value : [];
-  const indexedNexus = indexed.filter((mod) => mod.source === "nexus");
-  const indexedModworkshop = indexed.filter((mod) => mod.source === "modworkshop");
-
-  const nextNexus = liveNexus.length > 0
-    ? mergeHomeMods("nexus", liveNexus)
-    : mergeHomeMods("nexus", indexedNexus, cachedHome?.nexusMods ?? [], loadCachedHomeMods("nexus"));
-
-  const nextModworkshop = liveModworkshop.length > 0
-    ? mergeHomeMods("modworkshop", liveModworkshop)
-    : mergeHomeMods("modworkshop", indexedModworkshop, cachedHome?.modworkshopMods ?? [], loadCachedHomeMods("modworkshop"));
-
-  const nextManaged = installs.status === "fulfilled" ? installs.value : [];
-  const sourceKeySet = new Set<string>();
-  const nameSet = new Set<string>();
-
-  for (const install of nextManaged) {
-    const key = installedKeyFromManaged(install);
-    if (key) sourceKeySet.add(key);
-    nameSet.add(compactHomeName(install.displayName));
-  }
-
-  for (const record of liveStateRecords) {
-    sourceKeySet.add(installedKeyFromRecord(record));
-    nameSet.add(compactHomeName(record.name));
-    nameSet.add(compactHomeName(record.filename));
-  }
-
-  for (const pak of nextLocalPakMods) {
-    nameSet.add(compactHomeName(pakDisplayName(pak.fileName)));
-    nameSet.add(compactHomeName(pak.fileName));
-  }
-
-  writeHomeLiveCache({
-    savedAt: Date.now(),
-    nexusMods: nextNexus,
-    modworkshopMods: nextModworkshop,
-    installedMods: uniqueInstalled,
-    installedSourceKeys: [...sourceKeySet],
-    installedNames: [...nameSet],
-    localPakMods: nextLocalPakMods,
-  });
-
-  return `Home cache refreshed before opening: ${uniqueInstalled.length} live Tsuki install(s), ${nextLocalPakMods.length} enabled PAK file(s), ${nextNexus.length} Nexus card(s), and ${nextModworkshop.length} ModWorkshop card(s).`;
-}
-
-function HomePage({ onOpenPage, onOpenModInApp, refreshTick }: { onOpenPage: (page: AppPage) => void; onOpenModInApp: (mod: SourceModSummary) => void; refreshTick: number }) {
-  const cachedHome = useMemo(() => readHomeLiveCache(), []);
-  const [nexusMods, setNexusMods] = useState<SourceModSummary[]>(() => cachedHome?.nexusMods?.length ? cachedHome.nexusMods : loadCachedHomeMods("nexus"));
-  const [modworkshopMods, setModworkshopMods] = useState<SourceModSummary[]>(() => cachedHome?.modworkshopMods?.length ? cachedHome.modworkshopMods : loadCachedHomeMods("modworkshop"));
-  const [installedMods, setInstalledMods] = useState<SourceModSummary[]>(() => cachedHome?.installedMods ?? []);
-  const [localPakMods, setLocalPakMods] = useState<PakModFile[]>(() => cachedHome?.localPakMods ?? []);
-  const [cachedInstalledSourceKeys, setCachedInstalledSourceKeys] = useState<string[]>(() => cachedHome?.installedSourceKeys ?? []);
-  const [cachedInstalledNames, setCachedInstalledNames] = useState<string[]>(() => cachedHome?.installedNames ?? []);
-  const [managed, setManaged] = useState<ManagedInstallInfo[]>([]);
-  const [installedState, setInstalledState] = useState<InstalledStateRecord[]>([]);
-  const [status, setStatus] = useState(cachedHome ? `Home loaded live cache from ${Math.max(1, Math.round((Date.now() - cachedHome.savedAt) / 1000))}s ago. Refreshing quietly...` : "Home is loading live source/state info...");
-  const [feedBusy, setFeedBusy] = useState(false);
-  const feedBusyRef = useRef(false);
-  const lastHomeRefreshRef = useRef(cachedHome?.savedAt ?? 0);
-
-  const installedSourceKeys = useMemo(() => {
-    const keys = new Set<string>(cachedInstalledSourceKeys);
-
-    for (const install of managed) {
-      const key = installedKeyFromManaged(install);
-      if (key) keys.add(key);
-    }
-
-    for (const record of installedState) {
-      keys.add(installedKeyFromRecord(record));
-    }
-
-    return keys;
-  }, [cachedInstalledSourceKeys, installedState, managed]);
-
-  const installedNames = useMemo(() => {
-    const names = new Set<string>(cachedInstalledNames);
-
-    for (const install of managed) names.add(compactHomeName(install.displayName));
-    for (const record of installedState) names.add(compactHomeName(record.name));
-    for (const pak of localPakMods) names.add(compactHomeName(pakDisplayName(pak.fileName)));
-
-    return names;
-  }, [cachedInstalledNames, installedState, localPakMods, managed]);
-
-
-  const openHomeMod = (mod: SourceModSummary) => {
-    onOpenModInApp(mod);
-  };
-
-  const refreshFeeds = async (mode: "auto" | "manual" = "manual") => {
-    if (feedBusyRef.current) return;
-
-    const now = Date.now();
-    if (mode === "auto" && now - lastHomeRefreshRef.current < 60_000) return;
-
-    feedBusyRef.current = true;
-    lastHomeRefreshRef.current = now;
-    setFeedBusy(true);
-    setStatus(mode === "manual" ? "Refreshing live Nexus, ModWorkshop, installed state, and local files..." : "Updating Home from live source/state info...");
-
-    try {
-      const [nexus, modworkshop, installs, state, sourceIndex, pakScan] = await Promise.allSettled([
-        invoke<SourceModSummary[]>("fetch_source_mods_page", { source: "nexus", page: 1, sort: "updated" }),
-        invoke<SourceModSummary[]>("fetch_modworkshop_browse_live_page", { page: 1, sort: "updated" }),
-        invoke<ManagedInstallInfo[]>("list_managed_installs"),
-        invoke<InstalledStateRecord[]>("list_installed_state_records"),
-        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 600 }).catch(() => []),
-        invoke<PakScanResult>("scan_pak_mods").catch(() => null),
-      ]);
-
-      const stateRecords = state.status === "fulfilled" ? state.value : [];
-      const liveStateRecords = stateRecords.filter((record) => (record.files ?? []).some((file) => file.live));
-      const installedSummaries = liveStateRecords
-        .map(sourceSummaryFromInstalledRecord)
-        .filter((mod): mod is SourceModSummary => Boolean(mod));
-      const uniqueInstalled = [...new Map(installedSummaries.map((mod) => [homeModKey(mod), mod])).values()];
-      const indexed = sourceIndex.status === "fulfilled" ? sourceIndex.value : [];
-      const nextLocalPakMods = pakScan.status === "fulfilled" && pakScan.value ? pakScan.value.pakMods.filter((pak) => pak.enabled).slice(0, 200) : localPakMods;
-
-      const liveNexus = nexus.status === "fulfilled" ? nexus.value : [];
-      const liveModworkshop = modworkshop.status === "fulfilled" ? modworkshop.value : [];
-      const indexedNexus = indexed.filter((mod) => mod.source === "nexus");
-      const indexedModworkshop = indexed.filter((mod) => mod.source === "modworkshop");
-
-      const nextNexus = liveNexus.length > 0
-        ? mergeHomeMods("nexus", liveNexus)
-        : mergeHomeMods("nexus", indexedNexus, loadCachedHomeMods("nexus"));
-
-      const nextModworkshop = liveModworkshop.length > 0
-        ? mergeHomeMods("modworkshop", liveModworkshop)
-        : mergeHomeMods("modworkshop", indexedModworkshop, loadCachedHomeMods("modworkshop"));
-
-      const nextManaged = installs.status === "fulfilled" ? installs.value : managed;
-      const sourceKeySet = new Set<string>();
-      const nameSet = new Set<string>();
-
-      for (const install of nextManaged) {
-        const key = installedKeyFromManaged(install);
-        if (key) sourceKeySet.add(key);
-        nameSet.add(compactHomeName(install.displayName));
-      }
-
-      for (const record of liveStateRecords) {
-        sourceKeySet.add(installedKeyFromRecord(record));
-        nameSet.add(compactHomeName(record.name));
-        nameSet.add(compactHomeName(record.filename));
-      }
-
-      for (const pak of nextLocalPakMods) {
-        nameSet.add(compactHomeName(pakDisplayName(pak.fileName)));
-        nameSet.add(compactHomeName(pak.fileName));
-      }
-
-      // v0.99.1: this is NOT hardcoded. Home runs a tiny badge-only proof check
-      // against the visible source cards so cached cards can still show Installed correctly.
-      // It does not inject installed-state records into Recent Nexus/ModWorkshop anymore.
-      const badgeLimit = mode === "manual" ? 40 : 18;
-      const visibleBadgeCandidates = [...new Map([...nextNexus, ...nextModworkshop].map((mod) => [homeModKey(mod), mod])).values()].slice(0, badgeLimit);
-      const matches = visibleBadgeCandidates.length > 0
-        ? await invoke<InstalledSourceMatch[]>("match_installed_source_mods", { sourceMods: visibleBadgeCandidates }).catch(() => [])
-        : [];
-
-      for (const match of matches) {
-        if (!match.installed) continue;
-        sourceKeySet.add(`${match.source}-${match.sourceId}`);
-
-        for (const file of match.matchedFiles ?? []) {
-          nameSet.add(compactHomeName(file));
-          nameSet.add(compactHomeName(pakDisplayName(file)));
-        }
-      }
-
-      const installedSourceKeyList = [...sourceKeySet];
-      const installedNameList = [...nameSet];
-
-      setInstalledMods(uniqueInstalled);
-      setNexusMods(nextNexus);
-      setModworkshopMods(nextModworkshop);
-      setManaged(nextManaged);
-      setInstalledState(stateRecords);
-      setLocalPakMods(nextLocalPakMods);
-      setCachedInstalledSourceKeys(installedSourceKeyList);
-      setCachedInstalledNames(installedNameList);
-
-      writeHomeLiveCache({
-        savedAt: Date.now(),
-        nexusMods: nextNexus,
-        modworkshopMods: nextModworkshop,
-        installedMods: uniqueInstalled,
-        installedSourceKeys: installedSourceKeyList,
-        installedNames: installedNameList,
-        localPakMods: nextLocalPakMods,
-      });
-
-      setStatus(`Home refreshed. ${installedSourceKeyList.length} source IDs and ${nextLocalPakMods.length} local PAK files are marked as installed. Visible-card badge check ran for ${visibleBadgeCandidates.length} card(s).`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      feedBusyRef.current = false;
-      setFeedBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    refreshFeeds("auto");
-
-    const refresh = () => void refreshFeeds("auto");
-    const timer = window.setInterval(refresh, 60000);
-
-    window.addEventListener("focus", refresh);
-    window.addEventListener("tsuki-data-refresh", refresh);
-
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("tsuki-data-refresh", refresh);
-    };
-  }, [refreshTick]);
-
-  return (
-    <section className="page home-page home-pro">
-      <div className="home-pro-hero">
-        <div className="home-pro-copy">
-          <div className="home-pro-logo-line">
-            <img src={tsukiLogo} alt="" />
-            <span>PAYDAY 3 mod library</span>
-          </div>
-          <h1>Welcome back to Tsuki Mod Manager</h1>
-          <p>
-            Your PAYDAY 3 mod setup lives here: browse, install, repair, back up, and launch without digging through folders.
-          </p>
-          <div className="home-pro-actions">
-            <button className="ghost-button" type="button" onClick={() => onOpenPage("browse")}>Browse mods</button>
-            <button className="ghost-button" type="button" onClick={() => onOpenPage("installed")}>Installed</button>
-            <button className="ghost-button" type="button" onClick={() => onOpenPage("profiles")}>Profiles</button>
-            <button className="ghost-button" type="button" disabled={feedBusy} onClick={() => refreshFeeds("manual")}>
-              {feedBusy ? "Refreshing..." : "Refresh feeds"}
-            </button>
-          </div>
-        </div>
-
-        <div className="home-pro-moon">
-          <img src={tsukiLogo} alt="" />
-        </div>
-      </div>
-
-      <div className="home-pro-stats">
-        <article>
-          <span>Installed Mods</span>
-          <strong>{managed.length > 0 ? managed.length : "Ready"}</strong>
-          <p>{managed.length > 0 ? "Receipt-tracked" : "Scan your setup"}</p>
-        </article>
-        <article>
-          <span>Profiles</span>
-          <strong>Loadouts</strong>
-          <p>Save enabled states</p>
-        </article>
-        <article>
-          <span>Repair</span>
-          <strong>Tools</strong>
-          <p>Receipts, deps, movies</p>
-        </article>
-        <article>
-          <span>Status</span>
-          <strong>Ready</strong>
-          <p>{status}</p>
-        </article>
-      </div>
-
-      <HomeModSection
-        title="Installed by Tsuki"
-        subtitle="Every receipt/state-tracked install Tsuki currently knows about."
-        cta="Installed"
-        mods={installedMods}
-        installedKeys={installedSourceKeys}
-        installedNames={installedNames}
-        emptyText="No installed-state records yet. Install a mod through Tsuki or open Installed."
-        onBrowse={() => onOpenPage("installed")}
-        onOpenMod={openHomeMod}
-      />
-
-      <LocalPakSection
-        mods={localPakMods}
-        onBrowse={() => onOpenPage("installed")}
-      />
-
-      <HomeModSection
-        title="Recent on Nexus Mods"
-        subtitle="Fresh community uploads and updates."
-        cta="Browse Nexus"
-        mods={nexusMods}
-        installedKeys={installedSourceKeys}
-        installedNames={installedNames}
-        emptyText="No Nexus cards loaded yet. Press Refresh feeds or open Browse."
-        onBrowse={() => onOpenPage("browse")}
-        onOpenMod={openHomeMod}
-      />
-
-      <HomeModSection
-        title="Recent on ModWorkshop"
-        subtitle="Community tools, cosmetics, sound packs, and gameplay tweaks."
-        cta="Browse ModWorkshop"
-        mods={modworkshopMods}
-        installedKeys={installedSourceKeys}
-        installedNames={installedNames}
-        emptyText="No ModWorkshop cards loaded yet. Press Refresh feeds or open Browse."
-        onBrowse={() => onOpenPage("browse")}
-        onOpenMod={openHomeMod}
-      />
-    </section>
-  );
-}
-
-function HomeModSection({
-  title,
-  subtitle,
-  cta,
-  mods,
-  installedKeys,
-  installedNames,
-  emptyText,
-  onBrowse,
-  onOpenMod,
-}: {
-  title: string;
-  subtitle: string;
-  cta: string;
-  mods: SourceModSummary[];
-  installedKeys: Set<string>;
-  installedNames: Set<string>;
-  emptyText: string;
-  onBrowse: () => void;
-  onOpenMod: (mod: SourceModSummary) => void;
-}) {
-  return (
-    <div className="home-pro-section">
-      <div className="home-pro-section-head">
-        <div>
-          <h2>{title}</h2>
-          <p>{subtitle}</p>
-        </div>
-        <button className="ghost-button compact" type="button" onClick={onBrowse}>{cta}</button>
-      </div>
-      <div className="home-pro-card-grid">
-        {mods.map((mod) => (
-          <SourceMiniCard
-            key={`${mod.source}-${mod.sourceId}`}
-            mod={mod}
-            installed={installedKeys.has(homeModKey(mod)) || installedNames.has(compactHomeName(mod.name))}
-            onBrowse={onBrowse}
-            onOpenMod={onOpenMod}
-          />
-        ))}
-        {mods.length === 0 && <article className="card"><p>{emptyText}</p></article>}
-      </div>
-    </div>
-  );
-}
-
-
-function LocalPakSection({ mods, onBrowse }: { mods: PakModFile[]; onBrowse: () => void }) {
-  const shown = mods.slice(0, 16);
-
-  return (
-    <div className="home-pro-section">
-      <div className="home-pro-section-head">
-        <div>
-          <h2>Installed local PAK files</h2>
-          <p>Every enabled loose PAK-family file Tsuki sees in ~mods. Manual mods live here too.</p>
-        </div>
-        <button className="ghost-button compact" type="button" onClick={onBrowse}>Open Installed</button>
-      </div>
-      <div className="home-local-grid">
-        {shown.map((pak) => (
-          <button className="home-local-chip" type="button" key={`${pak.fullPath}-${pak.fileName}`} onClick={onBrowse}>
-            <strong>{pakDisplayName(pak.fileName)}</strong>
-            <span>{pak.extension.toUpperCase()} Â· {(pak.sizeBytes / 1024 / 1024).toFixed(1)} MB</span>
-          </button>
-        ))}
-        {mods.length > shown.length && (
-          <button className="home-local-chip more" type="button" onClick={onBrowse}>
-            <strong>+{mods.length - shown.length} more</strong>
-            <span>Open Installed to view all</span>
-          </button>
-        )}
-        {mods.length === 0 && <article className="card"><p>No enabled loose PAK files detected yet.</p></article>}
-      </div>
-    </div>
-  );
-}
-
 
 function RepairPage() {
   const [dependencies, setDependencies] = useState<DependencyReport | null>(null);
@@ -1013,7 +318,7 @@ function RepairPage() {
 
           {dependencies && dependencies.warnings.length > 0 && (
             <div className="repair-warning-list">
-              {dependencies.warnings.map((warning) => <p key={warning}>âš  {warning}</p>)}
+              {dependencies.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}
             </div>
           )}
         </article>
@@ -1033,7 +338,7 @@ function RepairPage() {
                 <div>
                   <strong>{receipt.displayName}</strong>
                   <p>
-                    {receipt.source} #{receipt.sourceModId ?? "?"} Â· live {receipt.liveFiles} Â· disabled {receipt.disabledFiles} Â· missing {receipt.missingFiles}
+                    {receipt.source} #{receipt.sourceModId ?? "?"} · live {receipt.liveFiles} · disabled {receipt.disabledFiles} · missing {receipt.missingFiles}
                   </p>
                   {receipt.missingPaths.slice(0, 2).map((path) => <small key={path}>{path}</small>)}
                 </div>
@@ -1082,45 +387,41 @@ function RepairPage() {
 
 
 function ProfilesPage() {
-  const [managed, setManaged] = useState<ManagedInstallInfo[]>([]);
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profileName, setProfileName] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [status, setStatus] = useState("Profiles ready.");
+  const [, setStatus] = useState("Profiles ready.");
+  const [folderNotice, setFolderNotice] = useState<string | null>(null);
+  const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null);
 
-  const refresh = () => {
-    Promise.all([
-      invoke<ManagedInstallInfo[]>("list_managed_installs"),
-      invoke<ModProfile[]>("list_mod_profiles"),
-    ])
-      .then(([installs, profileList]) => {
-        setManaged(installs);
+  const showFolderNotice = useCallback((message: string) => {
+    setFolderNotice(message);
+    window.setTimeout(() => {
+      setFolderNotice((current) => current === message ? null : current);
+    }, 2600);
+  }, []);
+
+  const refresh = useCallback(() => {
+    invoke<ModProfile[]>("list_mod_profiles")
+      .then((profileList) => {
         setProfiles(profileList);
+        setStatus(profileList.length ? `${profileList.length} saved profile${profileList.length === 1 ? "" : "s"}.` : "No profiles saved yet.");
       })
       .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
-  };
+  }, []);
 
   useEffect(() => {
     refresh();
-  }, []);
-
-  const toggleManaged = (install: ManagedInstallInfo, enabled: boolean) => {
-    setBusyId(install.id);
-    invoke<string>("set_managed_install_enabled", { receiptId: install.id, enabled })
-      .then((message) => {
-        setStatus(message);
-        refresh();
-      })
-      .catch((error) => setStatus(error instanceof Error ? error.message : String(error)))
-      .finally(() => setBusyId(null));
-  };
+  }, [refresh]);
 
   const saveProfile = () => {
+    const name = profileName.trim();
     setBusyId("save-profile");
-    invoke<ModProfile>("save_current_mod_profile", { name: profileName || `Profile ${new Date().toLocaleString()}` })
+    invoke<ModProfile>("save_current_mod_profile", { name: name || `Profile ${new Date().toLocaleString()}` })
       .then((profile) => {
         setStatus(`Saved profile: ${profile.name}`);
         setProfileName("");
+        setExpandedProfileId(profile.id);
         refresh();
       })
       .catch((error) => setStatus(error instanceof Error ? error.message : String(error)))
@@ -1138,650 +439,736 @@ function ProfilesPage() {
       .finally(() => setBusyId(null));
   };
 
+  const deleteProfile = (profile: ModProfile) => {
+    const confirmed = window.confirm(`Delete profile "${profile.name}"? This only removes the saved profile, not your installed mods.`);
+    if (!confirmed) return;
+
+    setBusyId(`delete-profile-${profile.id}`);
+    invoke<string>("delete_mod_profile", { profileId: profile.id })
+      .then((message) => {
+        setStatus(message);
+        setExpandedProfileId((current) => current === profile.id ? null : current);
+        refresh();
+      })
+      .catch((error) => setStatus(error instanceof Error ? error.message : String(error)))
+      .finally(() => setBusyId(null));
+  };
+
+
+  const openProfilesFolder = () => {
+    setBusyId("open-profiles-folder");
+    invoke<string>("open_mod_profiles_folder")
+      .then(() => showFolderNotice("Profiles folder opened."))
+      .catch((error) => showFolderNotice(error instanceof Error ? error.message : String(error)))
+      .finally(() => setBusyId(null));
+  };
+
   return (
-    <section className="page profiles-page">
-      <div className="page-header">
+    <section className="page profiles-page simple-profiles-page profiles-page-clean-v2">
+      <div className="page-header clean-page-header">
         <div>
           <p className="eyebrow">Loadouts</p>
-          <h1>Profiles + Tsuki installs</h1>
-          <p className="page-description">
-            Save the current enabled state, apply it later, and toggle non-PAK installs that Tsuki installed from receipts.
-          </p>
+          <h1>Profiles</h1>
+          <p className="page-description">Save your current enabled mods as a loadout and apply it later.</p>
         </div>
-      </div>
-
-      <article className="card profile-save-card">
-        <div>
-          <p className="eyebrow">Save current state</p>
-          <h2>Create profile</h2>
-          <p>{status}</p>
-        </div>
-        <div className="profile-save-controls">
-          <input className="setting-input" value={profileName} onChange={(event) => setProfileName(event.target.value)} placeholder="Profile name" />
-          <button className="ghost-button" type="button" disabled={busyId === "save-profile"} onClick={saveProfile}>
-            {busyId === "save-profile" ? "Saving..." : "Save current enabled mods"}
+        <div className="profile-header-actions">
+          <button className="ghost-button compact" type="button" onClick={openProfilesFolder} disabled={busyId === "open-profiles-folder"}>
+            {busyId === "open-profiles-folder" ? "Opening..." : "Open Profiles Folder"}
           </button>
+          <button className="ghost-button compact" type="button" onClick={refresh}>Refresh</button>
         </div>
-      </article>
+      </div>
 
-      <div className="profile-grid">
-        <article className="card">
-          <div className="home-feed-header">
-            <div>
-              <p className="eyebrow">Profiles</p>
-              <h2>Saved loadouts</h2>
-            </div>
-            <button className="ghost-button compact" type="button" onClick={refresh}>Refresh</button>
+      <div className="profiles-clean-layout">
+        <article className="card profile-create-panel">
+          <p className="eyebrow">Create</p>
+          <h2>Save current setup</h2>
+          <p className="muted-inline">Profiles remember enabled PAK files and Tsuki-managed installs. Technical toggles live in Debug.</p>
+          <div className="profile-save-controls profile-create-controls">
+            <input
+              className="setting-input"
+              value={profileName}
+              onChange={(event) => setProfileName(event.target.value)}
+              placeholder="Example: Stealth setup"
+            />
+          <button className="ghost-button install-button" type="button" disabled={busyId === "save-profile"} onClick={saveProfile}>
+              {busyId === "save-profile" ? "Saving..." : "Save Profile"}
+            </button>
           </div>
-          <div className="managed-list">
-            {profiles.map((profile) => (
-              <div className="managed-row" key={profile.id}>
-                <div>
-                  <strong>{profile.name}</strong>
-                  <p>{profile.enabledPakFiles.length} PAK files Â· {profile.enabledReceiptIds.length} Tsuki installs</p>
-                </div>
-                <button className="ghost-button compact" disabled={busyId === `profile-${profile.id}`} type="button" onClick={() => applyProfile(profile)}>
-                  {busyId === `profile-${profile.id}` ? "Applying..." : "Apply"}
-                </button>
-              </div>
-            ))}
-            {profiles.length === 0 && <p>No profiles yet. Save one from your current enabled mods.</p>}
-          </div>
+          <small>Save your current enabled mods as a reusable loadout.</small>
         </article>
 
-        <article className="card">
+        {folderNotice && (
+          <div className="profile-folder-toast" role="status" aria-live="polite">
+            {folderNotice}
+          </div>
+        )}
+
+        <article className="card profile-list-panel">
           <div className="home-feed-header">
             <div>
-              <p className="eyebrow">Receipt paired</p>
-              <h2>Tsuki-installed non-PAK toggles</h2>
+              <p className="eyebrow">Saved</p>
+              <h2>Saved profiles</h2>
             </div>
-            <button className="ghost-button compact" type="button" onClick={refresh}>Refresh</button>
+            <span className="status-pill">{profiles.length} total</span>
           </div>
-          <div className="managed-list">
-            {managed.map((install) => (
-              <div className={`managed-row ${install.enabled ? "" : "disabled"}`} key={install.id}>
-                <div>
-                  <strong>{install.displayName}</strong>
-                  <p>
-                    {install.source} #{install.sourceModId ?? "?"} Â· {install.fileCount} files Â· {install.nonPakFileCount} non-PAK
-                  </p>
-                  {!install.enabled && <small>Disabled folder: {install.disabledFolder}</small>}
-                </div>
-                <button
-                  className={`toggle-pill ${install.enabled ? "on" : "off"}`}
-                  disabled={busyId === install.id || install.nonPakFileCount === 0}
-                  type="button"
-                  onClick={() => toggleManaged(install, !install.enabled)}
-                  title={install.nonPakFileCount === 0 ? "PAK-only mods use the Installed PAK toggles." : ""}
-                >
-                  {busyId === install.id ? "..." : install.enabled ? "Enabled" : "Disabled"}
-                </button>
-              </div>
-            ))}
-            {managed.length === 0 && <p>No Tsuki install receipts found yet.</p>}
-          </div>
+
+          {profiles.length === 0 ? (
+            <div className="profile-empty-state">
+              <strong>No profiles yet.</strong>
+              <p>Create one from your current enabled mods.</p>
+            </div>
+          ) : (
+            <div className="profile-list-clean">
+              {profiles.map((profile) => {
+                const expanded = expandedProfileId === profile.id;
+                const profileBusy = busyId === `profile-${profile.id}`;
+                const deleteBusy = busyId === `delete-profile-${profile.id}`;
+
+                return (
+                  <div className={`profile-row-clean ${expanded ? "expanded" : ""}`} key={profile.id}>
+                    <div className="profile-row-main">
+                      <div>
+                        <strong>{profile.name}</strong>
+                        <p>{profile.enabledPakFiles.length} PAK files · {profile.enabledReceiptIds.length} Tsuki installs</p>
+                        <small>{profile.createdUnix ? new Date(profile.createdUnix * 1000).toLocaleString() : "Unknown date"}</small>
+                      </div>
+                      <div className="profile-row-actions">
+                        <button
+                          className="ghost-button compact"
+                          type="button"
+                          onClick={() => setExpandedProfileId(expanded ? null : profile.id)}
+                        >
+                          {expanded ? "Hide" : "View"}
+                        </button>
+                        <button
+                          className="ghost-button compact install-button"
+                          disabled={profileBusy || deleteBusy}
+                          type="button"
+                          onClick={() => applyProfile(profile)}
+                        >
+                          {profileBusy ? "Applying..." : "Apply"}
+                        </button>
+                        <button
+                          className="ghost-button compact danger"
+                          disabled={profileBusy || deleteBusy}
+                          type="button"
+                          onClick={() => deleteProfile(profile)}
+                        >
+                          {deleteBusy ? "Deleting..." : "Delete"}
+                        </button>
+                      </div>
+                    </div>
+                    {expanded && (
+                      <div className="profile-detail-panel profile-detail-card-view">
+                        <div className="profile-detail-summary">
+                          <div>
+                            <span>Saved</span>
+                            <strong>{profile.createdUnix ? new Date(profile.createdUnix * 1000).toLocaleString() : "Unknown date"}</strong>
+                          </div>
+                          <div>
+                            <span>PAK files</span>
+                            <strong>{profile.enabledPakFiles.length}</strong>
+                          </div>
+                          <div>
+                            <span>Tsuki installs</span>
+                            <strong>{profile.enabledReceiptIds.length}</strong>
+                          </div>
+                        </div>
+
+                        <div className="profile-mod-section">
+                          <div className="profile-section-heading">
+                            <span>PAK files</span>
+                            <small>{profile.enabledPakFiles.length} saved</small>
+                          </div>
+                          <div className="profile-chip-list">
+                            {profile.enabledPakFiles.length ? profile.enabledPakFiles.map((fileName) => (
+                              <span className="profile-mod-chip" key={fileName} title={fileName}>
+                                <strong>{fileName.split(/[\/]/).pop()}</strong>
+                                <small>~mods PAK</small>
+                              </span>
+                            )) : <span className="profile-empty-chip">No PAK files saved in this profile.</span>}
+                          </div>
+                        </div>
+
+                        <div className="profile-mod-section">
+                          <div className="profile-section-heading">
+                            <span>Tsuki receipt-backed installs</span>
+                            <small>{profile.enabledReceiptIds.length} saved</small>
+                          </div>
+                          <div className="profile-chip-list">
+                            {profile.enabledReceiptIds.length ? profile.enabledReceiptIds.map((receiptId) => (
+                              <span className="profile-mod-chip receipt" key={receiptId} title={receiptId}>
+                                <strong>{receiptId.replace(/_/g, " ")}</strong>
+                                <small>receipt tracked</small>
+                              </span>
+                            )) : <span className="profile-empty-chip">No receipt-backed installs saved in this profile.</span>}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </article>
       </div>
     </section>
   );
 }
 
-type DebugTab = "overview" | "installed" | "browse" | "backups" | "updates" | "settings" | "window";
-
-type DebugTool = {
-  label: string;
-  command: string;
-  args?: Record<string, unknown>;
-};
-
-const DEBUG_TOOL_TABS: Array<{ id: DebugTab; label: string; tools: DebugTool[] }> = [
-  {
-    id: "overview",
-    label: "Overview",
-    tools: [
-      { label: "Generate Debug Report", command: "get_debug_report" },
-      { label: "Run Health Check", command: "run_health_check" },
-      { label: "Detect PAYDAY 3 Path", command: "detect_payday3_path" },
-      { label: "Check Admin", command: "is_running_as_admin" },
-    ],
-  },
-  {
-    id: "installed",
-    label: "Installed",
-    tools: [
-      { label: "Restore Mods", command: "restore_mods_after_vanilla" },
-      { label: "Scan PAK Mods", command: "scan_pak_mods" },
-      { label: "List Receipts", command: "list_install_receipts" },
-      { label: "Installed State", command: "list_installed_state_records" },
-      { label: "Prune Stale Receipts", command: "prune_stale_install_receipts" },
-      { label: "Open ~mods", command: "open_pak_mods_folder" },
-    ],
-  },
-  {
-    id: "browse",
-    label: "Browse",
-    tools: [
-      { label: "Verify Source Settings", command: "verify_source_settings" },
-      { label: "Source Index Status", command: "get_source_index_status" },
-      { label: "Source Index Sample", command: "list_source_index", args: { source: null, limit: 80 } },
-      { label: "Nexus GraphQL Status", command: "nexus_graphql_v2_status" },
-      { label: "Nexus Diagnostic", command: "get_nexus_graphql_diagnostic" },
-      { label: "MW Pairing Diagnostic", command: "diagnose_modworkshop_pairing" },
-    ],
-  },
-  {
-    id: "backups",
-    label: "Backups",
-    tools: [
-      { label: "Backup Status", command: "get_backup_status" },
-      { label: "List Backups", command: "list_pak_backups" },
-      { label: "Open Backups Folder", command: "open_backups_folder" },
-    ],
-  },
-  {
-    id: "updates",
-    label: "Updates",
-    tools: [
-      { label: "Check App Update", command: "check_app_update", args: { manifestUrl: null } },
-      { label: "Check Installed Updates", command: "check_installed_source_updates" },
-    ],
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    tools: [
-      { label: "Read App Settings", command: "get_app_settings" },
-      { label: "Check Admin", command: "is_running_as_admin" },
-      { label: "Run Health Check", command: "run_health_check" },
-    ],
-  },
-  {
-    id: "window",
-    label: "Window",
-    tools: [
-      { label: "Minimize Main Window", command: "window_minimize" },
-      { label: "Toggle Maximize Main Window", command: "window_toggle_maximize" },
-    ],
-  },
-];
-
-type TsukiDebugRequest = {
-  id: string;
-  label: string;
-  command: string;
-  args?: Record<string, unknown>;
-};
-
-declare global {
-  interface Window {
-    __tsukiDebugRun?: (request: TsukiDebugRequest) => void;
-  }
-}
-
-function formatDebugOutput(label: string, value: unknown) {
-  if (typeof value === "string") return `${label}
-
-${value}`;
-  return `${label}
-
-${JSON.stringify(value, null, 2)}`;
-}
-
-function createDebugWindowHtml() {
-  const tabsJson = JSON.stringify(DEBUG_TOOL_TABS).replace(/</g, "\u003c");
-
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tsuki Debug</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: #f7f2ff;
-      background:
-        radial-gradient(circle at 8% 0%, rgba(136, 93, 255, 0.34), transparent 34%),
-        radial-gradient(circle at 92% 10%, rgba(88, 222, 204, 0.16), transparent 36%),
-        linear-gradient(135deg, #120d27, #050b19 64%, #030712);
-    }
-    header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 20px 22px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(4, 7, 22, 0.48);
-      backdrop-filter: blur(14px);
-      position: sticky;
-      top: 0;
-      z-index: 5;
-    }
-    .eyebrow { margin: 0 0 6px; color: #c9b4ff; font-size: 11px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }
-    h1 { margin: 0; font-size: 30px; line-height: 1; }
-    p { margin: 8px 0 0; color: rgba(247, 242, 255, 0.68); }
-    button {
-      border: 1px solid rgba(255,255,255,0.11);
-      border-radius: 12px;
-      color: #f7f2ff;
-      background: rgba(255,255,255,0.07);
-      cursor: pointer;
-      font-weight: 850;
-      transition: 120ms ease;
-    }
-    button:hover { border-color: rgba(150, 119, 255, 0.58); background: rgba(150, 119, 255, 0.15); }
-    button:disabled { cursor: not-allowed; opacity: 0.5; }
-    .close { padding: 10px 14px; }
-    main {
-      display: grid;
-      grid-template-columns: 170px minmax(0, 1fr) minmax(330px, 0.95fr);
-      gap: 16px;
-      padding: 18px;
-      min-height: calc(100vh - 102px);
-    }
-    nav, section {
-      border: 1px solid rgba(255, 255, 255, 0.075);
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.045);
-      box-shadow: 0 20px 70px rgba(0,0,0,0.22);
-    }
-    nav { display: flex; flex-direction: column; gap: 8px; padding: 12px; align-self: start; position: sticky; top: 108px; }
-    nav button { padding: 11px 12px; text-align: left; }
-    nav button.active { border-color: rgba(141, 104, 255, 0.72); background: rgba(141, 104, 255, 0.24); }
-    .tools { padding: 16px; align-self: start; }
-    .tool-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
-    .tool-grid button { min-height: 48px; padding: 10px 12px; text-align: left; }
-    .output { min-width: 0; display: flex; flex-direction: column; overflow: hidden; align-self: stretch; }
-    .output-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.075); }
-    .output-head button { padding: 8px 10px; }
-    pre { flex: 1; min-height: 460px; margin: 0; padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: rgba(247,242,255,0.88); font-size: 12px; line-height: 1.45; }
-    .status { color: rgba(247,242,255,0.64); font-size: 12px; margin-top: 8px; }
-    @media (max-width: 980px) { main { grid-template-columns: 1fr; } nav { position: static; flex-direction: row; flex-wrap: wrap; } }
-  </style>
-</head>
-<body>
-  <header>
-    <div>
-      <p class="eyebrow">Hidden Debug Menu</p>
-      <h1>Tsuki Debug</h1>
-      <p>Opened by typing <strong>d e b u g</strong>. You can leave this window open while using Tsuki.</p>
-      <div class="status" id="status">Ready.</div>
-    </div>
-    <button class="close" type="button" onclick="window.close()">Close</button>
-  </header>
-  <main>
-    <nav id="tabs"></nav>
-    <section class="tools"><div id="tools" class="tool-grid"></div></section>
-    <section class="output">
-      <div class="output-head"><strong>Output</strong><button type="button" id="copy">Copy</button></div>
-      <pre id="output">Debug window ready. Pick a tab and run a tool.</pre>
-    </section>
-  </main>
-  <script>
-    const tabs = ${tabsJson};
-    let active = tabs[0].id;
-    let busy = false;
-    const tabsEl = document.getElementById('tabs');
-    const toolsEl = document.getElementById('tools');
-    const outputEl = document.getElementById('output');
-    const statusEl = document.getElementById('status');
-
-    function setOutput(text) { outputEl.textContent = text; }
-    function setStatus(text) { statusEl.textContent = text; }
-    function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
-
-    function render() {
-      tabsEl.innerHTML = '';
-      tabs.forEach(tab => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = tab.label;
-        button.className = tab.id === active ? 'active' : '';
-        button.onclick = () => { active = tab.id; render(); };
-        tabsEl.appendChild(button);
-      });
-
-      const tab = tabs.find(t => t.id === active) || tabs[0];
-      toolsEl.innerHTML = '';
-      tab.tools.forEach(tool => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = tool.label;
-        button.disabled = busy;
-        button.onclick = () => runTool(tool);
-        toolsEl.appendChild(button);
-      });
-    }
-
-    function runTool(tool) {
-      if (busy) return;
-      if (!window.opener || !window.opener.__tsukiDebugRun) {
-        setOutput('Debug bridge is not connected. Keep the main Tsuki window open, then reopen this menu.');
-        return;
-      }
-      busy = true;
-      render();
-      setStatus(tool.label + ' running...');
-      setOutput(tool.label + ' running...');
-      window.opener.__tsukiDebugRun({ id: uid(), label: tool.label, command: tool.command, args: tool.args || {} });
-    }
-
-    window.addEventListener('message', (event) => {
-      const message = event.data || {};
-      if (message.type !== 'tsuki-debug-result') return;
-      busy = false;
-      render();
-      setStatus(message.ok ? 'Done.' : 'Failed.');
-      setOutput(message.output || 'No output.');
-    });
-
-    document.getElementById('copy').onclick = async () => {
-      try { await navigator.clipboard.writeText(outputEl.textContent || ''); setStatus('Copied output.'); }
-      catch { setStatus('Copy failed. Select the text manually.'); }
-    };
-
-    render();
-  </script>
-</body>
-</html>`;
-}
-
-function DebugWindowApp() {
-  const [activeTab, setActiveTab] = useState<DebugTab>("overview");
-  const [busyLabel, setBusyLabel] = useState<string | null>(null);
-  const [status, setStatus] = useState("Ready.");
-  const [output, setOutput] = useState("Debug window ready. Pick a tab and run a tool.");
-
-  const active = DEBUG_TOOL_TABS.find((tab) => tab.id === activeTab) ?? DEBUG_TOOL_TABS[0];
-
-  async function runTool(tool: DebugTool) {
-    if (busyLabel) return;
-
-    setBusyLabel(tool.label);
-    setStatus(`${tool.label} running...`);
-    setOutput(`${tool.label} running...`);
-
-    try {
-      const result = await invoke<unknown>(tool.command, tool.args ?? {});
-      setOutput(formatDebugOutput(tool.label, result));
-      setStatus("Done.");
-    } catch (error) {
-      setOutput(`${tool.label} failed\n\n${error instanceof Error ? error.message : String(error)}`);
-      setStatus("Failed.");
-    } finally {
-      setBusyLabel(null);
-    }
-  }
-
-  async function closeDebugWindow() {
-    try {
-      await getCurrentWindow().close();
-    } catch {
-      window.close();
-    }
-  }
-
-  async function copyOutput() {
-    try {
-      await navigator.clipboard.writeText(output);
-      setStatus("Copied output.");
-    } catch {
-      setStatus("Copy failed. Select the text manually.");
-    }
-  }
-
-  return (
-    <main className="debug-window-shell">
-      <header className="debug-window-header" data-tauri-drag-region>
-        <div data-tauri-drag-region>
-          <p className="eyebrow">Hidden Debug Menu</p>
-          <h1>Tsuki Debug</h1>
-          <p>Opened by typing <strong>d e b u g</strong>. This is a separate Tauri window, so the main app stays usable.</p>
-          <span className="debug-window-status">{status}</span>
-        </div>
-        <button type="button" className="debug-close-button" onClick={closeDebugWindow}>Close</button>
-      </header>
-
-      <section className="debug-window-grid">
-        <nav className="debug-tab-list" aria-label="Debug categories">
-          {DEBUG_TOOL_TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={tab.id === activeTab ? "active" : ""}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="debug-tool-panel">
-          <p className="eyebrow">{active.label} Tools</p>
-          <div className="debug-tool-grid">
-            {active.tools.map((tool) => (
-              <button key={tool.label} type="button" disabled={Boolean(busyLabel)} onClick={() => runTool(tool)}>
-                {busyLabel === tool.label ? "Running..." : tool.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="debug-output-panel">
-          <div className="debug-output-head">
-            <strong>Output</strong>
-            <button type="button" onClick={copyOutput}>Copy</button>
-          </div>
-          <pre>{output}</pre>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-
-function DebugFloatingPanel({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<DebugTab>("overview");
-  const [busyLabel, setBusyLabel] = useState<string | null>(null);
-  const [status, setStatus] = useState("Ready.");
-  const [output, setOutput] = useState("Debug panel ready. Pick a tab and run a tool.");
-  const panelRef = useRef<HTMLElement | null>(null);
-  const [position, setPosition] = useState(() => ({
-    x: Math.max(12, window.innerWidth - 1178),
-    y: 50,
-  }));
-  const [dragState, setDragState] = useState<{
-    pointerId: number;
-    startClientX: number;
-    startClientY: number;
-    startX: number;
-    startY: number;
-  } | null>(null);
-
-  const active = DEBUG_TOOL_TABS.find((tab) => tab.id === activeTab) ?? DEBUG_TOOL_TABS[0];
-
-  function clampPanelPosition(x: number, y: number) {
-    const panel = panelRef.current;
-    const width = panel?.offsetWidth ?? 920;
-    const height = panel?.offsetHeight ?? 580;
-    const maxX = Math.max(12, window.innerWidth - Math.min(160, width));
-    const maxY = Math.max(12, window.innerHeight - Math.min(120, height));
-
-    return {
-      x: Math.max(8, Math.min(maxX, x)),
-      y: Math.max(8, Math.min(maxY, y)),
-    };
-  }
-
-  function beginPanelDrag(event: ReactPointerEvent<HTMLElement>) {
-    if (event.button !== 0) return;
-    if ((event.target as HTMLElement | null)?.closest("button")) return;
-
-    event.preventDefault();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDragState({
-      pointerId: event.pointerId,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startX: position.x,
-      startY: position.y,
-    });
-  }
-
-  function movePanelDrag(event: ReactPointerEvent<HTMLElement>) {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-
-    const next = clampPanelPosition(
-      dragState.startX + event.clientX - dragState.startClientX,
-      dragState.startY + event.clientY - dragState.startClientY,
-    );
-    setPosition(next);
-  }
-
-  function endPanelDrag(event: ReactPointerEvent<HTMLElement>) {
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    setDragState(null);
-  }
-
-  async function runTool(tool: DebugTool) {
-    if (busyLabel) return;
-
-    setBusyLabel(tool.label);
-    setStatus(`${tool.label} running...`);
-    setOutput(`${tool.label} running...`);
-
-    try {
-      const result = await invoke<unknown>(tool.command, tool.args ?? {});
-      setOutput(formatDebugOutput(tool.label, result));
-      setStatus("Done.");
-    } catch (error) {
-      setOutput(`${tool.label} failed\n\n${error instanceof Error ? error.message : String(error)}`);
-      setStatus("Failed.");
-    } finally {
-      setBusyLabel(null);
-    }
-  }
-
-  async function copyOutput() {
-    try {
-      await navigator.clipboard.writeText(output);
-      setStatus("Copied output.");
-    } catch {
-      setStatus("Copy failed. Select the text manually.");
-    }
-  }
-
-  return (
-    <div className="debug-floating-layer" aria-live="polite">
-      <section
-        ref={panelRef}
-        className="debug-floating-panel"
-        role="dialog"
-        aria-modal="false"
-        aria-label="Tsuki debug menu"
-        style={{ left: position.x, top: position.y, right: "auto" }}
-      >
-        <header
-          className={`debug-window-header debug-floating-drag-handle ${dragState ? "dragging" : ""}`}
-          onPointerDown={beginPanelDrag}
-          onPointerMove={movePanelDrag}
-          onPointerUp={endPanelDrag}
-          onPointerCancel={endPanelDrag}
-        >
-          <div>
-            <p className="eyebrow">Hidden Debug Menu</p>
-            <h1>Tsuki Debug</h1>
-            <span className="debug-window-status">{status}</span>
-          </div>
-          <button type="button" className="debug-close-button" onClick={onClose}>Close</button>
-        </header>
-
-        <section className="debug-window-grid">
-          <nav className="debug-tab-list" aria-label="Debug categories">
-            {DEBUG_TOOL_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                className={tab.id === activeTab ? "active" : ""}
-                onClick={() => setActiveTab(tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </nav>
-
-          <div className="debug-tool-panel">
-            <p className="eyebrow">{active.label} Tools</p>
-            <div className="debug-tool-grid">
-              {active.tools.map((tool) => (
-                <button key={tool.label} type="button" disabled={Boolean(busyLabel)} onClick={() => runTool(tool)}>
-                  {busyLabel === tool.label ? "Running..." : tool.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="debug-output-panel">
-            <div className="debug-output-head">
-              <strong>Output</strong>
-              <button type="button" onClick={copyOutput}>Copy</button>
-            </div>
-            <pre>{output}</pre>
-          </div>
-        </section>
-      </section>
-    </div>
-  );
-}
-
-function BootScreen({ label, detail, progress }: BootStatus) {
+function BootScreen({ message = "Loading paths, theme, source cache, installed state, and app updates..." }: { message?: string }) {
   return (
     <main className="boot-screen">
       <div className="boot-card">
         <div className="boot-logo-orb">
-          <span>æœˆ</span>
+          <span>月</span>
         </div>
         <div>
           <p className="eyebrow">TSUKI MOD MANAGER</p>
-          <h1>{label}</h1>
-          <p>{detail}</p>
+          <h1>Opening Tsuki</h1>
+          <p>{message}</p>
         </div>
         <div className="boot-progress">
-          <div style={{ width: `${Math.max(8, Math.min(100, progress))}%` }} />
+          <div />
         </div>
       </div>
     </main>
+  );
+}
+
+
+
+function redactDebugValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.slice(0, 12).map(redactDebugValue);
+
+  if (value && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const lower = key.toLowerCase();
+      if (lower.includes("apikey") || lower.includes("api_key") || lower.includes("token") || lower.includes("secret") || lower.includes("bearer")) {
+        output[key] = entry ? "[saved/redacted]" : null;
+      } else {
+        output[key] = redactDebugValue(entry);
+      }
+    }
+
+    return output;
+  }
+
+  if (typeof value === "string") {
+    return value
+      .replace(/([A-Za-z0-9+/]{24,}={0,2}--[A-Za-z0-9+/=+\-]{8,}--[A-Za-z0-9+/=+\-]{8,})/g, "[redacted-api-key]")
+      .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, "Bearer [redacted]")
+      .replace(/apikey[=:\\"]+[^\\"&\s]+/gi, "apikey=[redacted]");
+  }
+
+  return value;
+}
+
+type DebugTab = "overview" | "browse" | "installed" | "receipts" | "launcher" | "updates" | "paths" | "backups";
+
+interface DebugAction {
+  label: string;
+  command: string;
+  args: Record<string, unknown>;
+}
+
+const DEBUG_TAB_META: Record<DebugTab, { label: string; description: string; checks: string[] }> = {
+  overview: {
+    label: "Overview",
+    description: "Run a broad health check and copy safe debug output.",
+    checks: ["Settings load", "Debug report", "Feature test summary"],
+  },
+  browse: {
+    label: "Browse",
+    description: "Checks Nexus, ModWorkshop, source cache, source tags, and browse responses.",
+    checks: ["Nexus browse sample", "ModWorkshop browse sample", "Source index"],
+  },
+  installed: {
+    label: "Installed",
+    description: "Checks local PAK scan, managed installs, and installed-state records.",
+    checks: ["PAK mod scan", "Managed installs", "Installed state records"],
+  },
+  receipts: {
+    label: "Receipts",
+    description: "Inspects install receipts, tracked files, and receipt repair data.",
+    checks: ["Install receipts", "Receipt repair items", "Installed mod updates"],
+  },
+  launcher: {
+    label: "Launcher",
+    description: "Checks game path detection and launcher-facing state.",
+    checks: ["PAYDAY 3 path detection", "Vanilla/modded launch prerequisites"],
+  },
+  updates: {
+    label: "Updates",
+    description: "Checks app update manifest and update status.",
+    checks: ["App update check"],
+  },
+  paths: {
+    label: "Paths",
+    description: "Checks PAYDAY 3, AppData, cache, backups, receipts, and profiles paths.",
+    checks: ["PAYDAY 3 path detection", "Settings load", "Debug report paths"],
+  },
+  backups: {
+    label: "Backups",
+    description: "Checks backup status and backup folder access.",
+    checks: ["Backups status"],
+  },
+};
+const DEBUG_TAB_ACTIONS: Record<DebugTab, DebugAction[]> = {
+  overview: [
+    { label: "Load settings", command: "get_app_settings", args: {} },
+    { label: "Copy debug report data", command: "get_debug_report", args: {} },
+  ],
+  browse: [
+    { label: "Nexus browse sample", command: "fetch_source_mods_page", args: { source: "nexus", page: 1, sort: "updated" } },
+    { label: "ModWorkshop browse sample", command: "fetch_modworkshop_browse_live_page", args: { page: 1, sort: "recent" } },
+    { label: "Read source index", command: "list_source_index", args: { source: null, limit: 25 } },
+  ],
+  installed: [
+    { label: "Scan PAK mods", command: "scan_pak_mods", args: {} },
+    { label: "List managed installs", command: "list_managed_installs", args: {} },
+    { label: "Read installed-state", command: "list_installed_state_records", args: {} },
+  ],
+  receipts: [
+    { label: "List receipts", command: "list_install_receipts", args: {} },
+    { label: "Receipt repair data", command: "list_receipt_repair_items", args: {} },
+    { label: "Check receipt updates", command: "check_installed_source_updates", args: {} },
+  ],
+  launcher: [
+    { label: "Detect PAYDAY 3 path", command: "detect_payday3_path", args: {} },
+  ],
+  updates: [
+    { label: "Check app update", command: "check_app_update", args: { manifestUrl: null } },
+    { label: "Check installed mod updates", command: "check_installed_source_updates", args: {} },
+  ],
+  paths: [
+    { label: "Detect PAYDAY 3 path", command: "detect_payday3_path", args: {} },
+    { label: "Load settings paths", command: "get_app_settings", args: {} },
+    { label: "Generate debug report", command: "get_debug_report", args: {} },
+  ],
+  backups: [
+    { label: "Backup status", command: "get_backup_status", args: {} },
+    { label: "List backups", command: "list_pak_backups", args: {} },
+  ],
+};
+
+
+function resultBelongsToTab(result: DebugFeatureTestResult, tab: DebugTab) {
+  if (tab === "overview") return true;
+
+  const lower = result.name.toLowerCase();
+  if (tab === "browse") return lower.includes("nexus") || lower.includes("modworkshop") || lower.includes("source");
+  if (tab === "installed") return lower.includes("installed") || lower.includes("pak") || lower.includes("managed");
+  if (tab === "receipts") return lower.includes("receipt") || lower.includes("update");
+  if (tab === "launcher") return lower.includes("payday") || lower.includes("launcher");
+  if (tab === "updates") return lower.includes("update");
+  if (tab === "paths") return lower.includes("path") || lower.includes("settings") || lower.includes("debug report");
+  if (tab === "backups") return lower.includes("backup");
+  return false;
+}
+
+function DebugTestPanel({ open, onClose, onOpenSetupWizard }: { open: boolean; onClose: () => void; onOpenSetupWizard: () => void }) {
+  const [position, setPosition] = useState({ x: 190, y: 86 });
+  const [dragging, setDragging] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState<DebugFeatureTestResult[]>([]);
+  const [sessionLog, setSessionLog] = useState("Tsuki debug session started: " + new Date().toISOString());
+  const [tab, setTab] = useState<DebugTab>("overview");
+  const [receipts, setReceipts] = useState<InstallReceipt[]>([]);
+  const [receiptStatus, setReceiptStatus] = useState("Receipts not loaded yet.");
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+
+  const receiptStats = useMemo(() => {
+    const fileCount = receipts.reduce((total, receipt) => total + receipt.files.length, 0);
+    return { count: receipts.length, fileCount };
+  }, [receipts]);
+
+  useEffect(() => {
+    if (!dragging) return;
+
+    const onMove = (event: MouseEvent) => {
+      setPosition({
+        x: Math.max(8, Math.min(window.innerWidth - 220, event.clientX - dragOffsetRef.current.x)),
+        y: Math.max(32, Math.min(window.innerHeight - 120, event.clientY - dragOffsetRef.current.y)),
+      });
+    };
+
+    const onUp = () => setDragging(false);
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [dragging]);
+
+  function startDrag(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement;
+    if (target.closest("button, input, textarea, select")) return;
+
+    dragOffsetRef.current = {
+      x: event.clientX - position.x,
+      y: event.clientY - position.y,
+    };
+    setDragging(true);
+  }
+
+  async function loadReceipts() {
+    setReceiptStatus("Loading receipts...");
+
+    try {
+      const result = await invoke<InstallReceipt[]>("list_install_receipts");
+      setReceipts(result);
+      setReceiptStatus(result.length > 0 ? `Loaded ${result.length} receipt(s).` : "No install receipts found.");
+    } catch (error) {
+      setReceipts([]);
+      setReceiptStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  useEffect(() => {
+    if (!open || tab !== "receipts") return;
+    void loadReceipts();
+  }, [open, tab]);
+
+  async function runFeatureTests() {
+    if (running) return;
+
+    setRunning(true);
+    setProgress(0);
+    setResults([]);
+
+    const tests: Array<{ name: string; tab: DebugTab; command: string; args: Record<string, unknown>; warning?: (value: unknown) => string | null }> = [
+      { name: "Settings load", tab: "overview", command: "get_app_settings", args: {} },
+      { name: "PAYDAY 3 path detection", tab: "paths", command: "detect_payday3_path", args: {} },
+      { name: "PAK mod scan", tab: "installed", command: "scan_pak_mods", args: {} },
+      { name: "Managed installs", tab: "installed", command: "list_managed_installs", args: {} },
+      { name: "Installed state records", tab: "installed", command: "list_installed_state_records", args: {} },
+      { name: "Source index", tab: "browse", command: "list_source_index", args: { source: null, limit: 25 } },
+      { name: "Nexus browse sample", tab: "browse", command: "fetch_source_mods_page", args: { source: "nexus", page: 1, sort: "updated" } },
+      { name: "ModWorkshop browse sample", tab: "browse", command: "fetch_modworkshop_browse_live_page", args: { page: 1, sort: "recent" } },
+      { name: "Backups status", tab: "backups", command: "get_backup_status", args: {} },
+      { name: "Profiles list", tab: "overview", command: "list_mod_profiles", args: {} },
+      { name: "Install receipts", tab: "receipts", command: "list_install_receipts", args: {} },
+      { name: "Runtime lock", tab: "launcher", command: "payday3_runtime_lock_status", args: {} },
+      { name: "Last install diagnostic", tab: "installed", command: "get_last_install_diagnostic", args: {} },
+      { name: "App update check", tab: "updates", command: "check_app_update", args: { manifestUrl: null } },
+      { name: "Debug report", tab: "overview", command: "get_debug_report", args: {} },
+    ];
+
+    const nextResults: DebugFeatureTestResult[] = [];
+
+    for (let index = 0; index < tests.length; index += 1) {
+      const test = tests[index];
+      setTab(test.tab);
+      setProgress(Math.round((index / tests.length) * 100));
+
+      try {
+        const value = await Promise.race([
+          invoke<unknown>(test.command, test.args),
+          new Promise((_, reject) => window.setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000)),
+        ]);
+
+        const safeValue = redactDebugValue(value);
+        const json = typeof safeValue === "string" ? safeValue : JSON.stringify(safeValue);
+        const detail = json && json.length > 220 ? `${json.slice(0, 220)}...` : (json || "Command completed.");
+        const warning = test.warning?.(value) ?? null;
+        nextResults.push({ name: test.name, status: warning ? "warning" : "passed", detail: warning ?? detail });
+      } catch (error) {
+        nextResults.push({ name: test.name, status: "failed", detail: error instanceof Error ? error.message : String(error) });
+      }
+
+      setResults([...nextResults]);
+    }
+
+    const finalLog = [
+      "Tsuki Feature Test Log",
+      new Date().toISOString(),
+      "",
+      ...nextResults.map((result) => `[${result.status.toUpperCase()}] ${result.name}: ${result.detail}`),
+    ].join("\n");
+    setSessionLog(finalLog);
+    window.dispatchEvent(new CustomEvent("tsuki-debug-log-updated", { detail: finalLog }));
+
+    setProgress(100);
+    setRunning(false);
+  }
+
+  async function copyFeatureTestLog() {
+    const text = sessionLog || [
+      "Tsuki Feature Test Log",
+      new Date().toISOString(),
+      "",
+      ...results.map((result) => `[${result.status.toUpperCase()}] ${result.name}: ${result.detail}`),
+    ].join("\n");
+
+    await navigator.clipboard.writeText(text);
+  }
+
+  async function copyDebugReport() {
+    try {
+      const report = await invoke<string>("get_debug_report");
+      await navigator.clipboard.writeText(report);
+    } catch (error) {
+      await navigator.clipboard.writeText(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function runSingleDebugAction(action: DebugAction) {
+    if (running) return;
+
+    setRunning(true);
+    setProgress(18);
+
+    try {
+      const value = await Promise.race([
+        invoke<unknown>(action.command, action.args),
+        new Promise((_, reject) => window.setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000)),
+      ]);
+
+      const safeValue = redactDebugValue(value);
+      const json = typeof safeValue === "string" ? safeValue : JSON.stringify(safeValue);
+      const detail = json && json.length > 320 ? `${json.slice(0, 320)}...` : (json || "Command completed.");
+      if (action.command === "list_install_receipts" && Array.isArray(value)) {
+        setReceipts(value as InstallReceipt[]);
+        setReceiptStatus(`Loaded ${(value as InstallReceipt[]).length} receipt(s).`);
+      }
+      setResults((current) => [
+        { name: action.label, status: "passed", detail },
+        ...current.filter((result) => result.name !== action.label),
+      ]);
+      setSessionLog((current) => `${current}\n[PASSED] ${action.label}: ${detail}`);
+      setProgress(100);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setResults((current) => [
+        { name: action.label, status: "failed", detail },
+        ...current.filter((result) => result.name !== action.label),
+      ]);
+      setSessionLog((current) => `${current}\n[FAILED] ${action.label}: ${detail}`);
+      setProgress(100);
+    } finally {
+      window.setTimeout(() => {
+        setRunning(false);
+        setProgress(0);
+      }, 350);
+    }
+  }
+
+  if (!open) return null;
+
+  const activeInfo = DEBUG_TAB_META[tab];
+  const visibleResults = results.filter((result) => resultBelongsToTab(result, tab));
+
+  return (
+    <aside className="secret-debug-panel" style={{ left: position.x, top: position.y }}>
+      <div className="secret-debug-header" onMouseDown={startDrag}>
+        <div>
+          <p className="eyebrow">Secret debug</p>
+          <h2>Tsuki Diagnostics</h2>
+        </div>
+        <button className="ghost-button compact" type="button" onClick={onClose}>Close</button>
+      </div>
+
+      <div className="secret-debug-tabs">
+        {(Object.keys(DEBUG_TAB_META) as DebugTab[]).map((id) => (
+          <button className={tab === id ? "active" : ""} type="button" key={id} onClick={() => setTab(id)}>{DEBUG_TAB_META[id].label}</button>
+        ))}
+      </div>
+
+      <article className="secret-debug-tab-panel">
+        <div>
+          <p className="eyebrow">{activeInfo.label}</p>
+          <h3>{activeInfo.description}</h3>
+        </div>
+        <div className="secret-debug-tab-actions">
+          {DEBUG_TAB_ACTIONS[tab].map((action) => (
+            <button className="ghost-button compact" type="button" key={action.label} onClick={() => runSingleDebugAction(action)} disabled={running}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+        <ul>
+          {activeInfo.checks.map((check) => <li key={check}>{check}</li>)}
+        </ul>
+      </article>
+
+      {tab === "receipts" && (
+        <section className="secret-debug-receipts" aria-label="Receipt diagnostics">
+          <div className="secret-debug-receipt-stats">
+            <article>
+              <span>Receipts</span>
+              <strong>{receiptStats.count}</strong>
+            </article>
+            <article>
+              <span>Tracked Files</span>
+              <strong>{receiptStats.fileCount}</strong>
+            </article>
+            <button className="ghost-button compact" type="button" onClick={loadReceipts} disabled={running}>
+              Refresh Receipts
+            </button>
+          </div>
+          <p className="muted-inline">{receiptStatus}</p>
+          {receipts.length > 0 && (
+            <div className="secret-debug-receipt-list">
+              {receipts.slice(0, 8).map((receipt) => (
+                <article className="secret-debug-receipt-row" key={receipt.id}>
+                  <strong>{receipt.displayName}</strong>
+                  <span>{receipt.source} - {receipt.files.length} files</span>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      <div className="secret-debug-actions">
+        <button className="ghost-button compact install-button" type="button" onClick={runFeatureTests} disabled={running}>
+          {running ? "Testing..." : "Test All Features"}
+        </button>
+        <button className="ghost-button compact" type="button" onClick={copyFeatureTestLog} disabled={results.length === 0}>Copy Test Log</button>
+        <button className="ghost-button compact" type="button" onClick={copyDebugReport}>Copy Debug Report</button>
+        <button className="ghost-button compact" type="button" onClick={onOpenSetupWizard}>Open Setup Wizard</button>
+      </div>
+
+      <div className="secret-debug-progress" aria-label="Feature test progress">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+
+      <div className="secret-debug-log">
+        {visibleResults.map((result) => (
+          <article className={`secret-debug-result ${result.status}`} key={`${result.name}-${result.detail}`}>
+            <strong>{result.status === "passed" ? "✓" : result.status === "warning" ? "!" : "×"} {result.name}</strong>
+            <p>{result.detail}</p>
+          </article>
+        ))}
+        {visibleResults.length === 0 && (
+          <p className="muted-inline">No {activeInfo.label.toLowerCase()} results yet. Use one of this tab's buttons or run Test All Features.</p>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+
+const SETUP_WIZARD_DONE_KEY = "tsuki-setup-wizard-complete:v1";
+
+function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: boolean; onClose: () => void; onOpenSettings: () => void; onOpenBrowse: () => void }) {
+  const [step, setStep] = useState(0);
+  const [pathStatus, setPathStatus] = useState("Not checked yet.");
+  const [sourceStatus, setSourceStatus] = useState("Not verified yet.");
+  const [busy, setBusy] = useState(false);
+
+  if (!open) return null;
+
+  const finish = () => {
+    window.localStorage.setItem(SETUP_WIZARD_DONE_KEY, "true");
+    onClose();
+  };
+
+  const detectPath = async () => {
+    setBusy(true);
+    try {
+      setPathStatus(await invoke<string>("detect_payday3_path"));
+    } catch (error) {
+      setPathStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifySources = async () => {
+    setBusy(true);
+    try {
+      setSourceStatus(await invoke<string>("verify_source_settings"));
+    } catch (error) {
+      setSourceStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const steps = [
+    { title: "Welcome to Tsuki", body: "This wizard checks your PAYDAY 3 paths, explains source keys, and gets you to Browse without making the normal UI noisy." },
+    { title: "Game path", body: "Tsuki can auto-detect PAYDAY 3. Manual path editing lives in Settings → Game." },
+    { title: "Sources", body: "ModWorkshop works without login. Nexus needs your personal API key for browsing/downloading." },
+    { title: "Ready", body: "You can reopen this wizard from the secret Debug panel by double-clicking the version badge." },
+  ];
+
+  return (
+    <div className="setup-wizard-overlay" role="dialog" aria-modal="true">
+      <section className="setup-wizard-panel card">
+        <div className="setup-wizard-topline">
+          <p className="eyebrow">First launch setup</p>
+          <button className="ghost-button compact" type="button" onClick={finish}>Skip</button>
+        </div>
+        <div className="setup-wizard-progress">
+          {steps.map((item, index) => <span className={index <= step ? "active" : ""} key={item.title} />)}
+        </div>
+        <h1>{steps[step].title}</h1>
+        <p>{steps[step].body}</p>
+
+        {step === 1 && (
+          <div className="setup-wizard-action-card">
+            <strong>PAYDAY 3 detection</strong>
+            <p>{pathStatus}</p>
+            <button className="ghost-button install-button" type="button" onClick={detectPath} disabled={busy}>{busy ? "Checking..." : "Detect PAYDAY 3"}</button>
+            <button className="ghost-button compact" type="button" onClick={onOpenSettings}>Open Game Settings</button>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="setup-wizard-action-card">
+            <strong>Source access</strong>
+            <p>{sourceStatus}</p>
+            <button className="ghost-button install-button" type="button" onClick={verifySources} disabled={busy}>{busy ? "Verifying..." : "Verify Sources"}</button>
+            <button className="ghost-button compact" type="button" onClick={onOpenSettings}>Open Source Settings</button>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="setup-wizard-action-card ready">
+            <strong>Next stop: Browse</strong>
+            <p>Search, install, make backups, and keep receipts tracked from here.</p>
+            <button className="ghost-button install-button" type="button" onClick={() => { finish(); onOpenBrowse(); }}>Open Browse</button>
+          </div>
+        )}
+
+        <div className="setup-wizard-footer">
+          <button className="ghost-button compact" type="button" onClick={() => setStep((current) => Math.max(0, current - 1))} disabled={step === 0}>Back</button>
+          {step < steps.length - 1 ? (
+            <button className="ghost-button install-button" type="button" onClick={() => setStep((current) => Math.min(steps.length - 1, current + 1))}>Next</button>
+          ) : (
+            <button className="ghost-button install-button" type="button" onClick={finish}>Finish</button>
+          )}
+        </div>
+      </section>
+    </div>
   );
 }
 
 export default function App() {
   const [activePage, setActivePage] = useState<AppPage>("home");
   const [refreshTick, setRefreshTick] = useState(0);
-  const [bootReady, setBootReady] = useState(true);
-  const [bootStatus, setBootStatus] = useState<BootStatus>({
-    label: "Opening Tsuki",
-    detail: "Opening dashboard...",
-    progress: 5,
-  });
-  const bootStartedRef = useRef(false);
+  const [bootReady, setBootReady] = useState(false);
+  const [bootMessage, setBootMessage] = useState("Opening Tsuki...");
   const [homeOpenMod, setHomeOpenMod] = useState<SourceModSummary | null>(null);
   const [taskProgress, setTaskProgress] = useState<TaskProgressState>({ active: false, label: "", detail: "", progress: null });
   const taskProgressTimerRef = useRef<number | null>(null);
+  const taskProgressOrphanTimerRef = useRef<number | null>(null);
   const [activeThemeId, setActiveThemeId] = useState(() => window.localStorage.getItem("tsuki-theme-id") ?? "neon-rift");
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [appUpdateBusy, setAppUpdateBusy] = useState(false);
-  const debugChordRef = useRef("");
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [setupWizardOpen, setSetupWizardOpen] = useState(false);
 
-  const openDebugWindow = useCallback(() => {
-    setDebugPanelOpen(true);
-  }, []);
 
   const goToPage = (page: AppPage) => {
     setActivePage((current) => {
@@ -1801,10 +1188,15 @@ export default function App() {
     if (appUpdateBusy) return;
 
     setAppUpdateBusy(true);
+    if (!manual && !bootReady) setBootMessage("Checking for Tsuki app updates...");
 
     try {
       const result = await invoke<AppUpdateStatus>("check_app_update", { manifestUrl: null });
       setAppUpdate(result);
+
+      if (!manual && !bootReady) {
+        setBootMessage(result.updateAvailable ? `Update ${result.latestVersion ?? "available"} found. Finishing startup...` : "No app update found. Finishing startup...");
+      }
 
       if (manual && result.error) {
         console.warn("App update check:", result.error);
@@ -1819,6 +1211,7 @@ export default function App() {
         checkedAtUnix: Math.floor(Date.now() / 1000),
         error: message,
       });
+      if (!manual && !bootReady) setBootMessage("Update check failed. Continuing startup...");
     } finally {
       setAppUpdateBusy(false);
     }
@@ -1856,45 +1249,53 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey || event.altKey || event.metaKey) return;
+    let cancelled = false;
+    let readyTimer: number | null = null;
+    let updateTimer: number | null = null;
 
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
+    readyTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      setBootMessage("Ready.");
+      setBootReady(true);
+      window.performance.mark?.("tsuki-boot-ready-before-background-update-check");
 
-      const key = event.key.toLowerCase();
-      if (!/^[a-z]$/.test(key)) return;
+      updateTimer = window.setTimeout(() => {
+        if (!cancelled) void checkAppUpdate(false);
+      }, 8000);
+    }, 450);
 
-      debugChordRef.current = `${debugChordRef.current}${key}`.slice(-5);
-      if (debugChordRef.current === "debug") {
-        debugChordRef.current = "";
-        openDebugWindow();
-      }
+    return () => {
+      cancelled = true;
+      if (readyTimer !== null) window.clearTimeout(readyTimer);
+      if (updateTimer !== null) window.clearTimeout(updateTimer);
     };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openDebugWindow]);
-
-
-  useEffect(() => {
-    if (bootStartedRef.current) return;
-    bootStartedRef.current = true;
-
-    // v1.8.1: startup must never block on network, Home refresh, receipt scans, or repairs.
-    // Open the dashboard immediately. Manual refresh/update/restore buttons handle the heavy work.
-    setBootStatus({ label: "Opening Tsuki", detail: "Opening dashboard...", progress: 100 });
-    setBootReady(true);
-    window.performance.mark?.("tsuki-boot-ready-immediate");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!bootReady) return;
 
-    // v1.8.1: no automatic installed-source update scan on startup.
-    // This keeps app open fast and prevents backend/network work from freezing the UI.
-    // Use Installed -> Check Updates manually instead.
+    const cached = readReceiptUpdateCheckCache();
+    if (cached?.savedAt && Date.now() - cached.savedAt < TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      invoke<SourceUpdateStatus[]>("check_installed_source_updates")
+        .then((updates) => writeReceiptUpdateCheckCache(updates, "launch"))
+        .catch(() => {
+          // Silent launch check. Manual Check Updates still reports errors in Installed.
+        });
+    }, 45000);
+
+    return () => window.clearTimeout(timer);
+  }, [bootReady]);
+
+  useEffect(() => {
+    if (!bootReady) return;
+    if (window.localStorage.getItem(SETUP_WIZARD_DONE_KEY) !== "true") {
+      window.setTimeout(() => setSetupWizardOpen(true), 450);
+    }
   }, [bootReady]);
 
   useEffect(() => {
@@ -1908,10 +1309,17 @@ export default function App() {
         taskProgressTimerRef.current = null;
       }
     };
+    const clearOrphanTimer = () => {
+      if (taskProgressOrphanTimerRef.current !== null) {
+        window.clearTimeout(taskProgressOrphanTimerRef.current);
+        taskProgressOrphanTimerRef.current = null;
+      }
+    };
 
     const onTaskProgress = (event: Event) => {
       const detail = (event as CustomEvent<TaskProgressState>).detail;
       clearProgressTimer();
+      clearOrphanTimer();
 
       if (!detail || detail.active === false) {
         setTaskProgress({ active: false, label: "", detail: "", progress: null });
@@ -1934,10 +1342,16 @@ export default function App() {
           taskProgressTimerRef.current = null;
         }, 900);
       } else {
-        // Safety net for any task that finishes without sending a final clear event.
-        taskProgressTimerRef.current = window.setTimeout(() => {
-          setTaskProgress({ active: false, label: "", detail: "", progress: null });
-          taskProgressTimerRef.current = null;
+        // Safety net for any task that stops reporting before it sends a final clear event.
+        taskProgressOrphanTimerRef.current = window.setTimeout(() => {
+          setTaskProgress((current) => current.active
+            ? { ...current, detail: current.detail ? `${current.detail} (stopped reporting)` : "Task stopped reporting.", progress: 100 }
+            : current);
+          taskProgressTimerRef.current = window.setTimeout(() => {
+            setTaskProgress({ active: false, label: "", detail: "", progress: null });
+            taskProgressTimerRef.current = null;
+          }, 1200);
+          taskProgressOrphanTimerRef.current = null;
         }, 30000);
       }
     };
@@ -1946,7 +1360,21 @@ export default function App() {
 
     return () => {
       clearProgressTimer();
+      clearOrphanTimer();
       window.removeEventListener("tsuki-task-progress", onTaskProgress);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (taskProgressTimerRef.current !== null) {
+        window.clearTimeout(taskProgressTimerRef.current);
+        taskProgressTimerRef.current = null;
+      }
+      if (taskProgressOrphanTimerRef.current !== null) {
+        window.clearTimeout(taskProgressOrphanTimerRef.current);
+        taskProgressOrphanTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -1954,6 +1382,11 @@ export default function App() {
     window.localStorage.setItem("tsuki-theme-id", activeThemeId);
     document.documentElement.dataset.theme = activeThemeId;
   }, [activeThemeId]);
+
+
+  const openSecretDebugPanel = useCallback(() => {
+    setDebugPanelOpen(true);
+  }, []);
 
   const page = useMemo(() => {
     switch (activePage) {
@@ -1976,31 +1409,25 @@ export default function App() {
   }, [activePage, activeThemeId, refreshTick, homeOpenMod]);
 
   if (!bootReady) {
-    return <BootScreen {...bootStatus} />;
+    return <BootScreen message={bootMessage} />;
   }
 
   return (
     <div className="app-shell">
       <WindowTitleBar activePage={activePage} appUpdate={appUpdate} updateBusy={appUpdateBusy} onCheckUpdate={() => checkAppUpdate(true)} onInstallUpdate={installAppUpdate} />
       <div className="app-body">
-        <Sidebar activePage={activePage} onChangePage={goToPage} taskProgress={taskProgress} />
+        <Sidebar activePage={activePage} onChangePage={goToPage} taskProgress={taskProgress} onOpenDebug={openSecretDebugPanel} />
         <main className="app-main">
           <div className="page-scroll"><PageCrashGuard pageName={activePage}>{page}</PageCrashGuard></div>
+          <DebugTestPanel open={debugPanelOpen} onClose={() => setDebugPanelOpen(false)} onOpenSetupWizard={() => setSetupWizardOpen(true)} />
         </main>
       </div>
-      {debugPanelOpen && <DebugFloatingPanel onClose={() => setDebugPanelOpen(false)} />}
+      <SetupWizard
+        open={setupWizardOpen}
+        onClose={() => setSetupWizardOpen(false)}
+        onOpenSettings={() => { setSetupWizardOpen(false); setActivePage("settings"); }}
+        onOpenBrowse={() => { setActivePage("browse"); }}
+      />
     </div>
   );
 }
-
-/* Tsuki release noUnusedLocals guard
-   These helpers are kept dormant after the startup/debug-window rollback.
-   Do not call them during release startup. This only satisfies TypeScript noUnusedLocals. */
-void TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS;
-void readReceiptUpdateCheckCache;
-void writeReceiptUpdateCheckCache;
-void startupTimeout;
-void refreshHomeLiveCacheForStartup;
-void createDebugWindowHtml;
-void DebugWindowApp;
-

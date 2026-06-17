@@ -605,13 +605,19 @@
 
 .quick-file-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(260px, 1fr) max-content;
   gap: 10px;
   align-items: center;
+  min-width: 0;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 16px;
   background: rgba(0, 0, 0, 0.18);
+}
+
+.quick-file-row.installed {
+  border-color: color-mix(in srgb, var(--good) 36%, var(--line));
+  background: color-mix(in srgb, var(--good) 8%, rgba(0, 0, 0, 0.18));
 }
 
 .quick-file-row label {
@@ -623,12 +629,44 @@
 
 .quick-file-row label span {
   min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 3px;
 }
 
 .quick-file-row small {
   color: var(--muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.quick-file-row em {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--good) 38%, var(--line));
+  border-radius: 999px;
+  color: var(--good);
+  font-size: 0.72rem;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.quick-file-actions,
+.source-file-row-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+  min-width: max-content !important;
+  max-width: none !important;
+}
+
+.quick-file-actions .ghost-button,
+.source-file-row-actions .ghost-button {
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
 }
 
 .quick-file-row .download-progress {
@@ -640,6 +678,13 @@
   .quick-file-row,
   .source-file-row {
     grid-template-columns: 1fr;
+  }
+
+  .quick-file-actions,
+  .source-file-row-actions {
+    flex-wrap: wrap !important;
+    justify-content: flex-start !important;
+    min-width: 0 !important;
   }
 
   .download-progress {
@@ -1281,35 +1326,1725 @@
 }
 
 
-/* v1.8.8 Browse card overflow fix: keep the three-dot menu above nearby cards instead of clipped/covered. */
-.safe-browse-page,
-.source-mod-grid.cleaner-grid,
-.source-mod-card.cleaner-card,
-.source-mod-body,
-.source-card-actions {
-  overflow: visible;
+/* v1.8.1 Nexus API key notice */
+.safe-result.warning {
+  border-color: rgba(255, 223, 135, 0.42);
+  background: rgba(255, 223, 135, 0.08);
 }
 
+.safe-result.warning strong {
+  color: var(--warn);
+}
+
+
+/* v1.8.2 UI overhaul preview: sharper panels, cleaner cards, less debug-looking chrome */
+:root {
+  --tsuki-panel-radius: 6px;
+  --tsuki-card-radius: 4px;
+}
+
+.card,
+.hero-glass,
+.home-pro-hero,
+.home-pro-stats article,
+.home-showcase-card,
+.home-local-chip,
+.source-mod-card,
+.browse-hero,
+.browse-toolbar,
+.safe-mod-hero,
+.safe-description-card,
+.safe-files-card,
+.install-preview-panel,
+.confirm-panel,
+.settings-panel,
+.backup-card,
+.profile-save-card,
+.managed-row {
+  border-radius: var(--tsuki-card-radius) !important;
+}
+
+.ghost-button,
+.window-launch-button,
+.window-update-button,
+.nav-button,
+.source-tab,
+.status-pill,
+.badge,
+.setting-input,
+.select-input {
+  border-radius: 999px;
+}
+
+.home-pro-hero {
+  padding: 28px;
+}
+
+.home-pro-copy h1,
+.browse-hero h1,
+.safe-hero-copy h1 {
+  letter-spacing: -0.04em;
+}
+
+.home-pro-stats article p,
+.home-card-body > p,
+.source-card-description,
+.page-description,
+.muted-inline {
+  color: var(--muted);
+}
+
+.home-showcase-card,
 .source-mod-card.cleaner-card {
-  position: relative;
-  z-index: 1;
+  overflow: visible;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
 }
 
-.source-mod-card.cleaner-card:has(.card-more-menu[open]) {
-  z-index: 1200;
+.home-card-tags,
+.source-tag-row.visible-tags,
+.safe-badge-row {
+  gap: 6px;
+}
+
+.home-card-tags span,
+.status-pill.tag-pill {
+  font-size: 0.72rem;
+  padding: 5px 8px;
+  opacity: 0.92;
+}
+
+.source-mod-title-line strong,
+.home-card-body h3 {
+  line-height: 1.15;
 }
 
 .card-more-menu {
   position: relative;
-  z-index: 20;
+  z-index: 30;
 }
 
 .card-more-menu[open] {
-  z-index: 1300;
+  z-index: 999;
 }
 
 .card-more-menu > div {
-  z-index: 1400;
-  max-height: min(360px, 70vh);
-  overflow-y: auto;
+  z-index: 1000;
+  border-radius: 6px !important;
+}
+
+.safe-result small,
+.safe-file-row small,
+.quick-file-row small {
+  color: var(--muted);
+}
+
+.receipt-repair-list,
+.movie-validator-card,
+.repair-warning-list {
+  font-size: 0.9rem;
+}
+
+
+/* v1.8.2 Browse card cleanup */
+.browse-toolbar-controls {
+  align-items: center;
+}
+
+.source-mod-meta span:last-child {
+  opacity: 0.88;
+}
+
+.safe-detail-layout.polished {
+  align-items: start;
+}
+
+.safe-detail-art {
+  border-radius: 4px !important;
+  overflow: hidden;
+}
+
+.safe-description-card h2,
+.safe-files-card h2 {
+  margin-top: 18px;
+}
+
+.safe-description {
+  max-height: none;
+}
+
+/* v1.8.3 Browse cleanup: one search bar, cleaner details, sharper cards */
+.browse-toolbar {
+  align-items: center;
+}
+
+.browse-toolbar > div:first-child p,
+.browse-toolbar .muted-inline,
+.safe-result small {
+  display: none !important;
+}
+
+.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(280px, 1fr) 180px auto;
+  gap: 10px !important;
+  width: min(860px, 100%);
+  margin-left: auto;
+}
+
+.unified-search-form {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px !important;
+  width: 100%;
+}
+
+.unified-search-input {
+  width: 100% !important;
+}
+
+.unified-sort-select {
+  width: 100% !important;
+}
+
+.browse-source-switcher {
+  border-radius: 999px;
+  padding: 4px;
+  background: rgba(255,255,255,0.045);
+}
+
+.source-tab {
+  min-width: 142px;
+}
+
+.source-mod-grid.cleaner-grid {
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+}
+
+.source-mod-card.cleaner-card {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  min-height: 186px;
+  border-radius: 6px !important;
+}
+
+.source-mod-thumb.cleaner-thumb {
+  height: 100%;
+  min-height: 160px;
+  border-radius: 4px !important;
+}
+
+.source-mod-title-line strong,
+.source-card-description,
+.source-mod-meta,
+.safe-file-row strong,
+.quick-file-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-card-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.source-mod-meta {
+  gap: 8px;
+}
+
+.source-mod-meta span {
+  white-space: nowrap;
+}
+
+.source-card-actions {
+  margin-top: auto;
+}
+
+.safe-mod-hero.card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  padding: 24px;
+}
+
+.safe-detail-layout.polished {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+}
+
+.safe-detail-art {
+  display: grid;
+  place-items: center;
+  max-height: 420px;
+  overflow: hidden;
+  border-radius: 6px !important;
+  background: rgba(0,0,0,0.18);
+}
+
+.safe-detail-art img {
+  width: 100%;
+  height: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+
+.safe-file-row,
+.quick-file-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-radius: 6px !important;
+}
+
+.safe-file-row > div,
+.quick-file-row label span {
+  min-width: 0;
+}
+
+.safe-file-row strong,
+.quick-file-row strong {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.safe-file-row p,
+.quick-file-row small {
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+}
+
+.quick-install-actions .ghost-button:first-child + .ghost-button {
+  display: none !important;
+}
+
+@media (max-width: 980px) {
+  .unified-browser-controls,
+  .safe-detail-layout.polished,
+  .safe-mod-hero.card {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* v1.8.4 Browse fix: no fragile dropdowns, bigger thumbnails, cleaner cards */
+.browse-hero h1 { font-size: clamp(2rem, 4vw, 3rem); }
+
+.unified-browser-controls {
+  grid-template-columns: minmax(320px, 1fr) minmax(300px, auto) auto !important;
+  align-items: center;
+}
+
+.sort-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.sort-chip {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.045);
+  cursor: pointer;
+}
+
+.sort-chip.active,
+.sort-chip:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent-a) 60%, var(--line));
+  background: linear-gradient(135deg, rgba(139,92,246,0.24), rgba(70,211,217,0.10));
+}
+
+.source-mod-grid.cleaner-grid {
+  grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)) !important;
+  gap: 18px !important;
+}
+
+.source-mod-card.cleaner-card {
+  grid-template-columns: 190px minmax(0, 1fr) !important;
+  min-height: 230px !important;
+  padding: 16px !important;
+  border-radius: 4px !important;
+}
+
+.source-mod-thumb.cleaner-thumb {
+  width: 190px !important;
+  height: 198px !important;
+  min-height: 198px !important;
+}
+
+.source-mod-thumb img,
+.cleaner-thumb img {
+  object-fit: cover !important;
+}
+
+.source-card-description:empty { display: none !important; }
+
+.source-mod-title-line strong {
+  font-size: 1.15rem !important;
+  overflow-wrap: anywhere;
+}
+
+.source-mod-title-line > span {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-card-actions {
+  align-self: end;
+}
+
+.status-pill.tag-pill,
+.source-tag-row .status-pill {
+  border-color: color-mix(in srgb, var(--tag-color, var(--accent-a)) 46%, var(--line)) !important;
+  background: color-mix(in srgb, var(--tag-color, var(--accent-a)) 18%, rgba(255,255,255,0.04)) !important;
+}
+
+.tag-audio { --tag-color: #60a5fa; }
+.tag-cosmetic { --tag-color: #f472b6; }
+.tag-ui { --tag-color: #a78bfa; }
+.tag-maps, .tag-map { --tag-color: #34d399; }
+.tag-weapons, .tag-weapon { --tag-color: #fb7185; }
+.tag-gameplay { --tag-color: #fbbf24; }
+.tag-pak { --tag-color: #38bdf8; }
+.tag-ue4ss { --tag-color: #22c55e; }
+.tag-nexus, .tag-nexus-mods { --tag-color: #f97316; }
+.tag-modworkshop { --tag-color: #8b5cf6; }
+.tag-payday-3, .tag-payday3 { --tag-color: #06b6d4; }
+
+.safe-mod-hero.card,
+.safe-detail-layout.polished > .card {
+  border-radius: 4px !important;
+}
+
+.safe-file-row {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+}
+
+.safe-file-row strong {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+
+@media (max-width: 900px) {
+  .unified-browser-controls,
+  .source-mod-card.cleaner-card {
+    grid-template-columns: 1fr !important;
+  }
+
+  .source-mod-thumb.cleaner-thumb {
+    width: 100% !important;
+  }
+}
+
+
+/* v1.8.5 Browse card/button alignment and toolbar cleanup */
+.browse-toolbar.card {
+  display: grid !important;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr) !important;
+  gap: 18px !important;
+  align-items: center !important;
+  padding: 18px 20px !important;
+  border-radius: 4px !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(320px, 1fr) auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort sort" !important;
+  gap: 10px 12px !important;
+  justify-items: end !important;
+}
+
+.unified-search-form { grid-area: search !important; width: 100% !important; }
+.unified-search-form .setting-input { width: 100% !important; }
+.sort-chip-row { grid-area: sort !important; justify-content: flex-end !important; }
+.browse-toolbar-controls > .ghost-button { grid-area: refresh !important; }
+
+.source-mod-grid.cleaner-grid {
+  grid-template-columns: repeat(auto-fill, minmax(540px, 1fr)) !important;
+  align-items: stretch !important;
+}
+
+.source-mod-card.cleaner-card {
+  display: grid !important;
+  grid-template-columns: 190px minmax(0, 1fr) !important;
+  min-height: 238px !important;
+  height: 100% !important;
+  padding: 16px !important;
+  border-radius: 4px !important;
+  overflow: visible !important;
+}
+
+.source-mod-thumb.cleaner-thumb {
+  width: 190px !important;
+  height: 206px !important;
+  min-height: 206px !important;
+  border-radius: 3px !important;
+  overflow: hidden !important;
+}
+
+.source-mod-body {
+  display: grid !important;
+  grid-template-rows: auto minmax(40px, auto) auto minmax(28px, auto) 42px !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+  height: 100% !important;
+}
+
+.source-mod-title-line,
+.source-mod-meta,
+.source-card-description {
+  min-width: 0 !important;
+}
+
+.source-mod-title-line strong {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+}
+
+.source-card-description {
+  min-height: 40px !important;
+  max-height: 48px !important;
+  margin: 0 !important;
+}
+
+.source-tag-row.visible-tags {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+  max-height: 58px !important;
+  overflow: hidden !important;
+  align-content: flex-start !important;
+}
+
+.source-tag-row.visible-tags .status-pill,
+.source-tag-row.visible-tags .tag-pill {
+  min-width: 0 !important;
+  max-width: 124px !important;
+  height: 24px !important;
+  padding: 0 8px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  border-radius: 999px !important;
+}
+
+.source-tag-row.visible-tags .installed-pill {
+  min-width: 82px !important;
+  justify-content: center !important;
+  max-width: 92px !important;
+}
+
+.source-card-actions {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+  min-height: 42px !important;
+  margin-top: auto !important;
+  align-self: end !important;
+}
+
+.source-card-actions .ghost-button.compact {
+  min-width: 88px !important;
+  height: 34px !important;
+  justify-content: center !important;
+}
+
+.card-more-menu summary {
+  width: 34px !important;
+  height: 34px !important;
+  display: grid !important;
+  place-items: center !important;
+}
+
+.safe-file-row {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 12px !important;
+  overflow: hidden !important;
+}
+
+.safe-file-row strong,
+.safe-file-row p {
+  overflow-wrap: anywhere !important;
+}
+
+.safe-mod-hero.card {
+  border-radius: 4px !important;
+  max-width: 1280px !important;
+  margin-inline: auto !important;
+}
+
+.safe-detail-layout.polished {
+  max-width: 1280px !important;
+  margin-inline: auto !important;
+}
+
+@media (max-width: 980px) {
+  .browse-toolbar.card,
+  .browse-toolbar-controls.unified-browser-controls,
+  .source-mod-card.cleaner-card {
+    grid-template-columns: 1fr !important;
+    grid-template-areas: none !important;
+  }
+  .source-mod-thumb.cleaner-thumb { width: 100% !important; height: 220px !important; }
+}
+
+/* v1.8.6 Browse alignment pass */
+.browse-toolbar.card {
+  grid-template-columns: 240px minmax(0, 1fr) !important;
+  gap: 24px !important;
+  align-items: start !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(360px, 560px) auto auto !important;
+  grid-template-areas:
+    "search search refresh"
+    "sort sort sort" !important;
+  justify-content: end !important;
+  align-items: center !important;
+}
+
+.unified-search-form {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 10px !important;
+}
+
+.sort-chip-row {
+  justify-content: flex-end !important;
+  gap: 8px !important;
+}
+
+.source-mod-grid.cleaner-grid {
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)) !important;
+}
+
+.source-mod-card.cleaner-card {
+  grid-template-columns: 200px minmax(0, 1fr) !important;
+  min-height: 236px !important;
+  padding: 16px !important;
+}
+
+.source-mod-thumb.cleaner-thumb {
+  width: 200px !important;
+  height: 206px !important;
+}
+
+.source-mod-body {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 206px !important;
+  gap: 8px !important;
+}
+
+.source-mod-meta {
+  flex-wrap: wrap !important;
+  min-height: 20px !important;
+}
+
+.source-card-description {
+  min-height: 44px !important;
+  max-height: 48px !important;
+  overflow: hidden !important;
+}
+
+.source-tag-row.visible-tags {
+  margin-top: auto !important;
+  min-height: 30px !important;
+  max-height: 58px !important;
+  overflow: hidden !important;
+}
+
+.source-tag-row.visible-tags .status-pill,
+.source-tag-row.visible-tags .tag-pill {
+  height: 24px !important;
+  max-width: 112px !important;
+}
+
+.source-card-actions {
+  margin-top: 8px !important;
+  justify-content: flex-end !important;
+  align-items: center !important;
+  width: 100% !important;
+}
+
+.source-card-actions .ghost-button.compact {
+  width: 92px !important;
+  min-width: 92px !important;
+}
+
+.source-card-actions .installed-pill,
+.source-tag-row.visible-tags .installed-pill {
+  width: 92px !important;
+  min-width: 92px !important;
+  justify-content: center !important;
+}
+
+.safe-mod-hero.card,
+.safe-detail-layout.polished > .card,
+.safe-files-card {
+  border-radius: 4px !important;
+}
+
+.safe-detail-layout.polished {
+  max-width: 1320px !important;
+  margin-inline: auto !important;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px) !important;
+}
+
+.safe-file-row {
+  align-items: center !important;
+}
+
+.safe-file-row strong {
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+}
+
+@media (max-width: 980px) {
+  .browse-toolbar.card,
+  .browse-toolbar-controls.unified-browser-controls,
+  .source-mod-card.cleaner-card {
+    grid-template-columns: 1fr !important;
+  }
+  .source-mod-thumb.cleaner-thumb {
+    width: 100% !important;
+  }
+}
+
+
+/* v1.8.7 browse layout pass: tight toolbar + stable card actions */
+.browse-toolbar.card {
+  display: grid !important;
+  grid-template-columns: minmax(200px, 1fr) auto !important;
+  align-items: center !important;
+  gap: 22px !important;
+}
+.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: auto auto auto !important;
+  align-items: center !important;
+  justify-content: end !important;
+  gap: 10px !important;
+}
+.unified-search-form,
+.source-search-form.unified-search-form {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+}
+.unified-search-input,
+.source-search-form .setting-input.unified-search-input {
+  width: 340px !important;
+  max-width: 34vw !important;
+}
+.sort-chip-row {
+  display: flex !important;
+  justify-content: flex-end !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  gap: 7px !important;
+  max-width: 470px !important;
+}
+.source-mod-card.cleaner-card {
+  display: grid !important;
+  grid-template-columns: 215px minmax(0, 1fr) !important;
+  gap: 18px !important;
+  min-height: 220px !important;
+  padding: 18px !important;
+}
+.source-mod-thumb.cleaner-thumb {
+  width: 215px !important;
+  height: 170px !important;
+}
+.source-mod-body {
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+  height: 100% !important;
+}
+.source-mod-title-line {
+  min-height: 3.2rem !important;
+}
+.source-card-description {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2 !important;
+  -webkit-box-orient: vertical !important;
+  min-height: 2.9em !important;
+  overflow: hidden !important;
+  margin: 8px 0 8px !important;
+}
+.source-tag-row.visible-tags {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-content: flex-start !important;
+  gap: 7px !important;
+  max-height: 58px !important;
+  overflow: hidden !important;
+  margin-top: 2px !important;
+}
+.source-card-actions {
+  margin-top: auto !important;
+  align-self: end !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+  min-height: 42px !important;
+}
+.source-card-actions .ghost-button.compact,
+.source-card-actions .install-button,
+.source-card-actions .update-button,
+.source-card-actions .danger-button {
+  width: 104px !important;
+  min-width: 104px !important;
+  height: 38px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  white-space: nowrap !important;
+}
+@media (max-width: 1180px) {
+  .browse-toolbar.card,
+  .unified-browser-controls { grid-template-columns: 1fr !important; justify-content: stretch !important; }
+  .unified-search-input,
+  .source-search-form .setting-input.unified-search-input { width: min(100%, 520px) !important; max-width: none !important; }
+}
+
+/* v1.8.8 browse tightening: keep search grouped and action buttons pinned */
+.browse-toolbar-controls.unified-browser-controls {
+  grid-template-columns: auto auto !important;
+  justify-content: end !important;
+  align-items: center !important;
+}
+.source-search-form.unified-search-form {
+  grid-column: 1 / 2 !important;
+  justify-self: end !important;
+}
+.sort-chip-row {
+  grid-column: 1 / 3 !important;
+  justify-self: end !important;
+}
+.browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+  grid-column: 2 / 3 !important;
+  grid-row: 1 !important;
+}
+.source-mod-card.cleaner-card {
+  grid-template-rows: 1fr !important;
+  min-height: 204px !important;
+}
+.source-mod-body {
+  display: grid !important;
+  grid-template-rows: auto auto auto minmax(28px, 1fr) auto !important;
+}
+.source-card-description {
+  min-height: 2.55em !important;
+  max-height: 2.55em !important;
+  margin: 4px 0 2px !important;
+}
+.source-card-actions {
+  align-self: end !important;
+  justify-self: end !important;
+  margin-top: 6px !important;
+}
+
+
+/* v1.8.9 toolbar/tag/debug-clean browse fixes */
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(260px, 420px) auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort sort"
+    "tags tags" !important;
+  justify-content: end !important;
+  align-items: center !important;
+  gap: 9px 10px !important;
+}
+.source-search-form.unified-search-form {
+  grid-area: search !important;
+  display: inline-grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 8px !important;
+  width: 100% !important;
+  justify-self: end !important;
+}
+.unified-search-input,
+.source-search-form .setting-input.unified-search-input {
+  width: 100% !important;
+  max-width: none !important;
+}
+.browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+  grid-area: refresh !important;
+  width: auto !important;
+}
+.sort-chip-row {
+  grid-area: sort !important;
+  justify-self: end !important;
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 7px !important;
+  max-width: none !important;
+  overflow-x: auto !important;
+  scrollbar-width: thin !important;
+  padding-bottom: 2px !important;
+}
+.sort-chip {
+  min-width: auto !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  white-space: nowrap !important;
+}
+.mw-tag-filter-row {
+  grid-area: tags !important;
+  justify-self: end !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  max-width: 760px !important;
+  overflow: hidden !important;
+}
+.tag-filter-chip {
+  height: 26px !important;
+  max-width: 118px !important;
+  border-radius: 999px !important;
+  border: 1px solid color-mix(in srgb, var(--tag-color, var(--accent-a)) 46%, var(--line)) !important;
+  background: color-mix(in srgb, var(--tag-color, var(--accent-a)) 15%, rgba(255,255,255,0.04)) !important;
+  color: color-mix(in srgb, var(--tag-color, var(--text)) 64%, white) !important;
+  padding: 0 9px !important;
+  font-size: 0.76rem !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.tag-filter-chip.active {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tag-color, var(--accent-a)) 78%, white) inset !important;
+  color: white !important;
+}
+.source-mod-title-line > span {
+  display: none !important;
+}
+.source-card-description {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+  min-height: 2.6em !important;
+  max-height: 2.6em !important;
+}
+.source-mod-body {
+  grid-template-rows: auto auto minmax(32px, auto) minmax(28px, 1fr) auto !important;
+}
+@media (max-width: 1180px) {
+  .browse-toolbar-controls.unified-browser-controls {
+    grid-template-columns: 1fr !important;
+    grid-template-areas: "search" "refresh" "sort" "tags" !important;
+    justify-content: stretch !important;
+  }
+  .sort-chip-row,
+  .mw-tag-filter-row { justify-self: start !important; }
+}
+
+
+/* v1.8.10 focused cleanup: compact ModWorkshop tag dropdown + tighter search */
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(320px, 520px) auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort sort"
+    "tags tags" !important;
+  align-items: center !important;
+  justify-content: end !important;
+  gap: 10px 12px !important;
+}
+.source-search-form.unified-search-form {
+  grid-area: search !important;
+  justify-self: end !important;
+  display: grid !important;
+  grid-template-columns: minmax(240px, 1fr) auto !important;
+  gap: 8px !important;
+  width: min(100%, 520px) !important;
+}
+.source-search-form .setting-input.unified-search-input {
+  width: 100% !important;
+  max-width: none !important;
+}
+.browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+  grid-area: refresh !important;
+  justify-self: end !important;
+}
+.sort-chip-row {
+  grid-area: sort !important;
+  justify-self: end !important;
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 8px !important;
+  overflow-x: auto !important;
+  max-width: min(100%, 620px) !important;
+  padding-bottom: 2px !important;
+}
+.mw-tag-filter-row {
+  display: none !important;
+}
+.mw-tag-filter-select-wrap {
+  grid-area: tags !important;
+  justify-self: end !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  color: var(--muted) !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.02em !important;
+}
+.mw-tag-filter-select {
+  min-width: 190px !important;
+  height: 36px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--line) !important;
+  background: rgba(255,255,255,0.07) !important;
+  color: var(--text) !important;
+  padding: 0 12px !important;
+  outline: none !important;
+}
+.mw-tag-filter-select:focus {
+  border-color: var(--accent-a) !important;
+  box-shadow: 0 0 0 1px var(--accent-a) inset !important;
+}
+.source-mod-title-line > span {
+  display: none !important;
+}
+@media (max-width: 980px) {
+  .browse-toolbar-controls.unified-browser-controls {
+    grid-template-columns: 1fr !important;
+    grid-template-areas: "search" "sort" "tags" "refresh" !important;
+    justify-content: stretch !important;
+  }
+  .source-search-form.unified-search-form,
+  .sort-chip-row,
+  .mw-tag-filter-select-wrap,
+  .browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+    justify-self: stretch !important;
+  }
+}
+
+
+/* v1.8.11: reliable custom ModWorkshop tag dropdown + tighter browse toolbar */
+.browse-toolbar-controls.unified-browser-controls {
+  grid-template-columns: minmax(360px, 560px) auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort tags" !important;
+  align-items: center !important;
+}
+.source-search-form.unified-search-form {
+  justify-self: end !important;
+  width: min(100%, 560px) !important;
+}
+.sort-chip-row {
+  justify-self: end !important;
+  max-width: min(100%, 650px) !important;
+}
+.mw-tag-filter-select-wrap,
+.mw-tag-filter-select {
+  display: none !important;
+}
+.mw-tag-filter-menu {
+  grid-area: tags !important;
+  justify-self: end !important;
+  position: relative !important;
+  z-index: 30 !important;
+}
+.mw-tag-filter-menu summary {
+  list-style: none !important;
+  cursor: pointer !important;
+  height: 34px !important;
+  min-width: 154px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--line) !important;
+  background: rgba(255,255,255,0.07) !important;
+  color: var(--text) !important;
+  padding: 0 12px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  user-select: none !important;
+}
+.mw-tag-filter-menu summary::-webkit-details-marker { display: none !important; }
+.mw-tag-filter-menu summary span {
+  color: var(--muted) !important;
+  font-size: 0.72rem !important;
+  font-weight: 800 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+}
+.mw-tag-filter-menu summary strong {
+  max-width: 90px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.mw-tag-filter-popover {
+  position: absolute !important;
+  right: 0 !important;
+  top: calc(100% + 8px) !important;
+  width: 240px !important;
+  max-height: 320px !important;
+  overflow-y: auto !important;
+  padding: 8px !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--panel) 92%, #050816) !important;
+  box-shadow: 0 18px 42px rgba(0,0,0,0.45) !important;
+  display: grid !important;
+  gap: 6px !important;
+}
+.mw-tag-filter-popover button {
+  width: 100% !important;
+  border: 1px solid transparent !important;
+  background: rgba(255,255,255,0.045) !important;
+  color: var(--text) !important;
+  padding: 8px 10px !important;
+  text-align: left !important;
+  cursor: pointer !important;
+}
+.mw-tag-filter-popover button:hover,
+.mw-tag-filter-popover button.active {
+  border-color: var(--accent-a) !important;
+  background: rgba(139,92,246,0.2) !important;
+}
+.source-mod-title-line {
+  min-width: 0 !important;
+}
+.source-mod-title-line strong {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+@media (max-width: 1180px) {
+  .browse-toolbar-controls.unified-browser-controls {
+    grid-template-columns: 1fr !important;
+    grid-template-areas: "search" "sort" "tags" "refresh" !important;
+    justify-content: stretch !important;
+  }
+  .mw-tag-filter-menu,
+  .sort-chip-row,
+  .source-search-form.unified-search-form { justify-self: start !important; }
+}
+
+
+/* v1.8.12: dropdown rebuilt so it cannot hide behind cards */
+.browse-toolbar.card,
+.browse-toolbar,
+.browse-toolbar-controls.unified-browser-controls {
+  position: relative !important;
+  z-index: 5000 !important;
+  overflow: visible !important;
+}
+.source-mod-grid.cleaner-grid,
+.source-mod-grid {
+  position: relative !important;
+  z-index: 1 !important;
+}
+.mw-tag-filter-menu {
+  position: relative !important;
+  z-index: 6000 !important;
+}
+.mw-tag-filter-menu[open] {
+  z-index: 9000 !important;
+}
+.mw-tag-filter-popover {
+  position: static !important;
+  right: auto !important;
+  top: auto !important;
+  margin-top: 8px !important;
+  width: min(260px, 90vw) !important;
+  max-height: 260px !important;
+  z-index: 9001 !important;
+}
+.mw-tag-filter-popover button {
+  border-radius: 4px !important;
+}
+
+/* v1.8.13: tag dropdown overlays cards instead of stretching the toolbar */
+.browse-toolbar.card,
+.browse-toolbar,
+.browse-toolbar-controls.unified-browser-controls {
+  overflow: visible !important;
+  position: relative !important;
+  z-index: 10000 !important;
+}
+.source-mod-grid,
+.source-mod-grid.cleaner-grid {
+  position: relative !important;
+  z-index: 1 !important;
+}
+.mw-tag-filter-menu {
+  position: relative !important;
+  z-index: 10010 !important;
+  align-self: start !important;
+}
+.mw-tag-filter-menu[open] {
+  z-index: 2147483000 !important;
+}
+.mw-tag-filter-popover {
+  position: absolute !important;
+  right: 0 !important;
+  top: calc(100% + 8px) !important;
+  margin-top: 0 !important;
+  width: 270px !important;
+  max-height: 360px !important;
+  overflow-y: auto !important;
+  z-index: 2147483001 !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--panel) 94%, #050816) !important;
+  box-shadow: 0 22px 60px rgba(0,0,0,0.58) !important;
+}
+.mw-tag-filter-option.status-pill.tag-pill {
+  display: flex !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-height: 34px !important;
+  border-radius: 5px !important;
+  justify-content: flex-start !important;
+  font-size: 0.9rem !important;
+  font-weight: 800 !important;
+  background: color-mix(in srgb, var(--tag-color, var(--accent-a)) 20%, rgba(255,255,255,0.045)) !important;
+  border-color: color-mix(in srgb, var(--tag-color, var(--accent-a)) 55%, var(--line)) !important;
+  color: var(--text) !important;
+  padding: 8px 10px !important;
+  text-align: left !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.mw-tag-filter-option.status-pill.tag-pill.active,
+.mw-tag-filter-option.status-pill.tag-pill:hover {
+  border-color: color-mix(in srgb, var(--tag-color, var(--accent-a)) 82%, white) !important;
+  background: color-mix(in srgb, var(--tag-color, var(--accent-a)) 34%, rgba(255,255,255,0.06)) !important;
+}
+
+/* v1.8.29: compact Browse toolbar + actually usable ModWorkshop filters */
+.browse-toolbar.card {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 1fr) minmax(520px, 760px) !important;
+  gap: 18px !important;
+  align-items: start !important;
+  padding: 18px 20px !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort tags" !important;
+  gap: 10px 12px !important;
+  justify-content: end !important;
+  align-items: center !important;
+  width: 100% !important;
+}
+
+.source-search-form.unified-search-form {
+  grid-area: search !important;
+  display: grid !important;
+  grid-template-columns: minmax(260px, 1fr) auto auto !important;
+  gap: 8px !important;
+  width: 100% !important;
+  justify-self: stretch !important;
+}
+
+.source-search-form.unified-search-form .ghost-button,
+.source-search-form.unified-search-form .ghost-button.compact {
+  height: 36px !important;
+  min-width: 72px !important;
+  width: auto !important;
+  white-space: nowrap !important;
+  padding-inline: 14px !important;
+}
+
+.source-search-form.unified-search-form .setting-input.unified-search-input {
+  height: 36px !important;
+  min-width: 0 !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+  grid-area: refresh !important;
+  height: 36px !important;
+  min-width: 88px !important;
+  justify-self: end !important;
+}
+
+.sort-chip-row {
+  grid-area: sort !important;
+  justify-self: end !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-end !important;
+  gap: 7px !important;
+  max-width: 100% !important;
+  overflow: visible !important;
+  padding-bottom: 0 !important;
+}
+
+.sort-chip {
+  height: 32px !important;
+  padding: 0 12px !important;
+  font-size: 0.86rem !important;
+}
+
+.mw-tag-filter-menu {
+  grid-area: tags !important;
+  justify-self: end !important;
+  align-self: center !important;
+}
+
+.mw-tag-filter-menu summary {
+  height: 32px !important;
+  min-width: 150px !important;
+  padding: 0 12px !important;
+}
+
+.mw-tag-filter-menu summary strong {
+  max-width: 92px !important;
+}
+
+.mw-tag-filter-popover {
+  right: 0 !important;
+  left: auto !important;
+}
+
+.safe-result.empty-result {
+  margin-top: 14px !important;
+}
+
+@media (max-width: 1160px) {
+  .browse-toolbar.card {
+    grid-template-columns: 1fr !important;
+  }
+
+  .browse-toolbar-controls.unified-browser-controls {
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "search"
+      "sort"
+      "tags"
+      "refresh" !important;
+  }
+
+  .sort-chip-row,
+  .mw-tag-filter-menu,
+  .browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+    justify-self: stretch !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .source-search-form.unified-search-form {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* v1.8.30: tighter Browse toolbar. Keep Search/Clear on one line and tags/filter controls usable. */
+.browse-toolbar.card {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(560px, 900px) !important;
+  align-items: start !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: 1fr auto !important;
+  grid-template-areas:
+    "search refresh"
+    "sort tags" !important;
+  align-items: center !important;
+}
+
+.source-search-form.unified-search-form {
+  display: grid !important;
+  grid-template-columns: minmax(340px, 1fr) auto auto !important;
+  grid-auto-flow: column !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+}
+
+.source-search-form.unified-search-form .setting-input.unified-search-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+}
+
+.source-search-form.unified-search-form button.ghost-button,
+.source-search-form.unified-search-form button.ghost-button.compact {
+  width: auto !important;
+  min-width: 76px !important;
+  max-width: 120px !important;
+  justify-self: auto !important;
+  white-space: nowrap !important;
+}
+
+.sort-chip-row {
+  justify-self: end !important;
+  flex-wrap: wrap !important;
+}
+
+.mw-tag-filter-menu {
+  min-width: 160px !important;
+}
+
+@media (max-width: 900px) {
+  .source-search-form.unified-search-form {
+    grid-template-columns: 1fr auto auto !important;
+  }
+}
+
+/* v1.8.33: keep Browse simple. ModWorkshop only uses search/clear/refresh now. */
+.browse-toolbar.card {
+  align-items: center !important;
+  gap: 18px !important;
+}
+
+.browse-toolbar-controls.unified-browser-controls {
+  display: grid !important;
+  grid-template-columns: minmax(360px, 760px) auto !important;
+  align-items: center !important;
+  justify-content: end !important;
+  gap: 12px !important;
+  width: min(100%, 980px) !important;
+  margin-left: auto !important;
+}
+
+.source-search-form.unified-search-form {
+  display: grid !important;
+  grid-template-columns: minmax(260px, 1fr) auto auto !important;
+  align-items: center !important;
+  gap: 8px !important;
+  width: 100% !important;
+}
+
+.source-search-form .setting-input.unified-search-input {
+  width: 100% !important;
+  max-width: none !important;
+}
+
+.source-search-form.unified-search-form .ghost-button,
+.source-search-form.unified-search-form .ghost-button.compact,
+.browse-toolbar-controls.unified-browser-controls > button.ghost-button {
+  min-width: 92px !important;
+  white-space: nowrap !important;
+}
+
+.sort-chip-row {
+  justify-content: flex-end !important;
+}
+
+@media (max-width: 1100px) {
+  .browse-toolbar.card,
+  .browse-toolbar-controls.unified-browser-controls,
+  .source-search-form.unified-search-form {
+    grid-template-columns: 1fr !important;
+    justify-content: stretch !important;
+    width: 100% !important;
+  }
+}
+
+/* v1.8.34 source detail downloads cleanup */
+.source-file-buckets,
+.source-downloads-expanded-list,
+.quick-file-bucket-list {
+  display: grid;
+  gap: 12px;
+}
+
+.source-file-bucket,
+.source-downloads-expanded-group,
+.quick-file-bucket {
+  border: 1px solid rgba(186, 151, 255, 0.16);
+  background: rgba(14, 12, 25, 0.32);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.source-file-bucket-heading,
+.quick-file-bucket-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.source-file-bucket-heading h3,
+.source-downloads-expanded-group h3,
+.quick-file-bucket-heading strong {
+  margin: 0;
+  color: var(--text-main, #fff);
+  font-size: 0.95rem;
+}
+
+.source-file-bucket-heading p,
+.quick-file-bucket-heading small,
+.source-file-empty {
+  margin: 2px 0 0;
+  color: var(--text-muted, #b9acd8);
+  font-size: 0.78rem;
+}
+
+.source-download-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  min-width: 0;
+}
+
+.source-download-detail-row:first-of-type {
+  border-top: 0;
+}
+
+.source-download-detail-row strong {
+  color: var(--text-main, #fff);
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-download-detail-row span {
+  color: var(--text-muted, #b9acd8);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.source-download-detail-row > div:first-child,
+.source-file-row-v2 > div:first-child,
+.quick-file-row label span {
+  min-width: 0;
+}
+
+.source-file-row-v2 strong,
+.quick-file-row strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-row-v2 {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.source-file-row-v2 p,
+.quick-file-row small {
+  color: var(--text-muted, #b9acd8);
+  line-height: 1.35;
+}
+
+.quick-file-bucket .quick-file-row + .quick-file-row {
+  margin-top: 8px;
+}
+
+.source-description-prose p {
+  line-height: 1.65;
+}
+
+
+/* v1.8.36 theme sync for page-local cards */
+.source-mod-card,
+.installed-card,
+.installed-mod-card,
+.installed-entry-card,
+.source-detail-hero,
+.source-content-card,
+.source-files-card-v2,
+.source-meta-card,
+.source-tag-card {
+  color: var(--text) !important;
+  border-color: color-mix(in srgb, var(--line) 78%, var(--accent-a) 16%) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--panel) 88%, transparent), color-mix(in srgb, var(--panel-2) 82%, transparent)) !important;
+}
+
+.source-mod-card p,
+.installed-card p,
+.installed-mod-card p,
+.installed-entry-card p,
+.source-content-card p,
+.source-files-card-v2 p {
+  color: var(--muted) !important;
+}
+
+
+/* v1.8.37: keep source details responsive and author cards stable */
+.source-detail-hero-copy h1 {
+  overflow-wrap: anywhere;
+}
+
+.source-mod-meta span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-detail-page .source-tab-pane {
+  max-height: none;
+}
+
+.source-downloads-expanded-list,
+.source-description-prose,
+.source-notes-list,
+.source-comment-list {
+  contain: content;
+}
+
+
+/* v1.8.38: lighter source detail rendering and author-card polish */
+.source-detail-page,
+.source-detail-grid-v2,
+.source-tabbed-panel,
+.source-detail-side-stack,
+.source-tab-pane {
+  contain: layout paint;
+}
+
+.source-tab-pane,
+.source-downloads-expanded-list,
+.source-comment-list,
+.source-notes-list {
+  content-visibility: auto;
+  contain-intrinsic-size: 720px;
+}
+
+.source-mod-meta span:first-child {
+  color: var(--text-muted);
+}
+
+/* v1.8.39: source detail tabs stay light and empty tabs offer source-page exits */
+.source-empty-tab-actions {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+}
+
+.source-empty-tab-actions p {
+  margin: 0;
+}
+
+.source-detail-tabbed-main,
+.source-tabbed-panel,
+.source-tab-pane {
+  contain: layout paint;
+}
+
+.source-description-prose p,
+.source-notes-list p,
+.source-comment-list p {
+  max-width: 92ch;
+}
+/* v1.8.2 release blocker: file rows must not squeeze text into one-character columns. */
+.source-file-row-v2,
+.safe-file-row,
+.quick-file-row {
+  grid-template-columns: minmax(220px, 1fr) max-content !important;
+  align-items: center;
+  min-width: 0;
+}
+
+.source-file-row-v2 > div:first-child,
+.safe-file-row > div:first-child,
+.quick-file-row label,
+.quick-file-row label span {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.source-file-row-v2 strong,
+.source-file-row-v2 p,
+.safe-file-row strong,
+.safe-file-row p,
+.quick-file-row strong,
+.quick-file-row small {
+  min-width: 0;
+  max-width: 100%;
+  writing-mode: horizontal-tb;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.source-file-row-v2 strong,
+.safe-file-row strong,
+.quick-file-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: max-content;
+  max-width: none;
+}
+
+@media (max-width: 760px) {
+  .source-file-row-v2,
+  .safe-file-row,
+  .quick-file-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  .source-file-row-actions {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* v1.8.2 release blocker: source date stays readable at the lower-left of browse cards. */
+.source-mod-card.cleaner-card .source-mod-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.source-mod-card.cleaner-card .source-mod-meta {
+  margin-top: auto;
+  align-items: flex-end;
+}
+
+.source-mod-card.cleaner-card .source-card-date {
+  margin-right: auto;
+  white-space: nowrap;
 }

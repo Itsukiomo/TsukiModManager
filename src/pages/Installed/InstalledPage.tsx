@@ -1,11 +1,14 @@
 import "./InstalledPage.css";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { CardMoreMenu } from "../../components/CardMoreMenu";
 import type { PakModFile, PakScanResult } from "../../models/mod";
 import type { InstalledSourceMatch, ModSourceKind, SourceModDetail, SourceModSummary, SourceModFile, StagedDownloadResult, InstallApplyResult, SourceUpdateStatus } from "../../models/source";
 
 type InstalledView = "all" | "matched" | "updates" | "unmatched" | "raw";
-type SortMode = "smart" | "name" | "modified" | "size" | "enabled" | "disabled";
+type SortMode = "name" | "modified" | "size";
+type EnabledFilter = "all" | "on" | "off";
 
 interface CachedSourceMods {
   mods?: SourceModSummary[];
@@ -181,6 +184,10 @@ interface InstalledStateRecord {
   receiptId?: string | null;
   sourceModId?: string | null;
   sourceFileId?: string | null;
+  sourceFileName?: string | null;
+  sourceFileCategory?: string | null;
+  sourceFileUploadedAt?: string | null;
+  sourceFileVersion?: string | null;
   pageUrl?: string | null;
   thumbnailUrl?: string | null;
   bannerUrl?: string | null;
@@ -196,6 +203,17 @@ function sourceSummaryFromInstalledState(record: InstalledStateRecord): SourceMo
   const fileAliases = (record.files ?? [])
     .map((file) => file.fileName)
     .filter((fileName) => fileName && fileName.trim().length > 0);
+  const receiptTags = [
+    "PAYDAY 3",
+    "Tsuki-installed",
+    record.enabled ? "Enabled" : "Disabled",
+    record.location,
+    record.fileType,
+    record.filename,
+    ...(record.files ?? []).map((file) => file.location),
+    ...(record.files ?? []).map((file) => file.fileType),
+    ...fileAliases,
+  ];
 
   return {
     source: record.source as ModSourceKind,
@@ -209,8 +227,38 @@ function sourceSummaryFromInstalledState(record: InstalledStateRecord): SourceMo
     updatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
     downloads: null,
     likes: null,
-    shortDescription: [`Installed by Tsuki receipt ${record.receiptId ?? record.uid}`, ...fileAliases].join(" "),
-    tags: [...new Set([record.location, record.fileType, record.filename, ...fileAliases].filter(Boolean))],
+    shortDescription: [`Installed by Tsuki receipt ${record.receiptId ?? record.uid}`, record.enabled ? "Enabled" : "Disabled", ...fileAliases].join(" "),
+    tags: [...new Set(receiptTags.filter(Boolean) as string[])],
+  };
+}
+
+function receiptMatchFromInstalledState(record: InstalledStateRecord): InstalledSourceMatch | null {
+  if (!record.source || !record.sourceModId && !record.id) return null;
+
+  const sourceId = record.sourceModId ?? record.id;
+  const matchedFiles = [...new Set([
+    record.filename,
+    ...(record.files ?? []).flatMap((file) => [file.fileName, file.relativePath]),
+  ].filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+
+  return {
+    source: record.source as ModSourceKind,
+    sourceId,
+    installed: true,
+    enabled: record.enabled,
+    updateAvailable: false,
+    confidence: 100,
+    reason: `Tsuki install receipt/state record ${record.receiptId ?? record.uid}`,
+    matchedFiles,
+    installedModifiedUnix: record.installedAtUnix ?? null,
+    sourceUpdatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
+    sourceUpdatedUnix: record.installedAtUnix ?? null,
+    matchKind: "receipt",
+    sourceFileId: record.sourceFileId ?? record.fileId ?? null,
+    sourceFileName: record.sourceFileName ?? record.filename ?? null,
+    sourceFileCategory: record.sourceFileCategory ?? null,
+    sourceFileUploadedAt: record.sourceFileUploadedAt ?? null,
+    sourceFileVersion: record.sourceFileVersion ?? record.version ?? null,
   };
 }
 
@@ -256,12 +304,31 @@ function loadPairState(files: PakModFile[]): CachedPairState | null {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(PAIR_STATE_CACHE_KEY) ?? "{}") as CachedPairState;
 
-    if (!Array.isArray(parsed.sourceMods) || !parsed.matches || !parsed.fileSignature) return null;
-    if (parsed.fileSignature !== installedFileSignature(files)) return null;
+    if (!Array.isArray(parsed.sourceMods) || !parsed.matches) return null;
 
-    parsed.matches = stablePairMatches(parsed.matches);
+    const liveFileNames = new Set(files.flatMap((file) => fileNameKeys(file.fileName)));
+    const liveFullPaths = new Set(files.flatMap((file) => fileNameKeys(file.fullPath)));
+    const matches = stablePairMatches(parsed.matches);
 
-    return parsed;
+    // v1.8.25: do not throw away every proven pair just because one mod was
+    // uninstalled, added, or renamed. The old exact file-signature check made
+    // Installed look totally unpaired after a single uninstall. Keep receipt and
+    // proof pairs, then drop only pairs whose matched files are all gone.
+    const liveMatches = Object.fromEntries(
+      Object.entries(matches).filter(([, match]) => {
+        if (!Array.isArray(match.matchedFiles) || match.matchedFiles.length === 0) return true;
+
+        return match.matchedFiles.some((fileName) => (
+          fileNameKeys(fileName).some((key) => liveFileNames.has(key) || liveFullPaths.has(key))
+        ));
+      }),
+    ) as Record<string, InstalledSourceMatch>;
+
+    return {
+      ...parsed,
+      fileSignature: installedFileSignature(files),
+      matches: liveMatches,
+    };
   } catch {
     return null;
   }
@@ -282,6 +349,23 @@ interface PendingDelete {
   busyId: string;
 }
 
+interface ReinstallPickerState {
+  detail: SourceModDetail;
+  group: InstalledGroup;
+  sourceMatch: InstalledSourceMatch | null;
+  recommendedFileId: string | null;
+  recommendedReason: string;
+  replaceFileNames: string[];
+  candidatePool: SourceModSummary[];
+}
+
+interface RuntimeLockStatus {
+  payday3Running: boolean;
+  vanillaSessionActive: boolean;
+  toggleLocked: boolean;
+  message: string;
+}
+
 interface PairedInstalledMod {
   sourceMod: SourceModSummary;
   match: InstalledSourceMatch;
@@ -291,6 +375,24 @@ interface PairedInstalledMod {
 
 function sourceLabel(source: string) {
   return source === "modworkshop" ? "ModWorkshop" : "Nexus";
+}
+
+function inferAuthorFromModName(name?: string | null) {
+  const value = String(name ?? "").trim();
+  const match = value.match(/\s+by\s+([^()\[\]{}|•·]+)$/i);
+  const author = match?.[1]?.trim();
+  return author && author.length <= 48 ? author : null;
+}
+
+function displayAuthor(mod: SourceModSummary | SourceModDetail) {
+  return (mod.author && mod.author.trim()) || inferAuthorFromModName(mod.name) || null;
+}
+
+function displayModTitle(mod: SourceModSummary | SourceModDetail) {
+  const author = displayAuthor(mod);
+  if (!author) return mod.name;
+  const escapedAuthor = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return mod.name.replace(new RegExp(`\\s+by\\s+${escapedAuthor}\\s*$`, "i"), "").trim() || mod.name;
 }
 
 function sourceAccent(source: string) {
@@ -811,7 +913,7 @@ function claimedFileKeysFromMatches(matches: Record<string, InstalledSourceMatch
     if (!match.installed) continue;
 
     for (const file of match.matchedFiles ?? []) {
-      claimed.add(fileNameKey(file));
+      for (const key of fileNameKeys(file)) claimed.add(key);
     }
   }
 
@@ -928,10 +1030,13 @@ function directPairMatchesFromGroups(
 
 
 function pairFilesFromMatch(match: InstalledSourceMatch, groups: InstalledGroup[]) {
-  const matched = new Set(match.matchedFiles.map(fileNameKey));
+  const matched = new Set(match.matchedFiles.flatMap(fileNameKeys));
 
   const directGroups = groups.filter((group) => {
-    return group.files.some((file) => matched.has(fileNameKey(file.fileName)) || matched.has(fileNameKey(file.fullPath)));
+    return group.files.some((file) => (
+      fileNameKeys(file.fileName).some((key) => matched.has(key))
+      || fileNameKeys(file.fullPath).some((key) => matched.has(key))
+    ));
   });
 
   if (directGroups.length > 1) {
@@ -961,8 +1066,8 @@ function pairingGuardKey(sourceMod: SourceModSummary, match: InstalledSourceMatc
 }
 
 function itemEnabled(item: PairedInstalledMod) {
-  if (item.group) return item.group.enabled;
   if (item.match.matchKind === "receipt") return item.match.enabled !== false;
+  if (item.group) return item.group.enabled;
   return item.files.some((file) => file.enabled) ?? true;
 }
 
@@ -1003,6 +1108,291 @@ function installableSourceFiles(files: SourceModFile[]) {
   return newestSourceFiles(files).filter(isInstallableSourceFile);
 }
 
+function decodeHtmlEntities(text: string) {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number.parseInt(code, 10)))
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function cleanSourceDescription(text?: string | null) {
+  return decodeHtmlEntities(text || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\[\/?(?:heading|b|i|u|size|color|font|center|quote|list|\*|url|img)[^\]]*\]/gi, " ")
+    .replace(/\[code\]/gi, "`")
+    .replace(/\[\/code\]/gi, "`")
+    .replace(/Description\s+Images\s+Downloads\s+(Changelog\s+)?Dependencies\s*&\s*Instructions/gi, " ")
+    .replace(/Images\s+Downloads\s+(Changelog\s+)?Dependencies\s*&\s*Instructions/gi, " ")
+    .replace(/Install with Mod Organizer 2.*$/gim, "")
+    .replace(/Don't have Mod Organizer 2\??/gim, "")
+    .replace(/^\s*[a-f0-9]{4,}\s+/gim, "")
+    .replace(/\bDownloads?\s+\d+\b/gi, " ")
+    .replace(/\bViews?\s+\d+\b/gi, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function descriptionParagraphs(text?: string | null) {
+  const cleaned = cleanSourceDescription(text);
+  if (!cleaned) return ["No description loaded."];
+  return cleaned.split(/\n{2,}/).map((line) => line.trim()).filter(Boolean).slice(0, 10);
+}
+
+function renderLinkedText(text: string, openUrl: (url?: string | null) => void) {
+  const parts: ReactNode[] = [];
+  const pattern = /<a\s+[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>(.*?)<\/a>|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<)]+)/gi;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
+    const url = match[1] || match[4] || match[5];
+    const label = (match[2] || match[3] || url).replace(/<[^>]+>/g, "").trim() || url;
+    parts.push(
+      <button className="inline-description-link" type="button" key={`${url}-${match.index}`} onClick={() => openUrl(url)}>
+        {label}
+      </button>,
+    );
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts.length ? parts : text;
+}
+
+function sourceFileTypeLabel(file: SourceModFile) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pak")) return "PAK";
+  if (name.endsWith(".ucas")) return "UCAS";
+  if (name.endsWith(".utoc")) return "UTOC";
+  if (name.endsWith(".zip")) return "ZIP archive";
+  if (name.endsWith(".7z")) return "7Z archive";
+  if (name.endsWith(".rar")) return "RAR archive";
+  if (name.endsWith(".dll")) return "Win64 DLL";
+  if (name.endsWith(".lua")) return "Lua script";
+  if (name.endsWith(".ini")) return "INI config";
+  return "Mod file";
+}
+
+function sourceFileDateValue(file: SourceModFile) {
+  const raw = String(file.uploadedAt ?? "").trim();
+  if (!raw) return 0;
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) return numeric < 4_000_000_000 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sourceFileVersionScore(file: SourceModFile) {
+  const raw = `${file.version ?? ""} ${file.name}`.toLowerCase();
+  const numbers = raw.match(/\d+(?:\.\d+)?/g)?.slice(0, 4).map(Number) ?? [];
+  return numbers.reduce((score, value, index) => score + value / Math.pow(1000, index), 0);
+}
+
+function formatSourceFileDate(raw?: string | null) {
+  const value = String(raw ?? "").trim();
+  if (!value) return "Unknown date";
+  const numeric = /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+  const timestamp = Number.isFinite(numeric) ? (numeric < 4_000_000_000 ? numeric * 1000 : numeric) : Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return value.replace(/T.+$/, "");
+  return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric" }).format(new Date(timestamp));
+}
+
+function cleanVersionLabel(file: SourceModFile) {
+  const version = String(file.version ?? "").trim();
+  if (!version || version === "0") return "Version unknown";
+  return version.toLowerCase().startsWith("v") ? version : `v${version}`;
+}
+
+function sourceFileMetaLine(file: SourceModFile) {
+  return [
+    file.fileType ? file.fileType.toUpperCase() : null,
+    sourceFileTypeLabel(file),
+    cleanVersionLabel(file),
+    file.sizeLabel ?? "Unknown size",
+    typeof file.downloadCount === "number" ? `${file.downloadCount.toLocaleString()} downloads` : null,
+    `Uploaded ${formatSourceFileDate(file.uploadedAt)}`,
+  ].join(" · ");
+}
+
+type SourceFileBucket = "main" | "optional" | "old";
+
+function normalizedFileSeries(file: SourceModFile) {
+  return file.name
+    .toLowerCase()
+    .replace(/\.(zip|rar|7z|pak|ucas|utoc|dll|lua|ini)$/i, "")
+    // Strip both spaced versions ("version 1.2") and attached versions ("ExpansionVer1.0.2").
+    .replace(/(?:^|[^a-z0-9])(ver|version|v)\s*\d+(?:\.\d+){0,4}/gi, " ")
+    .replace(/(ver|version|v)\s*\d+(?:\.\d+){0,4}/gi, " ")
+    .replace(/\b\d+(?:\.\d+){0,4}\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function compareSourceFilesNewest(a: SourceModFile, b: SourceModFile) {
+  return sourceFileDateValue(b) - sourceFileDateValue(a)
+    || sourceFileVersionScore(b) - sourceFileVersionScore(a)
+    || String(b.id).localeCompare(String(a.id));
+}
+
+function sourceFileBucket(file: SourceModFile, newestMain?: SourceModFile | null, source?: ModSourceKind): SourceFileBucket {
+  const text = `${file.name} ${file.version ?? ""} ${file.downloadUrl ?? ""}`.toLowerCase();
+  if (/\b(old|legacy|previous|archive|archived|deprecated|outdated|unsupported)\b/.test(text)) return "old";
+  if (!newestMain || file.id === newestMain.id) return "main";
+  if (source === "modworkshop") return "optional";
+
+  const thisSeries = normalizedFileSeries(file);
+  const mainSeries = normalizedFileSeries(newestMain);
+  const sameSeries = Boolean(thisSeries && mainSeries && (thisSeries === mainSeries || thisSeries.includes(mainSeries) || mainSeries.includes(thisSeries)));
+  const olderDate = sourceFileDateValue(file) > 0 && sourceFileDateValue(newestMain) > 0 && sourceFileDateValue(file) < sourceFileDateValue(newestMain);
+  const olderVersion = sourceFileVersionScore(file) > 0 && sourceFileVersionScore(newestMain) > 0 && sourceFileVersionScore(file) < sourceFileVersionScore(newestMain);
+  if (sameSeries && file.id !== newestMain.id) return "old";
+  if (olderDate || olderVersion) return "old";
+  if (/\b(optional|addon|add-on|patch|compat|plugin|extra|lite|translation|variant|bonus|separate|requirement|required)\b/.test(text)) return "optional";
+  return "optional";
+}
+
+function groupedInstalledSourceFiles(files: SourceModFile[], source?: ModSourceKind) {
+  const installable = source === "modworkshop"
+    ? files.filter(isInstallableSourceFile)
+    : installableSourceFiles(files).sort(compareSourceFilesNewest);
+  const newestMain = source === "modworkshop"
+    ? installable[0] ?? null
+    : installable.find((file) => !/\b(optional|addon|add-on|patch|compat|plugin|extra|lite|translation|variant|old|legacy|previous|archive|deprecated)\b/i.test(`${file.name} ${file.version ?? ""}`)) ?? installable[0] ?? null;
+  const groups: Record<SourceFileBucket, SourceModFile[]> = { main: [], optional: [], old: [] };
+  for (const file of installable) groups[sourceFileBucket(file, newestMain, source)].push(file);
+  if (groups.main.length === 0 && installable.length > 0) {
+    groups.main.push(installable[0]);
+    groups.optional = groups.optional.filter((file) => file.id !== installable[0].id);
+    groups.old = groups.old.filter((file) => file.id !== installable[0].id);
+  }
+  return groups;
+}
+
+function sourceFileBucketOrder(category?: string | null): SourceFileBucket[] {
+  const lower = String(category ?? "").toLowerCase();
+  if (/\b(optional|addon|add-on|extra|variant)\b/.test(lower)) return ["optional"];
+  if (/\b(old|legacy|previous|archive|archived|deprecated|outdated)\b/.test(lower)) return ["old", "main"];
+  return ["main"];
+}
+
+function normalizedFileFamilyName(value: string) {
+  return String(value ?? "")
+    .toLowerCase()
+    .split(/[\\/]/)
+    .pop()!
+    .replace(/\.(zip|rar|7z|pak|ucas|utoc|dll|lua|ini)$/i, "")
+    .replace(/(?:^|[^a-z0-9])(ver|version|v)\s*\d+(?:\.\d+){0,4}/gi, " ")
+    .replace(/(ver|version|v)\s*\d+(?:\.\d+){0,4}/gi, " ")
+    .replace(/\b\d+(?:\.\d+){0,4}\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function fileFamilySimilarity(a: string, b: string) {
+  const left = normalizedFileFamilyName(a);
+  const right = normalizedFileFamilyName(b);
+  if (!left || !right) return 0;
+  if (left === right) return 100;
+  if (left.includes(right) || right.includes(left)) return 88;
+
+  const leftTokens = new Set(left.split(/\s+/).filter((token) => token.length > 1));
+  const rightTokens = new Set(right.split(/\s+/).filter((token) => token.length > 1));
+  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) overlap += 1;
+  const ratio = overlap / Math.max(leftTokens.size, rightTokens.size);
+  return Math.round(ratio * 78);
+}
+
+function matchedFileNamesForSourceFile(file: SourceModFile, match?: InstalledSourceMatch | null) {
+  if (!match?.installed) return [];
+  const needle = file.name.toLowerCase().replace(/\s+/g, "");
+  const fileId = file.id.toLowerCase();
+  return (match.matchedFiles ?? []).filter((value) => {
+    const clean = value.toLowerCase().replace(/\s+/g, "");
+    return clean.includes(needle) || clean.includes(fileId);
+  });
+}
+
+function bestReinstallFileForGroup(files: SourceModFile[], group: InstalledGroup, match?: InstalledSourceMatch | null) {
+  const installable = installableSourceFiles(files);
+  const groups = groupedInstalledSourceFiles(files, match?.source);
+  const exactId = String(match?.sourceFileId ?? "").trim();
+
+  if (exactId) {
+    const exact = installable.find((file) => String(file.id) === exactId);
+    if (exact) return { file: exact, reason: `exact saved file id ${exactId}` };
+  }
+
+  const installedNames = [
+    match?.sourceFileName ?? "",
+    ...(match?.matchedFiles ?? []),
+    ...group.files.flatMap((file) => [file.fileName, file.fullPath]),
+  ].filter((value) => value && normalizedFileFamilyName(value));
+
+  const buckets = sourceFileBucketOrder(match?.sourceFileCategory);
+  let best: { file: SourceModFile; score: number; bucket: SourceFileBucket } | null = null;
+
+  for (const bucket of buckets) {
+    for (const file of groups[bucket]) {
+      const score = Math.max(0, ...installedNames.map((name) => fileFamilySimilarity(name, file.name)));
+      if (score < 70) continue;
+      if (
+        !best
+        || score > best.score
+        || (score === best.score && compareSourceFilesNewest(file, best.file) < 0)
+      ) {
+        best = { file, score, bucket };
+      }
+    }
+
+    if (best) break;
+  }
+
+  if (best) {
+    return {
+      file: best.file,
+      reason: `${best.bucket} filename-family match (${best.score})`,
+    };
+  }
+
+  if (groups.main.length > 0) {
+    return {
+      file: groups.main[0],
+      reason: "newest Main file fallback",
+    };
+  }
+
+  return {
+    file: null,
+    reason: exactId
+      ? `saved file id ${exactId} no longer exists and no same-family ${buckets.join("/")} file was found`
+      : `no same-family ${buckets.join("/")} file was found`,
+  };
+}
+
+function reinstallPickerFiles(detail: SourceModDetail) {
+  const groups = groupedInstalledSourceFiles(detail.files, detail.source);
+  return ([
+    ["main", "Main files"],
+    ["optional", "Optional files"],
+    ["old", "Old versions"],
+  ] as Array<[SourceFileBucket, string]>)
+    .filter(([bucket]) => bucket !== "old" || groups.old.length > 0)
+    .flatMap(([bucket, label]) => groups[bucket].map((file) => ({ file, bucket, label })));
+}
+
 function limitList<T>(items: T[], limit: number) {
   return items.length > limit ? items.slice(0, limit) : items;
 }
@@ -1011,6 +1401,22 @@ function fileNameKey(value: string) {
   const parts = value.split(/[\\/]/).filter(Boolean);
   return (parts.length > 0 ? parts[parts.length - 1] : value).toLowerCase();
 }
+
+function fileNameKeys(value: string) {
+  const key = fileNameKey(value);
+  const canonical = enabledFileName(key).toLowerCase();
+  return key === canonical ? [key] : [key, canonical];
+}
+
+function installedFileChipLabel(value: string) {
+  const parts = enabledFileName(value).split(/[\\/]/).filter(Boolean);
+  const clean = parts.length > 0 ? parts[parts.length - 1] : enabledFileName(value);
+  if (clean.length <= 16) return clean;
+  const extension = clean.match(/\.[a-z0-9]{2,6}$/i)?.[0] ?? "";
+  const body = extension ? clean.slice(0, -extension.length) : clean;
+  return `${body.slice(0, 8)}…${extension}`;
+}
+
 
 
 function isPayday3SourceCandidate(mod: SourceModSummary) {
@@ -1032,6 +1438,8 @@ function isPayday3SourceCandidate(mod: SourceModSummary) {
     "left 4 dead",
     "blade & sorcery",
   ];
+
+  if (text.includes("tsuki-installed") || text.includes("installed by tsuki receipt")) return true;
 
   if (foreignMarkers.some((marker) => text.includes(marker))) return false;
 
@@ -1070,32 +1478,15 @@ function installedFileShortPath(value: string) {
   return parts.slice(-4).join("\\") || value;
 }
 
+function liveFileDataUnavailableMessageForInstalled() {
+  return "Live file data unavailable. Please try again.";
+}
+
 
 function sortPaired(items: PairedInstalledMod[], sortMode: SortMode) {
   return [...items].sort((a, b) => {
     if (sortMode === "modified") return (b.group?.modifiedUnix ?? 0) - (a.group?.modifiedUnix ?? 0);
     if (sortMode === "size") return (b.group?.sizeBytes ?? 0) - (a.group?.sizeBytes ?? 0);
-    if (sortMode === "enabled") {
-      const enabledCompare = Number(itemEnabled(b)) - Number(itemEnabled(a));
-      if (enabledCompare !== 0) return enabledCompare;
-      return a.sourceMod.name.localeCompare(b.sourceMod.name);
-    }
-    if (sortMode === "disabled") {
-      const disabledCompare = Number(!itemEnabled(b)) - Number(!itemEnabled(a));
-      if (disabledCompare !== 0) return disabledCompare;
-      return a.sourceMod.name.localeCompare(b.sourceMod.name);
-    }
-
-    if (sortMode === "smart") {
-      // Smart should not move cards just because a mod was toggled on/off.
-      // Toggled mods stay in-place unless the user explicitly picks On/Off sort.
-      if (a.match.updateAvailable !== b.match.updateAvailable) {
-        return Number(b.match.updateAvailable) - Number(a.match.updateAvailable);
-      }
-
-      if (a.match.confidence !== b.match.confidence) return b.match.confidence - a.match.confidence;
-    }
-
     return a.sourceMod.name.localeCompare(b.sourceMod.name);
   });
 }
@@ -1107,12 +1498,14 @@ export function InstalledPage() {
   const [sourceMods, setSourceMods] = useState<SourceModSummary[]>([]);
   const [matches, setMatches] = useState<Record<string, InstalledSourceMatch>>({});
   const [status, setStatus] = useState("Ready to scan installed mods.");
+  const [runtimeLock, setRuntimeLock] = useState<RuntimeLockStatus | null>(null);
   const [pairingStatus, setPairingStatus] = useState("Open Browse first so Tsuki has source cards to pair.");
   const [sourceCacheAge, setSourceCacheAge] = useState("unknown");
   const [sourceCacheBuckets, setSourceCacheBuckets] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
-  const [view, setView] = useState<InstalledView>("all");
-  const [sortMode, setSortMode] = useState<SortMode>("smart");
+  const [view] = useState<InstalledView>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("name");
+  const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>("all");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [selectedSourceMod, setSelectedSourceMod] = useState<SourceModDetail | null>(null);
@@ -1130,9 +1523,14 @@ export function InstalledPage() {
   const [rejectedPairings, setRejectedPairings] = useState<string[]>(() => loadStringList(REJECTED_PAIRINGS_KEY));
   const [customGroups, setCustomGroups] = useState<string[]>(() => loadStringList(CUSTOM_GROUPS_KEY));
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [reinstallPicker, setReinstallPicker] = useState<ReinstallPickerState | null>(null);
+  const [reinstallPickerSelectedIds, setReinstallPickerSelectedIds] = useState<string[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const autoPairTimerRef = useRef<number | null>(null);
   const pairingBusyRef = useRef(false);
+  const pairingLoadBusyRef = useRef(false);
+  const installedRefreshBusyRef = useRef(false);
+  const initialRefreshTimerRef = useRef<number | null>(null);
 
   const rawFiles = scanResult?.pakMods ?? [];
   const groups = useMemo(() => groupInstalledFiles(rawFiles), [rawFiles]);
@@ -1169,7 +1567,7 @@ export function InstalledPage() {
     return map;
   }, [sourceUpdates]);
 
-  const pairedMods = useMemo(() => {
+  const allPairedMods = useMemo(() => {
     const items: PairedInstalledMod[] = [];
 
     for (const sourceMod of filterPayday3SourceMods(sourceMods)) {
@@ -1203,8 +1601,14 @@ export function InstalledPage() {
       });
     }
 
+    return sortPaired(items, sortMode);
+  }, [customGroups, groups, matches, rejectedPairings, sortMode, sourceMods, updateStatusBySourceKey]);
+
+  const pairedMods = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const filtered = items.filter((item) => {
+    const filtered = allPairedMods.filter((item) => {
+      if (enabledFilter === "on" && !itemEnabled(item)) return false;
+      if (enabledFilter === "off" && itemEnabled(item)) return false;
       if (!query) return true;
 
       return (
@@ -1215,33 +1619,36 @@ export function InstalledPage() {
     });
 
     return sortPaired(filtered, sortMode);
-  }, [customGroups, groups, matches, rejectedPairings, searchQuery, sortMode, sourceMods, updateStatusBySourceKey]);
+  }, [allPairedMods, enabledFilter, searchQuery, sortMode]);
 
   const pairedFileNames = useMemo(() => {
     const names = new Set<string>();
 
-    for (const item of pairedMods) {
+    for (const item of allPairedMods) {
       for (const file of item.files) {
-        names.add(fileNameKey(file.fileName));
-        names.add(fileNameKey(file.fullPath));
+        for (const key of fileNameKeys(file.fileName)) names.add(key);
+        for (const key of fileNameKeys(file.fullPath)) names.add(key);
       }
 
       for (const fileName of item.match.matchedFiles) {
-        names.add(fileNameKey(fileName));
+        for (const key of fileNameKeys(fileName)) names.add(key);
       }
     }
 
     return names;
-  }, [pairedMods]);
+  }, [allPairedMods]);
 
   const pairedGroupKeys = useMemo(() => {
-    return new Set(pairedMods.map((item) => item.group?.key).filter((key): key is string => Boolean(key)));
-  }, [pairedMods]);
+    return new Set(allPairedMods.map((item) => item.group?.key).filter((key): key is string => Boolean(key)));
+  }, [allPairedMods]);
 
   const allUnmatchedGroups = useMemo(() => {
     return groups.filter((group) => {
       if (pairedGroupKeys.has(group.key)) return false;
-      return !group.files.some((file) => pairedFileNames.has(fileNameKey(file.fileName)) || pairedFileNames.has(fileNameKey(file.fullPath)));
+      return !group.files.some((file) => (
+        fileNameKeys(file.fileName).some((key) => pairedFileNames.has(key))
+        || fileNameKeys(file.fullPath).some((key) => pairedFileNames.has(key))
+      ));
     });
   }, [groups, pairedFileNames, pairedGroupKeys]);
 
@@ -1250,6 +1657,8 @@ export function InstalledPage() {
 
     return allUnmatchedGroups
       .filter((group) => {
+        if (enabledFilter === "on" && !group.enabled) return false;
+        if (enabledFilter === "off" && group.enabled) return false;
         if (!query) return true;
         return (
           group.label.toLowerCase().includes(query) ||
@@ -1259,17 +1668,9 @@ export function InstalledPage() {
       .sort((a, b) => {
         if (sortMode === "modified") return b.modifiedUnix - a.modifiedUnix;
         if (sortMode === "size") return b.sizeBytes - a.sizeBytes;
-        if (sortMode === "enabled") {
-          const enabledCompare = Number(b.enabled) - Number(a.enabled);
-          if (enabledCompare !== 0) return enabledCompare;
-        }
-        if (sortMode === "disabled") {
-          const disabledCompare = Number(!b.enabled) - Number(!a.enabled);
-          if (disabledCompare !== 0) return disabledCompare;
-        }
         return a.label.localeCompare(b.label);
       });
-  }, [allUnmatchedGroups, searchQuery, sortMode]);
+  }, [allUnmatchedGroups, enabledFilter, searchQuery, sortMode]);
 
   const autoPairQueue = useMemo(() => {
     return allUnmatchedGroups.filter((group) => !unpairableGroups.includes(group.key) && !customGroups.includes(group.key));
@@ -1431,8 +1832,10 @@ export function InstalledPage() {
 
 
   async function checkStateFirstUpdates() {
+    if (updatesBusy) return;
     setUpdatesBusy(true);
     setStatus("Checking updates for Tsuki-downloaded receipt mods only...");
+    reportTaskProgress("Check Updates", 12, "Checking receipt-backed source files...");
     try {
       const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates");
       writeReceiptUpdateCheckCache(updates, "manual");
@@ -1440,15 +1843,76 @@ export function InstalledPage() {
       setSourceUpdates(updates);
       const count = updates.filter((update) => update.updateAvailable).length;
       setStatus(`Receipt update check complete: ${count}/${updates.length} Tsuki-downloaded mod(s) have updates.`);
+      reportTaskProgress("Check Updates", 100, `${count}/${updates.length} update(s) found.`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      reportTaskProgress("Refresh failed", 100, message);
     } finally {
       setUpdatesBusy(false);
+      clearTaskProgressSoon();
     }
   }
 
+  async function refreshUpdateStateAfterMutation(source: string, sourceId: string) {
+    try {
+      const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates");
+      writeReceiptUpdateCheckCache(updates, "manual");
+      setReceiptUpdateCache(readReceiptUpdateCheckCache());
+      setSourceUpdates(updates);
+
+      const current = updates.find((update) => update.source === source && update.modId === sourceId);
+      if (!current?.updateAvailable) {
+        setMatches((existing) => {
+          const key = `${source}-${sourceId}`;
+          const match = existing[key];
+          if (!match) return existing;
+          return {
+            ...existing,
+            [key]: {
+              ...match,
+              updateAvailable: false,
+              canUpdate: false,
+            },
+          };
+        });
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? `Updated, but refresh failed: ${error.message}` : `Updated, but refresh failed: ${String(error)}`);
+    }
+  }
+
+  async function refreshRuntimeLock() {
+    try {
+      const lock = await invoke<RuntimeLockStatus>("payday3_runtime_lock_status");
+      setRuntimeLock(lock);
+      return lock;
+    } catch {
+      setRuntimeLock(null);
+      return null;
+    }
+  }
+
+  async function ensureRuntimeMutationAllowed() {
+    const lock = await refreshRuntimeLock();
+    if (lock?.toggleLocked) {
+      setStatus(lock.message);
+      return false;
+    }
+    return true;
+  }
+
   async function refreshInstalled(clearWhenDone = true): Promise<PakModFile[]> {
+    if (installedRefreshBusyRef.current) {
+      setStatus("Installed refresh is already running.");
+      return rawFiles;
+    }
+
+    installedRefreshBusyRef.current = true;
+    void refreshRuntimeLock();
     setStatus("Scanning installed pak files...");
+    reportTaskProgress("Scan Installed", 12, "Scanning installed files...");
+    let loaded = false;
 
     try {
       const prunePromise = invoke<string>("prune_stale_install_receipts").catch(() => "");
@@ -1467,9 +1931,15 @@ export function InstalledPage() {
 
       // State-first: Tsuki-installed mods come from receipts/installed-state first.
       // Browse/source caches are only extra context, not the identity source of truth.
+      const receiptMatches: Record<string, InstalledSourceMatch> = {};
+
       for (const record of installedState) {
         const summary = sourceSummaryFromInstalledState(record);
-        if (summary) sourceMap.set(sourceKey(summary), summary);
+        if (summary) {
+          sourceMap.set(sourceKey(summary), summary);
+          const receiptMatch = receiptMatchFromInstalledState(record);
+          if (receiptMatch) receiptMatches[sourceKey(summary)] = receiptMatch;
+        }
       }
 
       for (const mod of cache.mods) {
@@ -1489,17 +1959,22 @@ export function InstalledPage() {
       const indexedSources = filterPayday3SourceMods([...sourceMap.values()]);
 
       if (pairState) {
-        setSourceMods(filterPayday3SourceMods(pairState.sourceMods));
-        setMatches(pairState.matches);
+        const hydratedSources = indexedSources.length > 0
+          ? indexedSources
+          : filterPayday3SourceMods(pairState.sourceMods);
+
+        const mergedReceiptFirst = { ...pairState.matches, ...receiptMatches };
+        setSourceMods(hydratedSources);
+        setMatches(mergedReceiptFirst);
         setSourceCacheAge(cacheAge(pairState.savedAt));
         setSourceCacheBuckets(cache.cacheBuckets + 1);
-        setPairingStatus(`Loaded cached pair state from ${cacheAge(pairState.savedAt)} ago. No background re-pairing was started.`);
+        setPairingStatus(`Loaded cached pair state from ${cacheAge(pairState.savedAt)} ago and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). No background re-pairing was started.`);
       } else if (indexedSources.length > 0) {
         setSourceMods(filterPayday3SourceMods(indexedSources));
-        setMatches({});
+        setMatches(receiptMatches);
         setSourceCacheAge(cacheAge(cache.newestCache));
         setSourceCacheBuckets(cache.cacheBuckets + (backendIndex.length > 0 ? 1 : 0));
-        setPairingStatus(`Loaded ${indexedSources.length} source/state records. Press Re-pair/Search Pair when you actually want matching work.`);
+        setPairingStatus(`Loaded ${indexedSources.length} source/state records and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). Press Re-pair/Search Pair only when you want manual matching work.`);
       } else {
         setPairingStatus("No source cache found yet. Browse mods first, or use Auto Pair manually.");
       }
@@ -1507,12 +1982,19 @@ export function InstalledPage() {
       await prunePromise;
       reportTaskProgress("Scan Installed", 100, "Installed library loaded.");
       setStatus(`Found ${scan.pakFileCount} pak-related files. UI loaded without background pairing.`);
+      loaded = true;
       return scan.pakMods;
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      reportTaskProgress("Refresh failed", 100, message);
       return rawFiles;
     } finally {
-      if (clearWhenDone) finishTaskProgress("Scan Installed", "Installed library loaded.");
+      installedRefreshBusyRef.current = false;
+      if (clearWhenDone) {
+        if (loaded) finishTaskProgress("Scan Installed", "Installed library loaded.");
+        else clearTaskProgressSoon(1200);
+      }
     }
   }
 
@@ -1594,10 +2076,13 @@ export function InstalledPage() {
       clearTaskProgressSoon();
       return next;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reportTaskProgress("Pairing failed", 100, message);
+      setPairingStatus(message);
+      return {};
+    } finally {
       pairingBusyRef.current = false;
       clearTaskProgressSoon();
-      setPairingStatus(error instanceof Error ? error.message : String(error));
-      return {};
     }
   }
 
@@ -1671,48 +2156,63 @@ export function InstalledPage() {
 
 
   async function refreshPairing(filesForStatus = rawFiles, liveSearch: ModSourceKind | "all" | "none" = "none") {
+    if (pairingBusyRef.current || pairingLoadBusyRef.current) {
+      setPairingStatus("Pairing is already running. Skipped duplicate request.");
+      return;
+    }
+
+    pairingLoadBusyRef.current = true;
     reportTaskProgress("Pair Installed", 12, "Loading source index, cache, and state records...");
-    const cache = loadSourceModsFromCache();
-    const pairState = loadPairState(filesForStatus);
-    const [backendIndex, installedState] = await Promise.all([
-      invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 900 }).catch(() => []),
-      invoke<InstalledStateRecord[]>("list_installed_state_records").catch(() => []),
-    ]);
-    const sourceMap = new Map<string, SourceModSummary>();
+    try {
+      const cache = loadSourceModsFromCache();
+      const pairState = loadPairState(filesForStatus);
+      const [backendIndex, installedState] = await Promise.all([
+        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 900 }).catch(() => []),
+        invoke<InstalledStateRecord[]>("list_installed_state_records").catch(() => []),
+      ]);
+      const sourceMap = new Map<string, SourceModSummary>();
 
-    for (const record of installedState) {
-      const summary = sourceSummaryFromInstalledState(record);
-      if (summary) sourceMap.set(sourceKey(summary), summary);
-    }
+      for (const record of installedState) {
+        const summary = sourceSummaryFromInstalledState(record);
+        if (summary) sourceMap.set(sourceKey(summary), summary);
+      }
 
-    for (const mod of cache.mods) {
-      if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
-    }
-
-    for (const mod of backendIndex) {
-      if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
-    }
-
-    if (pairState) {
-      for (const mod of pairState.sourceMods) {
+      for (const mod of cache.mods) {
         if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
       }
 
-      setMatches(pairState.matches);
+      for (const mod of backendIndex) {
+        if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
+      }
+
+      if (pairState) {
+        for (const mod of pairState.sourceMods) {
+          if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
+        }
+
+        setMatches(pairState.matches);
+      }
+
+      if (liveSearch !== "none") {
+        const limit = liveSearch === "all" ? Math.max(searchPairLimit, 42) : Math.max(searchPairLimit, 28);
+        await liveSearchGroupsIntoSourceMap(liveSearch, sourceMap, limit, liveSearch === "all" ? "Pair All" : `Pair ${liveSearch === "modworkshop" ? "Workshop" : "Nexus"}`);
+      }
+
+      const nextMods = filterPayday3SourceMods([...sourceMap.values()]);
+      setSourceMods(nextMods);
+      setSourceCacheAge(cacheAge(Math.max(cache.newestCache, pairState?.savedAt ?? 0)));
+      setSourceCacheBuckets(cache.cacheBuckets + (pairState ? 1 : 0) + (backendIndex.length > 0 ? 1 : 0));
+
+      reportTaskProgress("Pair Installed", 25, `Loaded ${nextMods.length} source card(s).`);
+      await runPairing(nextMods, filesForStatus);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPairingStatus(message);
+      reportTaskProgress("Pairing failed", 100, message);
+      clearTaskProgressSoon();
+    } finally {
+      pairingLoadBusyRef.current = false;
     }
-
-    if (liveSearch !== "none") {
-      const limit = liveSearch === "all" ? Math.max(searchPairLimit, 42) : Math.max(searchPairLimit, 28);
-      await liveSearchGroupsIntoSourceMap(liveSearch, sourceMap, limit, liveSearch === "all" ? "Pair All" : `Pair ${liveSearch === "modworkshop" ? "Workshop" : "Nexus"}`);
-    }
-
-    const nextMods = filterPayday3SourceMods([...sourceMap.values()]);
-    setSourceMods(nextMods);
-    setSourceCacheAge(cacheAge(Math.max(cache.newestCache, pairState?.savedAt ?? 0)));
-    setSourceCacheBuckets(cache.cacheBuckets + (pairState ? 1 : 0) + (backendIndex.length > 0 ? 1 : 0));
-
-    reportTaskProgress("Pair Installed", 25, `Loaded ${nextMods.length} source card(s).`);
-    await runPairing(nextMods, filesForStatus);
   }
 
   async function pairSource(source: ModSourceKind) {
@@ -1891,12 +2391,12 @@ export function InstalledPage() {
 
 function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceMatch[], candidates: SourceModSummary[]) {
     const candidateKeys = new Set(candidates.map((mod) => `${mod.source}-${mod.sourceId}`));
-    const groupFiles = new Set(group.files.map((file) => file.fileName.toLowerCase()));
+    const groupFiles = new Set(group.files.flatMap((file) => fileNameKeys(file.fileName)));
 
     return matched
       .filter((match) => match.installed && match.confidence >= 86)
       .filter((match) => candidateKeys.has(`${match.source}-${match.sourceId}`))
-      .filter((match) => match.matchedFiles.some((fileName) => groupFiles.has(fileName.toLowerCase())))
+      .filter((match) => match.matchedFiles.some((fileName) => fileNameKeys(fileName).some((key) => groupFiles.has(key))))
       .sort((a, b) => b.confidence - a.confidence)
       [0] ?? null;
   }
@@ -2370,6 +2870,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       setPairingStatus(`Reinstall from Tsuki: opening ${sourceMod.name}...`);
       const detail = await fetchSourceDetailForSummary(sourceMod);
+      const sourceMatch = matches[sourceKey(sourceMod)] ?? proof ?? null;
       const files = installableSourceFiles(detail.files);
 
       if (files.length === 0) {
@@ -2378,57 +2879,177 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         return;
       }
 
-      const file = files[0];
+      const selected = bestReinstallFileForGroup(detail.files, group, sourceMatch);
+      const pickerFiles = reinstallPickerFiles(detail);
+      if (!selected.file) {
+        const mainFallback = pickerFiles.find((item) => item.bucket === "main")?.file ?? null;
+        if (pickerFiles.length > 1 && mainFallback) {
+          setReinstallPicker({
+            detail,
+            group,
+            sourceMatch,
+            recommendedFileId: mainFallback.id,
+            recommendedReason: `${selected.reason} Latest Main file is the safest manual choice.`,
+            replaceFileNames,
+            candidatePool,
+          });
+          setReinstallPickerSelectedIds([mainFallback.id]);
+          setPairingStatus(`${detail.name}: original file no longer exists. Choose a file manually; Tsuki marked the latest Main file as recommended.`);
+          return;
+        }
 
-      reportTaskProgress("Reinstall from Tsuki", 58, `Downloading ${file.name}...`);
-      setPairingStatus(`Reinstall from Tsuki: downloading ${detail.name} / ${file.name}...`);
-      const staged = await invoke<StagedDownloadResult>("stage_source_file_download", {
-        source: detail.source,
-        modId: detail.sourceId,
-        fileId: file.id,
-        fileName: file.name,
-        downloadUrl: file.downloadUrl ?? null,
-        modName: detail.name,
-        description: detail.description,
-      });
-
-      if (!staged.canInstallLater) {
-        const blocked = staged.entries
-          .filter((entry) => entry.blocked)
-          .map((entry) => `${entry.archivePath}: ${entry.reason}`)
-          .slice(0, 12);
-
-        setPairingStatus(`${detail.name}: downloaded, but no safe installable file was found.`);
-        recordRuntimeDiagnostic("Reinstall from Tsuki", "blocked", "Staged download had no safe installable route.", [detail.name, file.name, ...staged.warnings, ...blocked]);
+        const message = "Original file no longer exists. Manual selection required.";
+        setPairingStatus(`${detail.name}: ${message}`);
+        recordRuntimeDiagnostic("Reinstall from Tsuki", "blocked", selected.reason, [
+          detail.name,
+          `${detail.source}:${detail.sourceId}`,
+          `Installed files: ${replaceFileNames.join(", ")}`,
+          `Available files: ${files.map((candidate) => `${candidate.id}:${candidate.name}`).slice(0, 12).join(" | ")}`,
+        ]);
         return;
       }
 
+      if (pickerFiles.length > 1) {
+        setReinstallPicker({
+          detail,
+          group,
+          sourceMatch,
+          recommendedFileId: selected.file.id,
+          recommendedReason: selected.reason,
+          replaceFileNames,
+          candidatePool,
+        });
+        setReinstallPickerSelectedIds([selected.file.id]);
+        setPairingStatus(`${detail.name}: choose exactly which file(s) to reinstall. Recommended: ${selected.file.name}.`);
+        return;
+      }
+
+      const file = selected.file;
+
+      reportTaskProgress("Reinstall from Tsuki", 58, `Downloading ${file.name}...`);
+      setPairingStatus(`Reinstall from Tsuki: downloading ${detail.name} / ${file.name} (${selected.reason})...`);
       reportTaskProgress("Reinstall from Tsuki", 82, "Replacing files and writing receipt...");
       setPairingStatus(`Reinstall from Tsuki: replacing local files and writing receipt...`);
-      const applied = await invoke<InstallApplyResult>("install_staged_file_to_game", {
-        stagedFilePath: staged.stagedFilePath,
-        modName: detail.name,
-        source: detail.source,
-        modId: detail.sourceId,
-        fileId: file.id,
-        version: file.version ?? detail.version ?? null,
-        author: detail.author ?? null,
-        thumbnailUrl: detail.thumbnailUrl ?? null,
-        bannerUrl: detail.bannerUrl ?? null,
-        pageUrl: detail.pageUrl ?? null,
-        description: detail.description,
+      const directPicker: ReinstallPickerState = {
+        detail,
+        group,
+        sourceMatch,
+        recommendedFileId: file.id,
+        recommendedReason: selected.reason,
         replaceFileNames,
-      });
-      saveInstalledEnrichedSourceCache(candidatePool);
+        candidatePool,
+      };
+      const applied = await installReinstallFile(detail, file, replaceNamesForReinstallFile(file, directPicker), candidatePool);
       setPairingStatus(`Reinstalled ${detail.name} through Tsuki: ${applied.installedFiles.length} installed, ${applied.replacedFiles.length} replaced. It should now have a receipt/state record.`);
-      recordRuntimeDiagnostic("Reinstall from Tsuki", "success", "Reinstall completed and receipt/state should be available.", [detail.name, `${detail.source}:${detail.sourceId}`, `Installed: ${applied.installedFiles.length}`, `Replaced: ${applied.replacedFiles.length}`]);
       setStatus(`Reinstalled ${detail.name} from ${sourceLabel(detail.source)}.`);
+      reportTaskProgress("Reinstall from Tsuki", 100, `Installed ${applied.installedFiles.length} file(s).`);
       await refreshInstalled();
+      await refreshUpdateStateAfterMutation(detail.source, detail.sourceId);
     } catch (error) {
-      setPairingStatus(error instanceof Error ? error.message : String(error));
-      recordRuntimeDiagnostic("Reinstall from Tsuki", "error", error instanceof Error ? error.message : String(error), [group.label]);
+      const message = error instanceof Error ? error.message : String(error);
+      setPairingStatus(`${liveFileDataUnavailableMessageForInstalled()} ${message}`);
+      reportTaskProgress("Reinstall failed", 100, message);
+      recordRuntimeDiagnostic("Reinstall from Tsuki", "error", "Live file data unavailable.", [group.label, message]);
     } finally {
       setBusyKey(null);
+      clearTaskProgressSoon();
+    }
+  }
+
+  function replaceNamesForReinstallFile(file: SourceModFile, picker: ReinstallPickerState) {
+    const groups = groupedInstalledSourceFiles(picker.detail.files, picker.detail.source);
+    const category = sourceFileBucket(file, groups.main[0] ?? null, picker.detail.source);
+    if (category === "main") return picker.replaceFileNames;
+
+    const matchedNames = matchedFileNamesForSourceFile(file, picker.sourceMatch);
+    return matchedNames.length > 0 ? matchedNames : [];
+  }
+
+  async function installReinstallFile(
+    detail: SourceModDetail,
+    file: SourceModFile,
+    replaceFileNames: string[],
+    candidatePool: SourceModSummary[],
+  ) {
+    const staged = await invoke<StagedDownloadResult>("stage_source_file_download", {
+      source: detail.source,
+      modId: detail.sourceId,
+      fileId: file.id,
+      fileName: file.name,
+      downloadUrl: file.downloadUrl ?? null,
+      modName: detail.name,
+      description: detail.description,
+    });
+
+    if (!staged.canInstallLater) {
+      const blocked = staged.entries
+        .filter((entry) => entry.blocked)
+        .map((entry) => `${entry.archivePath}: ${entry.reason}`)
+        .slice(0, 12);
+
+      recordRuntimeDiagnostic("Reinstall from Tsuki", "blocked", "Staged download had no safe installable route.", [detail.name, file.name, ...staged.warnings, ...blocked]);
+      throw new Error(`${detail.name}: downloaded, but no safe installable file was found.`);
+    }
+
+    const applied = await invoke<InstallApplyResult>("install_staged_file_to_game", {
+      stagedFilePath: staged.stagedFilePath,
+      modName: detail.name,
+      source: detail.source,
+      modId: detail.sourceId,
+      fileId: file.id,
+      version: file.version ?? detail.version ?? null,
+      sourceFileName: file.name,
+      sourceFileCategory: sourceFileBucket(file, groupedInstalledSourceFiles(detail.files, detail.source).main[0] ?? null, detail.source),
+      sourceFileUploadedAt: file.uploadedAt ?? null,
+      sourceFileVersion: file.version ?? detail.version ?? null,
+      author: detail.author ?? null,
+      thumbnailUrl: detail.thumbnailUrl ?? null,
+      bannerUrl: detail.bannerUrl ?? null,
+      pageUrl: detail.pageUrl ?? null,
+      description: detail.description,
+      replaceFileNames,
+    });
+
+    saveInstalledEnrichedSourceCache(candidatePool);
+    recordRuntimeDiagnostic("Reinstall from Tsuki", "success", "Reinstall completed and receipt/state should be available.", [detail.name, `${detail.source}:${detail.sourceId}`, file.name, `Installed: ${applied.installedFiles.length}`, `Replaced: ${applied.replacedFiles.length}`]);
+    return applied;
+  }
+
+  async function installSelectedReinstallFiles() {
+    if (!reinstallPicker || reinstallPickerSelectedIds.length === 0) return;
+    const selected = reinstallPickerFiles(reinstallPicker.detail)
+      .map((item) => item.file)
+      .filter((file) => reinstallPickerSelectedIds.includes(file.id));
+
+    if (selected.length === 0) return;
+
+    setBusyKey(`reinstall-${reinstallPicker.group.key}`);
+    setPairingStatus(`Reinstall from Tsuki: installing ${selected.length} selected file(s)...`);
+    reportTaskProgress("Reinstall from Tsuki", 12, `Installing ${selected.length} selected file(s)...`);
+
+    try {
+      let installed = 0;
+      let replaced = 0;
+      for (const file of selected) {
+        const replaceNames = replaceNamesForReinstallFile(file, reinstallPicker);
+        const applied = await installReinstallFile(reinstallPicker.detail, file, replaceNames, reinstallPicker.candidatePool);
+        installed += applied.installedFiles.length;
+        replaced += applied.replacedFiles.length;
+      }
+      setPairingStatus(`Reinstalled ${reinstallPicker.detail.name}: ${installed} installed, ${replaced} replaced.`);
+      setStatus(`Reinstalled ${selected.length} selected file(s) from ${sourceLabel(reinstallPicker.detail.source)}.`);
+      reportTaskProgress("Reinstall from Tsuki", 100, `Installed ${installed} file(s), replaced ${replaced}.`);
+      setReinstallPicker(null);
+      setReinstallPickerSelectedIds([]);
+      await refreshInstalled();
+      await refreshUpdateStateAfterMutation(reinstallPicker.detail.source, reinstallPicker.detail.sourceId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPairingStatus(message);
+      reportTaskProgress("Reinstall failed", 100, message);
+    } finally {
+      setBusyKey(null);
+      clearTaskProgressSoon();
     }
   }
 
@@ -2439,7 +3060,73 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     setPairingStatus("Cleared skipped/unpairable groups. Light Auto Pair and selected Try Pair can retry them.");
   }
 
+  function patchPakFilesEnabled(fileNames: string[], enabled: boolean) {
+    const requested = new Set(fileNames.flatMap(fileNameKeys));
+
+    setScanResult((current) => {
+      if (!current) return current;
+
+      const pakMods = current.pakMods.map((file) => {
+        const matchesSelection =
+          fileNameKeys(file.fileName).some((key) => requested.has(key))
+          || fileNameKeys(file.fullPath).some((key) => requested.has(key));
+
+        if (!matchesSelection) return file;
+
+        const cleanName = enabledFileName(file.fileName);
+        return {
+          ...file,
+          enabled,
+          fileName: enabled ? cleanName : `${cleanName}.disabled`,
+        };
+      });
+
+      return {
+        ...current,
+        pakMods,
+        pakFileCount: pakMods.length,
+      };
+    });
+
+    setMatches((current) => Object.fromEntries(
+      Object.entries(current).map(([key, match]) => {
+        const touchesMatch = match.matchedFiles.some((fileName) => fileNameKeys(fileName).some((fileKey) => requested.has(fileKey)));
+        return [key, touchesMatch ? { ...match, enabled } : match];
+      }),
+    ) as Record<string, InstalledSourceMatch>);
+
+    setSelectedSourceMatch((current) => {
+      if (!current) return current;
+      const touchesMatch = current.matchedFiles.some((fileName) => fileNameKeys(fileName).some((fileKey) => requested.has(fileKey)));
+      return touchesMatch ? { ...current, enabled } : current;
+    });
+  }
+
+  function patchSourceInstallEnabled(match: InstalledSourceMatch, enabled: boolean) {
+    const key = `${match.source}-${match.sourceId}`;
+
+    setMatches((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] ?? match),
+        enabled,
+      },
+    }));
+
+    setSelectedSourceMatch((current) => {
+      if (!current || current.source !== match.source || current.sourceId !== match.sourceId) return current;
+      return { ...current, enabled };
+    });
+  }
+
+  function parsedPakToggleCount(result: string) {
+    const match = result.match(/\b(?:Enabled|Disabled)\s+(\d+)\s+PAK-family file/i);
+    return match ? Number(match[1]) : null;
+  }
+
   async function setGroupEnabled(group: InstalledGroup, enabled: boolean) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
     setBusyKey(group.key);
 
     try {
@@ -2449,15 +3136,25 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       });
 
       setStatus(result);
-      await refreshInstalled();
+      const changedCount = parsedPakToggleCount(result);
+      if (changedCount === null || changedCount >= group.files.length) {
+        patchPakFilesEnabled(group.files.map((file) => file.fileName), enabled);
+        setPairingStatus(`${group.label} is now ${enabled ? "On" : "Off"}. Updated the visible row without a full rescan.`);
+      } else {
+        setPairingStatus(`${group.label} partially toggled; refreshing once to reconcile skipped files.`);
+        await refreshInstalled(false);
+      }
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setStatus(`${liveFileDataUnavailableMessageForInstalled()} ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setBusyKey(null);
     }
   }
 
   async function uninstallFileNames(fileNames: string[], busyId: string) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
     if (fileNames.length === 0) {
       setStatus("No files were selected for uninstall.");
       return;
@@ -2482,6 +3179,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   }
 
   async function setSourceInstallEnabled(match: InstalledSourceMatch, enabled: boolean) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
     setBusyKey(`receipt-toggle-${match.source}-${match.sourceId}`);
 
     try {
@@ -2492,7 +3191,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       });
 
       setStatus(result);
-      await refreshInstalled();
+      patchSourceInstallEnabled(match, enabled);
+      setPairingStatus(`${sourceLabel(match.source)} install ${match.sourceId} is now ${enabled ? "On" : "Off"}. Updated receipt state without a full rescan.`);
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2501,6 +3202,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   }
 
   async function uninstallMatch(match: InstalledSourceMatch) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
     setBusyKey(`uninstall-${match.source}-${match.sourceId}`);
 
     try {
@@ -2532,6 +3235,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   }
 
   async function setSelectedFilesEnabled(enabled: boolean) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
     if (selectedFileNames.length === 0) {
       setStatus("No selected files.");
       return;
@@ -2589,6 +3294,27 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
   }
 
+  async function openInstalledFileLocation(match: InstalledSourceMatch) {
+    const key = `open-location-${match.source}-${match.sourceId}`;
+    setBusyKey(key);
+    setStatus("Opening installed file location...");
+
+    try {
+      const result = await invoke<string>("open_installed_mod_file_location", {
+        source: match.source,
+        sourceId: match.sourceId,
+        matchedFiles: match.matchedFiles,
+        matchKind: match.matchKind,
+      });
+
+      setStatus(result);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
   async function openInstalledModDetail(sourceMod: SourceModSummary, match?: InstalledSourceMatch) {
     const key = `${sourceMod.source}-${sourceMod.sourceId}`;
     setDetailLoadingKey(key);
@@ -2627,6 +3353,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     const key = `update-${sourceMod.source}-${sourceMod.sourceId}`;
     setBusyKey(key);
     setStatus(`Checking update files for ${sourceMod.name}...`);
+    reportTaskProgress("Update mod", 10, `Checking ${sourceMod.name}...`);
 
     try {
       const detail =
@@ -2646,12 +3373,34 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       if (files.length === 0) {
         setStatus("No installable update files were exposed by this source.");
+        reportTaskProgress("Update failed", 100, "No installable files detected.");
         return;
       }
 
-      const file = files[0];
+      const matchedGroup = pairFilesFromMatch(match, groups) ?? {
+        key: `${match.source}-${match.sourceId}`,
+        label: sourceMod.name,
+        files: [],
+        modifiedUnix: match.installedModifiedUnix ?? 0,
+        sizeBytes: 0,
+        enabled: match.enabled,
+      };
+      const selected = bestReinstallFileForGroup(safeDetail.files, matchedGroup, match);
+      if (!selected.file) {
+        setStatus(`${safeDetail.name}: Original file no longer exists. Manual selection required.`);
+        reportTaskProgress("Update failed", 100, "Manual file selection required.");
+        recordRuntimeDiagnostic("Update installed mod", "blocked", selected.reason, [
+          safeDetail.name,
+          `${safeDetail.source}:${safeDetail.sourceId}`,
+          `Available files: ${files.map((candidate) => `${candidate.id}:${candidate.name}`).slice(0, 12).join(" | ")}`,
+        ]);
+        return;
+      }
 
-      setStatus(`Downloading update for ${safeDetail.name}...`);
+      const file = selected.file;
+
+      setStatus(`Downloading update for ${safeDetail.name} (${selected.reason})...`);
+      reportTaskProgress("Update mod", 45, `Downloading ${file.name}...`);
 
       const staged = await invoke<StagedDownloadResult>("stage_source_file_download", {
         source: safeDetail.source,
@@ -2665,10 +3414,12 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       if (!staged.canInstallLater) {
         setStatus(`Downloaded update for ${safeDetail.name}, but install is blocked for manual review.`);
+        reportTaskProgress("Update failed", 100, "No installable files detected.");
         return;
       }
 
       setStatus(`Installing update for ${safeDetail.name}...`);
+      reportTaskProgress("Update mod", 76, `Installing ${file.name}...`);
 
       const applied = await invoke<InstallApplyResult>("install_staged_file_to_game", {
         stagedFilePath: staged.stagedFilePath,
@@ -2677,6 +3428,10 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         modId: safeDetail.sourceId,
         fileId: file.id,
         version: file.version ?? safeDetail.version ?? null,
+        sourceFileName: file.name,
+        sourceFileCategory: sourceFileBucket(file, groupedInstalledSourceFiles(safeDetail.files, safeDetail.source).main[0] ?? null, safeDetail.source),
+        sourceFileUploadedAt: file.uploadedAt ?? null,
+        sourceFileVersion: file.version ?? safeDetail.version ?? null,
         author: safeDetail.author ?? null,
         thumbnailUrl: safeDetail.thumbnailUrl ?? null,
         bannerUrl: safeDetail.bannerUrl ?? null,
@@ -2686,33 +3441,38 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       });
 
       setStatus(`Updated ${safeDetail.name}: installed ${applied.installedFiles.length} file(s), replaced ${applied.replacedFiles.length} old file(s).`);
+      reportTaskProgress("Update mod", 100, `Installed ${applied.installedFiles.length} file(s).`);
       await refreshInstalled();
+      await refreshUpdateStateAfterMutation(safeDetail.source, safeDetail.sourceId);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      reportTaskProgress("Update failed", 100, message);
     } finally {
       setBusyKey(null);
+      clearTaskProgressSoon();
     }
   }
 
-
-  async function restoreVanillaTempMods() {
-    setBusyKey("restore-vanilla-temp");
-    setStatus("Restoring mods from Tsuki vanilla temp folders...");
-
-    try {
-      const result = await invoke<string>("restore_mods_after_vanilla");
-      setStatus(result);
-      window.dispatchEvent(new CustomEvent("tsuki-data-refresh"));
-      await refreshInstalled();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyKey(null);
-    }
-  }
+  void removeRaidWw2BadInstall;
+  void syncInstalledLibrary;
+  void pairAllSources;
 
   useEffect(() => {
-    void refreshInstalled();
+    initialRefreshTimerRef.current = window.setTimeout(() => {
+      initialRefreshTimerRef.current = null;
+      void refreshInstalled();
+    }, 900);
+    const timer = window.setInterval(() => {
+      void refreshRuntimeLock();
+    }, 2500);
+    return () => {
+      if (initialRefreshTimerRef.current !== null) {
+        window.clearTimeout(initialRefreshTimerRef.current);
+        initialRefreshTimerRef.current = null;
+      }
+      window.clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2773,14 +3533,17 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         mod={selectedSourceMod}
         match={selectedSourceMatch}
         busyKey={busyKey}
+        runtimeLocked={runtimeLock?.toggleLocked ?? false}
         onBack={() => {
           setSelectedSourceMod(null);
           setSelectedSourceMatch(null);
         }}
         onOpenWebsite={openWebsite}
+        onOpenFileLocation={openInstalledFileLocation}
         onUninstall={(match) => uninstallMatch(match)}
         onToggleReceipt={(match) => setSourceInstallEnabled(match, !(match.enabled !== false))}
         onUpdate={(match) => updateInstalledMatch(selectedSourceMod, match)}
+        onRefresh={async () => { await refreshInstalled(); }}
       />
     );
   }
@@ -2791,29 +3554,10 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         <div>
           <p className="eyebrow">Local library</p>
           <h1>Installed Mods</h1>
-          <p>
-            Simple installed library. Use Sync Installed for the normal scan + safe pairing flow.
-            Advanced tools are tucked away unless something breaks.
-          </p>
+          <p>Manage installed mods, open their folders, update, disable, or uninstall. Diagnostics stay in the secret debug panel.</p>
         </div>
 
         <div className="installed-hero-actions simplified">
-          <button
-            className="primary-action compact"
-            type="button"
-            onClick={syncInstalledLibrary}
-            disabled={busyKey !== null || enriching || nexusIndexing || backgroundPairing || updatesBusy}
-          >
-            {busyKey === "sync-installed" ? "Syncing..." : "Sync Installed"}
-          </button>
-          <button
-            className="ghost-button compact"
-            type="button"
-            onClick={pairAllSources}
-            disabled={busyKey !== null || enriching || nexusIndexing || backgroundPairing || updatesBusy}
-          >
-            {busyKey === "pair-all" ? "Pairing..." : "Pair All"}
-          </button>
           <button className="ghost-button compact" type="button" onClick={openPakModsFolder}>
             Open ~mods
           </button>
@@ -2830,9 +3574,6 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               <button className="ghost-button compact" type="button" onClick={() => pairSource("nexus")} disabled={busyKey === "pair-nexus"}>
                 {busyKey === "pair-nexus" ? "Pairing..." : "Pair All Nexus"}
               </button>
-              <button className="ghost-button compact" type="button" onClick={restoreVanillaTempMods} disabled={busyKey === "restore-vanilla-temp"}>
-                {busyKey === "restore-vanilla-temp" ? "Restoring..." : "Restore Mods"}
-              </button>
               <button className="ghost-button compact" type="button" onClick={() => refreshInstalled()}>
                 Refresh Only
               </button>
@@ -2847,9 +3588,6 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               </button>
               <button className="ghost-button compact" type="button" onClick={repairInstalledThumbnails} disabled={busyKey === "repair-thumbnails"}>
                 {busyKey === "repair-thumbnails" ? "Repairing..." : "Repair Thumbnails"}
-              </button>
-              <button className="ghost-button compact danger-button" type="button" onClick={removeRaidWw2BadInstall} disabled={busyKey === "remove-raid-ww2"}>
-                {busyKey === "remove-raid-ww2" ? "Removing..." : "Remove RAID WW2"}
               </button>
               <label className="pair-limit-control">
                 <span>Search limit</span>
@@ -2882,6 +3620,13 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         </div>
       </div>
 
+      {runtimeLock?.toggleLocked && (
+        <div className="safe-result warning installed-runtime-lock">
+          <strong>{runtimeLock.payday3Running ? "PAYDAY 3 is running" : "Vanilla session active"}</strong>
+          <span>{runtimeLock.message}</span>
+        </div>
+      )}
+
       <div className="installed-metrics">
         <div><strong>{groups.length}</strong><span>mod groups</span></div>
         <div><strong>{pairedMods.length}</strong><span>paired</span></div>
@@ -2894,24 +3639,6 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       </div>
 
       <div className="installed-commandbar">
-        <div className="installed-tabs">
-          <button className={view === "all" ? "active" : ""} type="button" onClick={() => setView("all")}>
-            All
-          </button>
-          <button className={view === "matched" ? "active" : ""} type="button" onClick={() => setView("matched")}>
-            Matched
-          </button>
-          <button className={view === "updates" ? "active" : ""} type="button" onClick={() => setView("updates")}>
-            Updates
-          </button>
-          <button className={view === "unmatched" ? "active" : ""} type="button" onClick={() => setView("unmatched")}>
-            Unmatched
-          </button>
-          <button className={view === "raw" ? "active" : ""} type="button" onClick={() => setView("raw")}>
-            Raw
-          </button>
-        </div>
-
         <div className="installed-searchbar">
           <input
             className="setting-input"
@@ -2920,18 +3647,39 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
             placeholder="Search installed..."
           />
 
-          <select
-            className="setting-input"
-            value={sortMode}
-            onChange={(event) => setSortMode(event.target.value as SortMode)}
-          >
-            <option value="smart">Smart</option>
-            <option value="name">Name</option>
-            <option value="modified">Last modified</option>
-            <option value="size">Size</option>
-            <option value="enabled">On first</option>
-            <option value="disabled">Off first</option>
-          </select>
+          <div className="installed-sort-chips" aria-label="Sort installed mods">
+            {[
+              ["name", "Name"],
+              ["modified", "Date"],
+              ["size", "Size"],
+            ].map(([id, label]) => (
+              <button
+                className={sortMode === id ? "active" : ""}
+                type="button"
+                key={id}
+                onClick={() => setSortMode(id as SortMode)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="installed-state-chips" aria-label="Filter installed mods by enabled state">
+            {[
+              ["all", "All"],
+              ["on", "Enabled"],
+              ["off", "Disabled"],
+            ].map(([id, label]) => (
+              <button
+                className={enabledFilter === id ? "active" : ""}
+                type="button"
+                key={id}
+                onClick={() => setEnabledFilter(id as EnabledFilter)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -3028,24 +3776,24 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                 <div className="installed-title-row">
                   <div>
                     <h2>{item.sourceMod.name}</h2>
-                    <p>{sourceLabel(item.sourceMod.source)} · {item.sourceMod.author ?? "Unknown author"}</p>
+                    <p>{sourceLabel(item.sourceMod.source)} · {displayAuthor(item.sourceMod) ?? "Unknown author"}</p>
                   </div>
                   <div className="installed-card-actions">
                     {item.match.matchKind === "receipt" && (
                       <button
                         className={`toggle-pill ${(item.match.enabled !== false) ? "on" : "off"}`}
                         type="button"
-                        disabled={busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}`}
+                        disabled={runtimeLock?.toggleLocked || busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}`}
                         onClick={() => setSourceInstallEnabled(item.match, !(item.match.enabled !== false))}
                       >
                         {busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}` ? "..." : (item.match.enabled !== false) ? "On" : "Off"}
                       </button>
                     )}
-                    {item.group && (
+                    {item.group && item.match.matchKind !== "receipt" && (
                       <button
                         className={`toggle-pill ${item.group.enabled ? "on" : "off"}`}
                         type="button"
-                        disabled={busyKey === item.group.key}
+                        disabled={runtimeLock?.toggleLocked || busyKey === item.group.key}
                         onClick={() => setGroupEnabled(item.group!, !item.group!.enabled)}
                       >
                         {busyKey === item.group.key ? "..." : item.group.enabled ? "On" : "Off"}
@@ -3064,7 +3812,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     <button
                       className="mini-action danger"
                       type="button"
-                      disabled={busyKey === `uninstall-${item.match.source}-${item.match.sourceId}`}
+                      disabled={runtimeLock?.toggleLocked || busyKey === `uninstall-${item.match.source}-${item.match.sourceId}`}
                       onClick={() => {
                         if (item.match.matchKind === "receipt") {
                           void uninstallMatch(item.match);
@@ -3075,7 +3823,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     >
                       {busyKey === `uninstall-${item.match.source}-${item.match.sourceId}` ? "..." : "Uninstall"}
                     </button>
-                    <details className="card-more-menu">
+                    <CardMoreMenu>
                       <summary aria-label="More options">⋯</summary>
                       <div>
                         <button type="button" onClick={() => openInstalledModDetail(item.sourceMod, item.match)}>Open details</button>
@@ -3087,24 +3835,20 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                             {(item.match.enabled !== false) ? "Disable receipt install" : "Enable receipt install"}
                           </button>
                         )}
-                        {item.group && (
+                        {item.group && item.match.matchKind !== "receipt" && (
                           <button type="button" onClick={() => setGroupEnabled(item.group!, !item.group!.enabled)}>
                             {item.group.enabled ? "Disable" : "Enable"}
                           </button>
                         )}
                       </div>
-                    </details>
+                    </CardMoreMenu>
                   </div>
                 </div>
 
                 <p className="installed-summary">{item.sourceMod.shortDescription || item.match.reason}</p>
 
                 <div className="installed-badges">
-                  <span className={item.match.updateAvailable ? "badge update" : "badge good"}>
-                    {item.match.updateAvailable ? "Possible update" : "Installed"}
-                  </span>
-                  <span className="badge">{item.match.confidence}% match</span>
-                  <span className="badge">{item.match.matchKind}</span>
+                  {item.match.updateAvailable && <span className="badge update">Update</span>}
                   {item.match.matchKind === "receipt" && <span className={(item.match.enabled !== false) ? "badge good" : "badge"}>{(item.match.enabled !== false) ? "Enabled" : "Disabled"}</span>}
                   {item.group && <span className="badge">{item.group.files.length} files</span>}
                 </div>
@@ -3120,16 +3864,12 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     modifiedUnix: null,
                   }))).slice(0, 4).map((file) => (
                     <span key={file.fullPath || file.fileName} title={file.fileName}>
-                      {file.fileName}
+                      {installedFileChipLabel(file.fileName)}
                     </span>
                   ))}
                 </div>
 
-                <details className="installed-match-details">
-                  <summary>Pairing details</summary>
-                  <p>{item.match.reason}</p>
-                  <p>Source updated: {item.match.sourceUpdatedAt ?? "Unknown"} · Local modified: {formatDateFromUnix(item.match.installedModifiedUnix)}</p>
-                </details>
+
               </div>
             </article>
           ))}
@@ -3158,7 +3898,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     <button
                       className={`toggle-pill ${group.enabled ? "on" : "off"}`}
                       type="button"
-                      disabled={busyKey === group.key}
+                      disabled={runtimeLock?.toggleLocked || busyKey === group.key}
                       onClick={() => setGroupEnabled(group, !group.enabled)}
                     >
                       {busyKey === group.key ? "..." : group.enabled ? "On" : "Off"}
@@ -3166,29 +3906,29 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     <button className="mini-action danger" type="button" disabled={busyKey === `uninstall-${group.key}`} onClick={() => requestDelete(group.label, group.files.map((file) => file.fileName), `uninstall-${group.key}`)}>
                       {busyKey === `uninstall-${group.key}` ? "..." : "Uninstall"}
                     </button>
-                    <details className="card-more-menu">
+                    <CardMoreMenu>
                       <summary aria-label="More options">⋯</summary>
                       <div>
                         <button type="button" onClick={() => tryPairGroup(group)}>Try Pair</button>
                         <button type="button" onClick={() => markGroupCustom(group)}>Mark Custom</button>
                         <button type="button" onClick={() => setGroupEnabled(group, !group.enabled)}>{group.enabled ? "Disable" : "Enable"}</button>
                       </div>
-                    </details>
+                    </CardMoreMenu>
                   </div>
                 </div>
 
                 <p className="installed-summary">No source page is paired yet. Auto Pair can keep searching in the background.</p>
 
                 <div className="installed-badges">
-                  <span className="badge">Unpaired</span>
+                  <span className="badge">Local</span>
                   <span className="badge">{group.files.length} files</span>
-                  <span className="badge">{group.enabled ? "Enabled" : "Disabled"}</span>
+                  <span className={group.enabled ? "badge good" : "badge"}>{group.enabled ? "Enabled" : "Disabled"}</span>
                 </div>
 
                 <div className="installed-file-chip-row">
                   {group.files.slice(0, 4).map((file) => (
                     <span key={file.fullPath || file.fileName} title={file.fileName}>
-                      {file.fileName}
+                      {installedFileChipLabel(file.fileName)}
                     </span>
                   ))}
                 </div>
@@ -3199,7 +3939,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
           {visiblePaired.length === 0 && view !== "all" && (
             <article className="installed-empty card">
               <h2>No matches in this view</h2>
-              <p>Load more source mods in Browse, then come back and press Re-pair.</p>
+              <p>Try refreshing Installed or check Debug if pairing is not working.</p>
             </article>
           )}
         </div>
@@ -3233,12 +3973,79 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         />
       )}
 
+      {reinstallPicker && (
+        <div className="confirm-overlay" role="dialog" aria-modal="true">
+          <div className="confirm-panel reinstall-picker-panel">
+            <p className="eyebrow">Reinstall from Tsuki</p>
+            <h2>Choose files for {reinstallPicker.detail.name}</h2>
+            <p className="reinstall-replace-note">
+              Currently installed file(s): {reinstallPicker.replaceFileNames.length > 0 ? reinstallPicker.replaceFileNames.join(", ") : "none detected"}
+            </p>
+
+            <div className="reinstall-picker-list">
+              {reinstallPickerFiles(reinstallPicker.detail).map(({ file, bucket, label }) => {
+                const recommended = file.id === reinstallPicker.recommendedFileId;
+                const checked = reinstallPickerSelectedIds.includes(file.id);
+                const matchedNames = matchedFileNamesForSourceFile(file, reinstallPicker.sourceMatch);
+                const installed = matchedNames.length > 0;
+                const replaceNames = replaceNamesForReinstallFile(file, reinstallPicker);
+
+                return (
+                  <label className={`reinstall-file-choice ${bucket} ${checked ? "selected" : ""}`} key={file.id}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => {
+                        setReinstallPickerSelectedIds((current) => {
+                          if (event.target.checked) return [...new Set([...current, file.id])];
+                          return current.filter((id) => id !== file.id);
+                        });
+                      }}
+                    />
+                    <div>
+                      <strong title={file.name}>{file.name}</strong>
+                      <span>{label.replace(" files", "")} · {sourceFileMetaLine(file)}</span>
+                      <small>
+                        {installed ? `Installed: ${matchedNames.join(", ")}` : "Not installed"}
+                        {replaceNames.length > 0 ? ` · Will replace: ${replaceNames.join(", ")}` : " · Will not replace existing files"}
+                      </small>
+                    </div>
+                    {recommended && <em title={reinstallPicker.recommendedReason}>Recommended</em>}
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="button-row">
+              <button
+                className="ghost-button compact"
+                type="button"
+                onClick={() => {
+                  setReinstallPicker(null);
+                  setReinstallPickerSelectedIds([]);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="ghost-button compact install-button"
+                type="button"
+                disabled={reinstallPickerSelectedIds.length === 0 || busyKey === `reinstall-${reinstallPicker.group.key}`}
+                onClick={installSelectedReinstallFiles}
+              >
+                {busyKey === `reinstall-${reinstallPicker.group.key}` ? "Installing..." : `Install Selected (${reinstallPickerSelectedIds.length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {pendingDelete && (
         <div className="confirm-overlay" role="dialog" aria-modal="true">
           <div className="confirm-panel">
             <p className="eyebrow">Confirm delete</p>
             <h2>Delete {pendingDelete.title}?</h2>
-            <p>Tsuki will move these files into the uninstalled holding folder. Receipt installs use their full tracked file paths.</p>
+            <p>Tsuki will permanently delete these files unless Keep Uninstalled Mods is enabled in Settings. Receipt installs use their full tracked file paths.</p>
             <div className="confirm-file-list">
               {pendingDelete.fileNames.map((fileName) => <span key={fileName}>{fileName}</span>)}
             </div>
@@ -3259,200 +4066,391 @@ function InstalledSourceDetailPage({
   mod,
   match,
   busyKey,
+  runtimeLocked,
   onBack,
   onOpenWebsite,
+  onOpenFileLocation,
   onUninstall,
   onToggleReceipt,
   onUpdate,
+  onRefresh,
 }: {
   mod: SourceModDetail;
   match: InstalledSourceMatch | null;
   busyKey: string | null;
+  runtimeLocked: boolean;
   onBack: () => void;
   onOpenWebsite: (pageUrl?: string | null) => void;
+  onOpenFileLocation: (match: InstalledSourceMatch) => void;
   onUninstall: (match: InstalledSourceMatch) => void;
   onToggleReceipt: (match: InstalledSourceMatch) => void;
   onUpdate: (match: InstalledSourceMatch) => void;
+  onRefresh: () => Promise<void>;
 }) {
-  const [tab, setTab] = useState<"description" | "files" | "images" | "stats">("description");
+  const [tab, setTab] = useState<"description" | "files" | "changelog" | "comments" | "images">("description");
+  const [fileBusyKey, setFileBusyKey] = useState<string | null>(null);
   const uninstallBusy = match ? busyKey === `uninstall-${match.source}-${match.sourceId}` : false;
-  const safeFiles = Array.isArray(mod.files) ? mod.files : [];
+  const locationBusy = match ? busyKey === `open-location-${match.source}-${match.sourceId}` : false;
+  const safeFiles = installableSourceFiles(Array.isArray(mod.files) ? mod.files : []);
+  const fileGroups = groupedInstalledSourceFiles(Array.isArray(mod.files) ? mod.files : [], mod.source);
   const safeImages = Array.isArray(mod.images) ? mod.images : [];
   const safeStats = Array.isArray(mod.stats) ? mod.stats : [];
   const safeTags = Array.isArray(mod.tags) ? mod.tags : [];
-  const safeMatchedFiles = Array.isArray(match?.matchedFiles) ? match?.matchedFiles ?? [] : [];
+  const safeMatchedFiles: string[] = Array.isArray(match?.matchedFiles) ? (match?.matchedFiles ?? []).filter((item): item is string => typeof item === "string") : [];
+  const heroImage = mod.bannerUrl ?? mod.thumbnailUrl;
+  const paragraphs = descriptionParagraphs(mod.description || mod.shortDescription).slice(0, 80);
+  const changelog = descriptionParagraphs(mod.changelog).filter((line) => line !== "No description loaded.");
+  const comments = (mod.comments ?? []).map(cleanSourceDescription).filter(Boolean).slice(0, 16);
+
+  function matchedNamesForFile(file: SourceModFile) {
+    if (!match?.installed) return [];
+    const fileName = file.name.toLowerCase();
+    const fileStem = enabledFileName(fileName).replace(/\.[a-z0-9]{2,6}$/i, "");
+    const fileId = file.id.toLowerCase();
+    return safeMatchedFiles.filter((value) => {
+      const clean = value.toLowerCase();
+      const base = clean.split(/[\\/]/).pop() ?? clean;
+      const normalizedBase = enabledFileName(base);
+      return normalizedBase === enabledFileName(fileName)
+        || normalizedBase.includes(fileStem)
+        || clean.includes(fileId);
+    });
+  }
+
+  async function installSourceFile(file: SourceModFile) {
+    const busy = `install-${file.id}`;
+    setFileBusyKey(busy);
+    reportTaskProgress("Install mod", 12, `${mod.name} / ${file.name}`);
+    try {
+      const staged = await invoke<StagedDownloadResult>("stage_source_file_download", {
+        source: mod.source,
+        modId: mod.sourceId,
+        fileId: file.id,
+        fileName: file.name,
+        downloadUrl: file.downloadUrl ?? null,
+        modName: mod.name,
+        description: mod.description,
+      });
+      if (!staged.canInstallLater) {
+        reportTaskProgress("Install failed", 100, "No installable files detected.");
+        return;
+      }
+      reportTaskProgress("Install mod", 72, `Installing ${file.name}...`);
+      await invoke<InstallApplyResult>("install_staged_file_to_game", {
+        stagedFilePath: staged.stagedFilePath,
+        modName: mod.name,
+        source: mod.source,
+        modId: mod.sourceId,
+        fileId: file.id,
+        version: file.version ?? mod.version ?? null,
+        sourceFileName: file.name,
+        sourceFileCategory: sourceFileBucket(file, groupedInstalledSourceFiles(mod.files, mod.source).main[0] ?? null, mod.source),
+        sourceFileUploadedAt: file.uploadedAt ?? null,
+        sourceFileVersion: file.version ?? mod.version ?? null,
+        author: mod.author ?? null,
+        thumbnailUrl: mod.thumbnailUrl ?? null,
+        bannerUrl: mod.bannerUrl ?? null,
+        pageUrl: mod.pageUrl ?? null,
+        description: mod.description,
+        replaceFileNames: [],
+      });
+      reportTaskProgress("Install mod", 100, `Installed ${file.name}.`);
+      await onRefresh();
+    } catch (error) {
+      reportTaskProgress("Install failed", 100, error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileBusyKey(null);
+      clearTaskProgressSoon();
+    }
+  }
+
+  async function uninstallSourceFile(fileNames: string[]) {
+    if (fileNames.length === 0) return;
+    setFileBusyKey(`uninstall-${fileNames.join("|")}`);
+    reportTaskProgress("Uninstall mod", 20, `Removing ${fileNames.length} file(s)...`);
+    try {
+      await invoke<string>("uninstall_pak_mod_files", { fileNames });
+      reportTaskProgress("Uninstall mod", 100, `Removed ${fileNames.length} file(s).`);
+      await onRefresh();
+    } catch (error) {
+      reportTaskProgress("Uninstall failed", 100, error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileBusyKey(null);
+      clearTaskProgressSoon();
+    }
+  }
+
+  async function setSourceFileEnabled(fileNames: string[], enabled: boolean) {
+    if (fileNames.length === 0) return;
+    setFileBusyKey(`toggle-${fileNames.join("|")}`);
+    reportTaskProgress(enabled ? "Enable mod" : "Disable mod", 30, `${enabled ? "Enabling" : "Disabling"} ${fileNames.length} file(s)...`);
+    try {
+      await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled });
+      reportTaskProgress(enabled ? "Enable mod" : "Disable mod", 100, `${enabled ? "Enabled" : "Disabled"} ${fileNames.length} file(s).`);
+      await onRefresh();
+    } catch (error) {
+      reportTaskProgress(enabled ? "Enable failed" : "Disable failed", 100, error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileBusyKey(null);
+      clearTaskProgressSoon();
+    }
+  }
+
+  async function openSourceFileLocation(fileNames: string[]) {
+    if (!match || fileNames.length === 0) return;
+    setFileBusyKey(`open-${fileNames.join("|")}`);
+    reportTaskProgress("Open location", 40, "Opening File Explorer...");
+    try {
+      await invoke<string>("open_installed_mod_file_location", {
+        source: match.source,
+        sourceId: match.sourceId,
+        matchedFiles: fileNames,
+        matchKind: match.matchKind,
+      });
+      reportTaskProgress("Open location", 100, "Opened file location.");
+    } catch (error) {
+      reportTaskProgress("Open location failed", 100, error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileBusyKey(null);
+      clearTaskProgressSoon();
+    }
+  }
 
   return (
-    <section className="page installed-source-detail-page installed-source-detail-page-v2">
-      <div className="safe-mod-hero installed-detail-top card">
-        <div className="safe-hero-copy">
-          <button className="ghost-button compact" type="button" onClick={onBack}>
-            ← Back to Installed
-          </button>
-          <p className="eyebrow">{sourceLabel(mod.source)}</p>
-          <h1>{mod.name}</h1>
-          <p>{mod.shortDescription || "Installed source page."}</p>
-          <div className="installed-badges">
-            <span className="badge good">Installed match</span>
-            <span className="badge">{sourceLabel(mod.source)}</span>
-            <span className="badge">ID {mod.sourceId}</span>
-            {mod.author && <span className="badge">by {mod.author}</span>}
-            {match && <span className="badge">{match.confidence}% match</span>}
-            {match?.matchKind === "receipt" && <span className={(match.enabled !== false) ? "badge good" : "badge"}>{(match.enabled !== false) ? "Receipt enabled" : "Receipt disabled"}</span>}
+    <section className={`page installed-source-detail-page installed-source-detail-page-v2 source-detail-page source-detail-${mod.source} browse-style-installed-detail`}>
+      <div className="source-page-shell installed-unified-shell">
+        <div className="source-page-nav">
+          <button className="ghost-button compact" type="button" onClick={onBack}>← Back to Installed</button>
+          <span>{sourceLabel(mod.source)} source detail</span>
+        </div>
+
+        <div className="source-detail-hero card installed-detail-top">
+          <div className="source-detail-hero-media installed-detail-hero-art">
+            {heroImage ? <img src={heroImage} alt="" /> : <div className="source-detail-fallback">{sourceAccent(mod.source)}</div>}
           </div>
-        </div>
 
-        <div className="safe-hero-actions">
-          <button className="ghost-button compact" type="button" onClick={() => onOpenWebsite(mod.pageUrl)}>
-            Website
-          </button>
-          {match?.installed && match.matchKind === "receipt" && (
-            <button
-              className={`ghost-button compact ${(match.enabled !== false) ? "" : "update-button"}`}
-              type="button"
-              onClick={() => onToggleReceipt(match)}
-              disabled={busyKey === `receipt-toggle-${match.source}-${match.sourceId}`}
-            >
-              {busyKey === `receipt-toggle-${match.source}-${match.sourceId}` ? "..." : (match.enabled !== false) ? "Disable" : "Enable"}
-            </button>
-          )}
-          {match?.installed && match.updateAvailable && (
-            <button className="ghost-button compact update-button" type="button" onClick={() => onUpdate(match)} disabled={busyKey === `update-${match.source}-${match.sourceId}`}>
-              {busyKey === `update-${match.source}-${match.sourceId}` ? "Updating..." : "Update"}
-            </button>
-          )}
-          {match?.installed && (
-            <button className="ghost-button compact danger-button" type="button" onClick={() => onUninstall(match)} disabled={uninstallBusy}>
-              {uninstallBusy ? "Uninstalling..." : "Uninstall"}
-            </button>
-          )}
-        </div>
-      </div>
+          <div className="source-detail-hero-copy">
+            <p className="eyebrow">{sourceLabel(mod.source)}</p>
+            <h1>{displayModTitle(mod)}</h1>
+            <p>{cleanSourceDescription(mod.shortDescription || mod.description) || "Installed source page."}</p>
+            <div className="installed-badges source-detail-badges">
+              <span className="badge good">Installed match</span>
+              <span className="badge">ID {mod.sourceId}</span>
+              {displayAuthor(mod) && <span className="badge">by {displayAuthor(mod)}</span>}
+              {match && <span className="badge">{match.confidence}% match</span>}
+              {match?.matchKind === "receipt" && <span className={(match.enabled !== false) ? "badge good" : "badge"}>{(match.enabled !== false) ? "Receipt enabled" : "Receipt disabled"}</span>}
+            </div>
+          </div>
 
-      <div className="safe-detail-layout polished installed-detail-polished">
-        <article className="card safe-description-card">
-          <div className="safe-detail-art installed-detail-hero-art">
-            {mod.bannerUrl || mod.thumbnailUrl ? (
-              <img src={mod.bannerUrl ?? mod.thumbnailUrl ?? ""} alt="" />
-            ) : (
-              <span>{sourceAccent(mod.source)}</span>
+          <div className="source-detail-actions safe-hero-actions">
+            <button className="ghost-button compact" type="button" onClick={() => onOpenWebsite(mod.pageUrl)}>Website</button>
+            {match?.installed && (
+              <button
+                className="ghost-button compact"
+                type="button"
+                onClick={() => onOpenFileLocation(match)}
+                disabled={locationBusy}
+              >
+                {locationBusy ? "Opening..." : "Open File Location"}
+              </button>
+            )}
+            {match?.installed && match.matchKind === "receipt" && (
+              <button
+                className={`ghost-button compact ${(match.enabled !== false) ? "" : "update-button"}`}
+                type="button"
+                onClick={() => onToggleReceipt(match)}
+                disabled={runtimeLocked || busyKey === `receipt-toggle-${match.source}-${match.sourceId}`}
+              >
+                {busyKey === `receipt-toggle-${match.source}-${match.sourceId}` ? "..." : (match.enabled !== false) ? "Disable" : "Enable"}
+              </button>
+            )}
+            {match?.installed && match.updateAvailable && (
+              <button className="ghost-button compact update-button" type="button" onClick={() => onUpdate(match)} disabled={runtimeLocked || busyKey === `update-${match.source}-${match.sourceId}`}>
+                {busyKey === `update-${match.source}-${match.sourceId}` ? "Updating..." : "Update"}
+              </button>
+            )}
+            {match?.installed && (
+              <button className="ghost-button compact danger-button" type="button" onClick={() => onUninstall(match)} disabled={runtimeLocked || uninstallBusy}>
+                {uninstallBusy ? "Uninstalling..." : "Uninstall"}
+              </button>
             )}
           </div>
+        </div>
 
-          <div className="installed-badges">
-            {safeTags.slice(0, 10).map((tag) => <span className="badge" key={tag}>{tag}</span>)}
-          </div>
+        <div className="source-detail-grid-v2 installed-detail-polished">
+          <main className="source-detail-main-stack source-detail-tabbed-main">
+            <article className="card source-content-card source-tabbed-panel">
+              <div className="mod-page-tabs installed-detail-tabs">
+                {([
+                  ["description", "Description"],
+                  ["files", `Files ${safeFiles.length}`],
+                  ["changelog", `Changelog ${changelog.length}`],
+                  ["comments", `Comments ${comments.length}`],
+                  ["images", `Images ${safeImages.length}`],
+                ] as Array<[typeof tab, string]>).map(([id, label]) => (
+                  <button className={`mod-page-tab ${tab === id ? "active" : ""}`} key={id} type="button" onClick={() => setTab(id)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
 
-          <div className="mod-page-tabs installed-detail-tabs">
-            {[
-              ["description", "Description"],
-              ["files", `Files ${safeFiles.length}`],
-              ["images", `Images ${safeImages.length}`],
-              ["stats", "Stats"],
-            ].map(([id, label]) => (
-              <button
-                className={`mod-page-tab ${tab === id ? "active" : ""}`}
-                key={id}
-                type="button"
-                onClick={() => setTab(id as typeof tab)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {tab === "description" && (
-            <article className="installed-source-detail-content">
-              <h2>Description</h2>
-              <p>{mod.description || "No description loaded."}</p>
-              {mod.changelog && (
-                <>
-                  <br />
-                  <h2>Changelog</h2>
-                  <p>{mod.changelog}</p>
-                </>
+              {tab === "description" && (
+                <article className="installed-source-detail-content source-tab-pane source-description-prose">
+                  <h2>Description</h2>
+                  {paragraphs.map((paragraph, index) => <p key={`installed-desc-${index}`}>{renderLinkedText(paragraph, onOpenWebsite)}</p>)}
+                </article>
               )}
-            </article>
-          )}
 
-          {tab === "images" && (
-            <article className="installed-source-detail-content">
-              <h2>Images</h2>
-              <div className="installed-detail-image-grid">
-                {safeImages.map((image) => (
-                  <div key={image.id}>
-                    <img src={image.thumbnailUrl ?? image.imageUrl} alt="" />
-                    <strong>{image.title ?? "Image"}</strong>
+              {tab === "files" && (
+                <article className="installed-source-detail-content source-tab-pane source-downloads-expanded-list source-downloads-tab-pane">
+                  <h2>Files</h2>
+                  {([
+                    ["main", "Main files"],
+                    ["optional", "Optional files"],
+                    ["old", "Old versions"],
+                    ] as Array<[SourceFileBucket, string]>).filter(([bucket]) => bucket !== "old" || fileGroups.old.length > 0).map(([bucket, label]) => (
+                    <div className={`source-downloads-expanded-group ${bucket}`} key={bucket}>
+                      <div className="source-downloads-group-heading">
+                        <h3>{label}</h3>
+                        <span className="status-pill">{fileGroups[bucket].length}</span>
+                      </div>
+                      {fileGroups[bucket].map((file) => {
+                        const matchedNames = matchedNamesForFile(file);
+                        const installed = matchedNames.length > 0;
+                        const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
+                        const busy = fileBusyKey?.includes(file.id) || matchedNames.some((name) => fileBusyKey?.includes(name));
+                        return (
+                          <div className={`source-download-detail-row source-download-action-row ${installed ? "installed" : ""}`} key={file.id}>
+                            <div>
+                              <strong title={file.name}>{file.name}</strong>
+                              <span>{sourceFileMetaLine(file)}</span>
+                            </div>
+                            <div className="source-file-row-actions">
+                              {installed ? (
+                                <>
+                                  <button className="ghost-button compact" type="button" onClick={() => openSourceFileLocation(matchedNames)} disabled={Boolean(busy)}>
+                                    Open File Location
+                                  </button>
+                                  <button className="ghost-button compact" type="button" onClick={() => setSourceFileEnabled(matchedNames, disabled)} disabled={runtimeLocked || Boolean(busy)}>
+                                    {disabled ? "Enable" : "Disable"}
+                                  </button>
+                                  <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFile(matchedNames)} disabled={runtimeLocked || Boolean(busy)}>
+                                    Uninstall
+                                  </button>
+                                </>
+                              ) : (
+                                <button className="ghost-button compact install-button" type="button" onClick={() => installSourceFile(file)} disabled={runtimeLocked || Boolean(busy)}>
+                                  Install
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  {safeFiles.length === 0 && <p>No files exposed by this source yet.</p>}
+                </article>
+              )}
+
+              {tab === "changelog" && (
+                <article className="installed-source-detail-content source-tab-pane source-notes-list">
+                  <h2>Changelog / logs</h2>
+                  {changelog.length ? changelog.map((entry, index) => <p key={`installed-log-${index}`}>{entry}</p>) : <p>No changelog exposed by this source yet.</p>}
+                </article>
+              )}
+
+              {tab === "comments" && (
+                <article className="installed-source-detail-content source-tab-pane source-comment-list">
+                  <h2>Comments</h2>
+                  {comments.length ? comments.map((comment, index) => <p key={`installed-comment-${index}`}>{comment}</p>) : <p>Comments are not available from the current source response yet.</p>}
+                </article>
+              )}
+
+              {tab === "images" && (
+                <article className="installed-source-detail-content source-tab-pane">
+                  <h2>Images</h2>
+                  <div className="installed-detail-image-grid">
+                    {safeImages.map((image) => (
+                      <div key={image.id}>
+                        <img src={image.thumbnailUrl ?? image.imageUrl} alt="" />
+                        <strong>{image.title ?? "Image"}</strong>
+                      </div>
+                    ))}
+                    {safeImages.length === 0 && <p>No images exposed by this source yet.</p>}
+                  </div>
+                </article>
+              )}
+
+            </article>
+          </main>
+
+          <aside className="source-detail-side-stack">
+            <article className="card safe-files-card source-files-card-v2">
+              <div className="safe-files-header">
+                <div>
+                  <p className="eyebrow">Local + source</p>
+                  <h2>Files</h2>
+                </div>
+                <span className="badge">{safeMatchedFiles.length} installed</span>
+              </div>
+
+              {safeMatchedFiles.length > 0 && (
+                <div className="installed-detail-file-list local-files">
+                  {limitList(safeMatchedFiles, 36).map((fileName) => (
+                    <div key={fileName} title={fileName}>
+                      <div>
+                        <strong>{installedFileBaseName(fileName)}</strong>
+                        <p>{installedFileShortPath(fileName)}</p>
+                      </div>
+                      <span>installed</span>
+                    </div>
+                  ))}
+                  {safeMatchedFiles.length > 36 && <p>+{safeMatchedFiles.length - 36} more installed files tracked by receipt.</p>}
+                </div>
+              )}
+
+              <h3>Source files</h3>
+              <div className="installed-detail-file-list">
+                {limitList(safeFiles, 18).map((file) => (
+                  <div key={file.id} title={file.name}>
+                    <div>
+                      <strong>{file.name}</strong>
+                      <p>{sourceFileMetaLine(file)}</p>
+                    </div>
+                    <span>{file.sizeLabel ?? "Unknown size"}</span>
                   </div>
                 ))}
-                {safeImages.length === 0 && <p>No images exposed by this source yet.</p>}
+                {safeFiles.length > 18 && <p>Open the Downloads tab for all {safeFiles.length} source files.</p>}
+                {safeFiles.length === 0 && <p>No files exposed by this source yet.</p>}
               </div>
             </article>
-          )}
 
-          {tab === "stats" && (
-            <article className="installed-source-detail-content">
-              <h2>Stats</h2>
-              <div className="source-stats-grid">
-                {safeStats.map((stat) => (
-                  <div className="card" key={stat.label}>
-                    <h3>{stat.label}</h3>
-                    <div className="stat-number">{stat.value}</div>
-                  </div>
-                ))}
-                {safeStats.length === 0 && <p>No stats exposed by this source yet.</p>}
-              </div>
-            </article>
-          )}
-        </article>
-
-        <aside className="card safe-files-card">
-          <div className="safe-files-header">
-            <div>
-              <p className="eyebrow">Local + source</p>
-              <h2>Files</h2>
-            </div>
-            <span className="badge">{safeMatchedFiles.length} installed</span>
-          </div>
-
-          {safeMatchedFiles.length > 0 && (
-            <div className="installed-detail-file-list local-files">
-              {limitList(safeMatchedFiles, 60).map((fileName) => (
-                <div key={fileName} title={fileName}>
-                  <div>
-                    <strong>{installedFileBaseName(fileName)}</strong>
-                    <p>{installedFileShortPath(fileName)}</p>
-                  </div>
-                  <span>matched</span>
+            {safeStats.length > 0 && (
+              <article className="card source-meta-card">
+                <p className="eyebrow">Page info</p>
+                <h2>Details</h2>
+                <div className="source-meta-list">
+                  {safeStats.slice(0, 8).map((stat) => (
+                    <div key={`${stat.label}-${stat.value}`}>
+                      <span>{stat.label}</span>
+                      <strong>{stat.value}</strong>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {safeMatchedFiles.length > 60 && (
-                <div>
-                  <div>
-                    <strong>+{safeMatchedFiles.length - 60} more matched files</strong>
-                    <p>Open the receipt/Installed tools for the full list.</p>
-                  </div>
-                  <span>hidden</span>
-                </div>
-              )}
-            </div>
-          )}
+              </article>
+            )}
 
-          <h3>Source files</h3>
-          <div className="installed-detail-file-list">
-            {limitList(safeFiles, 80).map((file) => (
-              <div key={file.id} title={file.name}>
-                <div>
-                  <strong>{file.name}</strong>
-                  <p>Version: {file.version ?? "Unknown"} · Uploaded: {file.uploadedAt ?? "Unknown"}</p>
+            {safeTags.length > 0 && (
+              <article className="card source-tag-card">
+                <p className="eyebrow">Tags</p>
+                <div className="installed-badges">
+                  {safeTags.slice(0, 18).map((tag) => <span className="badge" key={tag}>{tag}</span>)}
                 </div>
-                <span>{file.sizeLabel ?? "Unknown size"}</span>
-              </div>
-            ))}
-            {safeFiles.length > 80 && <p>Showing first 80 source files for speed.</p>}
-            {safeFiles.length === 0 && <p>No files exposed by this source yet.</p>}
-          </div>
-        </aside>
+              </article>
+            )}
+          </aside>
+        </div>
       </div>
     </section>
   );

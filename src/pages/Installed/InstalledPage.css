@@ -1107,6 +1107,80 @@
   white-space: nowrap;
 }
 
+.reinstall-picker-panel {
+  width: min(780px, calc(100vw - 32px));
+  max-height: min(82vh, 780px);
+  overflow: auto;
+}
+
+.reinstall-replace-note {
+  overflow-wrap: anywhere;
+}
+
+.reinstall-picker-list {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.reinstall-file-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.reinstall-file-choice.selected {
+  border-color: color-mix(in srgb, var(--accent-a) 58%, var(--line));
+  background: color-mix(in srgb, var(--accent-a) 13%, rgba(0, 0, 0, 0.16));
+}
+
+.reinstall-file-choice input {
+  width: 16px;
+  height: 16px;
+}
+
+.reinstall-file-choice div {
+  min-width: 0;
+}
+
+.reinstall-file-choice strong,
+.reinstall-file-choice span,
+.reinstall-file-choice small {
+  display: block;
+  min-width: 0;
+}
+
+.reinstall-file-choice strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reinstall-file-choice span,
+.reinstall-file-choice small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.reinstall-file-choice em {
+  align-self: start;
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-b) 45%, var(--line));
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-style: normal;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--accent-b) 16%, transparent);
+}
+
 .danger-button {
   border-color: rgba(255, 120, 120, 0.48) !important;
   color: #ffb1b1 !important;
@@ -1482,5 +1556,1057 @@
     width: 100%;
     max-height: 58vh;
     grid-template-columns: 1fr;
+  }
+}
+
+
+/* v1.8.2 UI overhaul preview: sharper panels, cleaner cards, less debug-looking chrome */
+:root {
+  --tsuki-panel-radius: 6px;
+  --tsuki-card-radius: 4px;
+}
+
+.card,
+.hero-glass,
+.home-pro-hero,
+.home-pro-stats article,
+.home-showcase-card,
+.home-local-chip,
+.source-mod-card,
+.browse-hero,
+.browse-toolbar,
+.safe-mod-hero,
+.safe-description-card,
+.safe-files-card,
+.install-preview-panel,
+.confirm-panel,
+.settings-panel,
+.backup-card,
+.profile-save-card,
+.managed-row {
+  border-radius: var(--tsuki-card-radius) !important;
+}
+
+.ghost-button,
+.window-launch-button,
+.window-update-button,
+.nav-button,
+.source-tab,
+.status-pill,
+.badge,
+.setting-input,
+.select-input {
+  border-radius: 999px;
+}
+
+.home-pro-hero {
+  padding: 28px;
+}
+
+.home-pro-copy h1,
+.browse-hero h1,
+.safe-hero-copy h1 {
+  letter-spacing: -0.04em;
+}
+
+.home-pro-stats article p,
+.home-card-body > p,
+.source-card-description,
+.page-description,
+.muted-inline {
+  color: var(--muted);
+}
+
+.home-showcase-card,
+.source-mod-card.cleaner-card {
+  overflow: visible;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.22);
+}
+
+.home-card-tags,
+.source-tag-row.visible-tags,
+.safe-badge-row {
+  gap: 6px;
+}
+
+.home-card-tags span,
+.status-pill.tag-pill {
+  font-size: 0.72rem;
+  padding: 5px 8px;
+  opacity: 0.92;
+}
+
+.source-mod-title-line strong,
+.home-card-body h3 {
+  line-height: 1.15;
+}
+
+.card-more-menu {
+  position: relative;
+  z-index: 30;
+}
+
+.card-more-menu[open] {
+  z-index: 999;
+}
+
+.card-more-menu > div {
+  z-index: 1000;
+  border-radius: 6px !important;
+}
+
+.safe-result small,
+.safe-file-row small,
+.quick-file-row small {
+  color: var(--muted);
+}
+
+.receipt-repair-list,
+.movie-validator-card,
+.repair-warning-list {
+  font-size: 0.9rem;
+}
+
+/* v1.8.3 Installed cleanup: hide diagnostics from normal cards */
+.installed-clean-page .installed-hero {
+  padding: 24px;
+  border-radius: 6px !important;
+}
+
+.installed-clean-page .installed-hero .page-description {
+  max-width: 720px;
+}
+
+.installed-metrics,
+.mass-select-bar,
+.installed-status-line,
+.installed-match-details,
+.installed-library-card .installed-badges .badge:nth-child(n+2),
+.local-unpaired-card .installed-summary,
+.local-unpaired-card .installed-badges .badge:first-child,
+.installed-advanced-actions {
+  display: none !important;
+}
+
+.installed-commandbar {
+  display: grid;
+  grid-template-columns: auto minmax(260px, 1fr);
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px !important;
+  background: rgba(255,255,255,0.035);
+}
+
+.installed-tabs button:nth-child(2),
+.installed-tabs button:nth-child(4),
+.installed-tabs button:nth-child(5) {
+  display: none !important;
+}
+
+.installed-library-grid {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+
+.installed-library-card {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  min-height: 184px;
+  border-radius: 6px !important;
+}
+
+.installed-cover {
+  width: 118px;
+  height: 100%;
+  min-height: 162px;
+  border-radius: 4px !important;
+}
+
+.installed-summary {
+  display: -webkit-box;
+  margin-top: 8px;
+  color: var(--muted);
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.installed-file-chip-row span,
+.installed-title-row strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .installed-commandbar,
+  .installed-library-card {
+    grid-template-columns: 1fr;
+  }
+  .installed-cover {
+    width: 100%;
+    height: 180px;
+  }
+}
+
+
+/* v1.8.4 Installed cleanup: hide debug clutter and give cards room */
+.installed-hero-actions.simplified > button:nth-child(1),
+.installed-hero-actions.simplified > button:nth-child(2) {
+  /* after JSX removal this only guards old builds */
+}
+
+.installed-metrics,
+.mass-select-bar,
+.installed-status-line,
+.installed-match-details {
+  display: none !important;
+}
+
+.installed-library-grid {
+  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)) !important;
+  gap: 18px !important;
+}
+
+.installed-library-card {
+  display: grid !important;
+  grid-template-columns: 150px minmax(0, 1fr) !important;
+  min-height: 210px !important;
+  padding: 14px !important;
+  border-radius: 4px !important;
+}
+
+.installed-cover {
+  width: 150px !important;
+  height: 178px !important;
+  border-radius: 4px !important;
+}
+
+.installed-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.installed-title-row {
+  gap: 12px !important;
+}
+
+.installed-title-row h2 {
+  font-size: 1.05rem !important;
+  line-height: 1.18 !important;
+  overflow-wrap: anywhere;
+}
+
+.installed-summary {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.installed-badges .badge:nth-child(n+3) {
+  display: none !important;
+}
+
+.installed-file-chip-row span {
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+  white-space: normal !important;
+}
+
+@media (max-width: 900px) {
+  .installed-library-card {
+    grid-template-columns: 1fr !important;
+  }
+  .installed-cover {
+    width: 100% !important;
+  }
+}
+
+
+/* v1.8.5 Installed grid normalization */
+.installed-commandbar {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  gap: 14px !important;
+  align-items: center !important;
+  border-radius: 4px !important;
+}
+
+.installed-searchbar {
+  display: grid !important;
+  grid-template-columns: minmax(280px, 1fr) auto !important;
+  gap: 10px !important;
+  align-items: center !important;
+}
+
+.installed-sort-chips {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
+}
+
+.installed-sort-chips button {
+  height: 34px !important;
+  padding: 0 12px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 999px !important;
+  color: var(--muted) !important;
+  background: rgba(255,255,255,0.045) !important;
+  cursor: pointer !important;
+}
+
+.installed-sort-chips button.active,
+.installed-sort-chips button:hover {
+  color: var(--text) !important;
+  border-color: color-mix(in srgb, var(--accent-a) 62%, var(--line)) !important;
+  background: rgba(139,92,246,0.20) !important;
+}
+
+.installed-library-grid {
+  grid-template-columns: repeat(auto-fill, minmax(500px, 1fr)) !important;
+  gap: 16px !important;
+  align-items: stretch !important;
+}
+
+.installed-library-card {
+  display: grid !important;
+  grid-template-columns: 142px minmax(0, 1fr) !important;
+  min-height: 214px !important;
+  padding: 16px !important;
+  border-radius: 4px !important;
+  overflow: visible !important;
+}
+
+.installed-cover,
+.installed-cover.local-cover {
+  width: 142px !important;
+  height: 176px !important;
+  border-radius: 3px !important;
+  overflow: hidden !important;
+}
+
+.installed-cover img {
+  object-fit: cover !important;
+}
+
+.installed-info {
+  display: grid !important;
+  grid-template-rows: auto minmax(46px, auto) auto auto !important;
+  gap: 9px !important;
+  min-width: 0 !important;
+}
+
+.installed-title-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 12px !important;
+  align-items: start !important;
+}
+
+.installed-title-row h2 {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+}
+
+.installed-card-actions {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
+  min-width: 172px !important;
+}
+
+.toggle-pill,
+.mini-action,
+.installed-badges .badge {
+  height: 30px !important;
+  min-width: 78px !important;
+  padding: 0 10px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+}
+
+.installed-badges {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  max-height: 36px !important;
+  overflow: hidden !important;
+}
+
+.installed-summary {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 3 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+}
+
+.installed-file-chip-row {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  max-height: 34px !important;
+  overflow: hidden !important;
+}
+
+.installed-file-chip-row span {
+  max-width: 240px !important;
+  height: 28px !important;
+  padding: 0 10px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  border-radius: 999px !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.safe-detail-layout.polished.installed-detail-polished,
+.installed-detail-top.safe-mod-hero.card {
+  max-width: 1280px !important;
+  margin-inline: auto !important;
+  border-radius: 4px !important;
+}
+
+.installed-detail-file-list > div {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+}
+
+.installed-detail-file-list strong,
+.installed-detail-file-list p {
+  overflow-wrap: anywhere !important;
+}
+
+@media (max-width: 980px) {
+  .installed-commandbar,
+  .installed-searchbar,
+  .installed-library-card {
+    grid-template-columns: 1fr !important;
+  }
+  .installed-cover,
+  .installed-cover.local-cover { width: 100% !important; height: 220px !important; }
+  .installed-card-actions { min-width: 0 !important; justify-content: flex-start !important; }
+}
+
+/* v1.8.6 Installed library cleanup */
+.installed-commandbar {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  gap: 12px !important;
+  align-items: center !important;
+}
+
+.installed-searchbar {
+  display: grid !important;
+  grid-template-columns: minmax(260px, 1fr) auto auto !important;
+  gap: 10px !important;
+  align-items: center !important;
+}
+
+.installed-sort-chips,
+.installed-state-chips {
+  display: inline-flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  justify-content: flex-end !important;
+}
+
+.installed-sort-chips button,
+.installed-state-chips button,
+.installed-tabs button {
+  min-width: 58px !important;
+  height: 34px !important;
+  padding: 0 14px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 999px !important;
+  color: var(--muted) !important;
+  background: rgba(255,255,255,0.045) !important;
+}
+
+.installed-sort-chips button.active,
+.installed-state-chips button.active,
+.installed-tabs button.active {
+  color: var(--text) !important;
+  border-color: color-mix(in srgb, var(--accent-a) 65%, var(--line)) !important;
+  background: rgba(139,92,246,0.18) !important;
+}
+
+.installed-library-grid {
+  grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)) !important;
+  gap: 16px !important;
+}
+
+.installed-library-card {
+  display: grid !important;
+  grid-template-columns: 154px minmax(0, 1fr) !important;
+  min-height: 210px !important;
+  align-items: stretch !important;
+}
+
+.installed-cover {
+  width: 154px !important;
+  height: 178px !important;
+  min-height: 178px !important;
+  border-radius: 3px !important;
+}
+
+.installed-info {
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+}
+
+.installed-title-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 12px !important;
+  align-items: start !important;
+}
+
+.installed-title-row h2 {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 3 !important;
+  -webkit-box-orient: vertical !important;
+  overflow: hidden !important;
+  min-height: 44px !important;
+}
+
+.installed-card-actions {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  min-width: 230px !important;
+  gap: 8px !important;
+}
+
+.installed-badges {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  min-height: 28px !important;
+  margin-top: auto !important;
+}
+
+.installed-badges .badge,
+.status-pill.installed-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 78px !important;
+  max-width: 120px !important;
+  height: 24px !important;
+  padding: 0 9px !important;
+  border-radius: 999px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.installed-file-chip-row {
+  margin-top: 10px !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  max-height: 62px !important;
+  overflow: hidden !important;
+}
+
+.installed-file-chip-row span {
+  max-width: 190px !important;
+  min-width: 0 !important;
+  height: 28px !important;
+  padding: 0 10px !important;
+  border-radius: 999px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+@media (max-width: 1000px) {
+  .installed-commandbar,
+  .installed-searchbar,
+  .installed-library-card {
+    grid-template-columns: 1fr !important;
+  }
+  .installed-cover {
+    width: 100% !important;
+  }
+  .installed-card-actions {
+    min-width: 0 !important;
+    justify-content: flex-start !important;
+  }
+}
+
+
+/* v1.8.7 installed cleanup: remove confusing view tab + normalize filters/cards */
+.installed-tabs {
+  display: none !important;
+}
+.installed-commandbar {
+  display: block !important;
+}
+.installed-searchbar {
+  display: grid !important;
+  grid-template-columns: minmax(260px, 1fr) auto auto !important;
+  align-items: center !important;
+  gap: 10px !important;
+}
+.installed-sort-chips,
+.installed-state-chips {
+  display: flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  flex-wrap: wrap !important;
+}
+.installed-sort-chips button,
+.installed-state-chips button {
+  min-width: 82px !important;
+  height: 36px !important;
+  white-space: nowrap !important;
+}
+.installed-library-card {
+  display: grid !important;
+  grid-template-columns: 154px minmax(0, 1fr) !important;
+  min-height: 216px !important;
+}
+.installed-cover {
+  width: 134px !important;
+  height: 134px !important;
+}
+.installed-info {
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+}
+.installed-title-row {
+  align-items: flex-start !important;
+  gap: 12px !important;
+}
+.installed-card-actions {
+  flex: 0 0 auto !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 8px !important;
+}
+.installed-card-actions .toggle-pill,
+.installed-card-actions .mini-action {
+  min-width: 74px !important;
+  height: 34px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  white-space: nowrap !important;
+}
+.installed-badges .badge.good:first-child {
+  display: none !important;
+}
+.installed-file-chip-row {
+  margin-top: auto !important;
+}
+.installed-file-chip-row span {
+  max-width: 210px !important;
+  min-height: 30px !important;
+  border-radius: 999px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+@media (max-width: 1180px) {
+  .installed-searchbar { grid-template-columns: 1fr !important; }
+}
+
+/* v1.8.8 installed chips: file names must never spill outside cards */
+.installed-commandbar {
+  grid-template-columns: 1fr !important;
+}
+.installed-tabs {
+  display: none !important;
+}
+.installed-file-chip-row {
+  width: 100% !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  align-items: center !important;
+}
+.installed-file-chip-row span {
+  flex: 0 1 190px !important;
+  max-width: min(190px, 100%) !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  justify-content: flex-start !important;
+}
+.installed-info,
+.installed-title-row,
+.installed-library-card {
+  min-width: 0 !important;
+}
+
+
+/* v1.8.9 installed file chips: compact labels with no spill */
+.installed-file-chip-row {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(92px, max-content)) !important;
+  gap: 6px !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  align-items: center !important;
+  justify-content: start !important;
+}
+.installed-file-chip-row span {
+  width: auto !important;
+  max-width: 172px !important;
+  min-width: 0 !important;
+  height: 28px !important;
+  box-sizing: border-box !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+.installed-library-card,
+.installed-info {
+  overflow: hidden !important;
+}
+
+
+/* v1.8.10 installed card file chips: hard no-overflow */
+.installed-library-card {
+  overflow: hidden !important;
+}
+.installed-info {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+.installed-file-chip-row {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 6px !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+.installed-file-chip-row span {
+  flex: 0 1 auto !important;
+  width: auto !important;
+  max-width: min(150px, 100%) !important;
+  min-width: 0 !important;
+  height: 26px !important;
+  padding: 0 9px !important;
+  box-sizing: border-box !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+
+/* v1.8.11: hard clamp installed file pills */
+.installed-file-chip-row {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+}
+.installed-file-chip-row span {
+  flex: 0 1 96px !important;
+  width: 96px !important;
+  max-width: 96px !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  justify-content: flex-start !important;
+}
+
+/* v1.8.13: installed file pills must stay inside the card */
+.installed-file-chip-row {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(82px, 128px)) !important;
+  gap: 6px !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  align-items: start !important;
+}
+.installed-file-chip-row span {
+  width: 100% !important;
+  max-width: 128px !important;
+  min-width: 0 !important;
+  height: 26px !important;
+  padding: 0 8px !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+  justify-content: flex-start !important;
+}
+.installed-info,
+.installed-library-card {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Release blocker: keep update actions from squeezing installed card titles. */
+.installed-library-card {
+  grid-template-columns: 138px minmax(0, 1fr) !important;
+  gap: 14px !important;
+  align-items: start !important;
+}
+.installed-title-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+}
+.installed-title-row h2 {
+  min-height: 0 !important;
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+}
+.installed-title-row p,
+.installed-summary {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+.installed-card-actions {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-start !important;
+  align-items: center !important;
+  gap: 7px !important;
+}
+.installed-card-actions .toggle-pill,
+.installed-card-actions .mini-action {
+  flex: 0 0 auto !important;
+  min-width: 68px !important;
+  max-width: 118px !important;
+}
+.installed-card-actions .card-more-menu {
+  flex: 0 0 auto !important;
+  margin-left: auto !important;
+}
+.installed-badges {
+  margin-top: 8px !important;
+}
+.installed-badges .badge.update {
+  order: -1 !important;
+}
+@media (max-width: 760px) {
+  .installed-library-card {
+    grid-template-columns: 1fr !important;
+  }
+  .installed-cover {
+    width: 100% !important;
+  }
+}
+
+/* v1.8.34 installed detail uses the same mod-page language as Browse */
+.installed-unified-shell {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+
+.installed-unified-shell .source-detail-hero {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.installed-unified-shell .source-detail-hero-media,
+.installed-unified-shell .installed-detail-hero-art {
+  min-height: 180px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(0,0,0,0.28);
+}
+
+.installed-unified-shell .source-detail-hero-media img,
+.installed-unified-shell .installed-detail-hero-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.installed-unified-shell .source-detail-actions {
+  align-self: start;
+}
+
+.installed-unified-shell .source-description-prose p {
+  line-height: 1.65;
+  margin: 0 0 12px;
+}
+
+.installed-unified-shell .source-download-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  min-width: 0;
+}
+
+.installed-unified-shell .source-download-detail-row:first-of-type {
+  border-top: 0;
+}
+
+.installed-unified-shell .source-download-detail-row strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-unified-shell .source-download-detail-row span,
+.installed-unified-shell .installed-detail-file-list p {
+  color: var(--text-muted, #b9acd8);
+  overflow-wrap: anywhere;
+}
+
+.installed-unified-shell .source-download-detail-row > div:first-child {
+  min-width: 0;
+}
+
+@media (max-width: 1050px) {
+  .installed-unified-shell .source-detail-hero {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* v1.8.36 theme sync for page-local cards */
+.source-mod-card,
+.installed-card,
+.installed-mod-card,
+.installed-entry-card,
+.source-detail-hero,
+.source-content-card,
+.source-files-card-v2,
+.source-meta-card,
+.source-tag-card {
+  color: var(--text) !important;
+  border-color: color-mix(in srgb, var(--line) 78%, var(--accent-a) 16%) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--panel) 88%, transparent), color-mix(in srgb, var(--panel-2) 82%, transparent)) !important;
+}
+
+.source-mod-card p,
+.installed-card p,
+.installed-mod-card p,
+.installed-entry-card p,
+.source-content-card p,
+.source-files-card-v2 p {
+  color: var(--muted) !important;
+}
+
+
+/* v1.8.37: make Installed detail look like the shared source detail page */
+.browse-style-installed-detail .source-detail-hero,
+.browse-style-installed-detail .source-content-card,
+.browse-style-installed-detail .safe-files-card,
+.browse-style-installed-detail .source-meta-card,
+.browse-style-installed-detail .source-tag-card {
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+}
+
+.browse-style-installed-detail .installed-detail-tabs {
+  margin-bottom: 14px;
+}
+
+.browse-style-installed-detail .installed-source-detail-content {
+  padding: 0;
+  background: transparent !important;
+  border: 0 !important;
+}
+/* v1.8.2 release blocker: installed detail file rows keep text horizontal. */
+.installed-detail-file-list > div,
+.source-downloads-expanded-list .safe-file-row,
+.browse-style-installed-detail .safe-file-row {
+  grid-template-columns: minmax(220px, 1fr) max-content !important;
+  align-items: center;
+  min-width: 0;
+}
+
+.installed-detail-file-list > div > div,
+.browse-style-installed-detail .safe-file-row > div:first-child,
+.source-downloads-expanded-list .safe-file-row > div:first-child {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.installed-detail-file-list strong,
+.installed-detail-file-list p,
+.browse-style-installed-detail .safe-file-row strong,
+.browse-style-installed-detail .safe-file-row p {
+  min-width: 0;
+  max-width: 100%;
+  writing-mode: horizontal-tb;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.installed-detail-file-list strong,
+.browse-style-installed-detail .safe-file-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-file-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: max-content;
+  max-width: none;
+}
+
+.source-file-row-actions .ghost-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .installed-detail-file-list > div,
+  .source-downloads-expanded-list .safe-file-row,
+  .browse-style-installed-detail .safe-file-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  .source-file-row-actions {
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+    justify-content: flex-start;
   }
 }

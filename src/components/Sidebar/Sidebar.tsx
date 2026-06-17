@@ -12,6 +12,7 @@ interface SidebarProps {
   activePage: AppPage;
   onChangePage: (page: AppPage) => void;
   taskProgress?: SidebarTaskProgress;
+  onOpenDebug?: () => void;
 }
 
 const navItems: Array<{ page: AppPage; label: string; icon: string }> = [
@@ -19,12 +20,11 @@ const navItems: Array<{ page: AppPage; label: string; icon: string }> = [
   { page: "browse", label: "Browse", icon: "⌕" },
   { page: "installed", label: "Installed", icon: "□" },
   { page: "profiles", label: "Profiles", icon: "◇" },
-  { page: "repair", label: "Repair", icon: "✦" },
   { page: "backups", label: "Backups", icon: "◷" },
   { page: "settings", label: "Settings", icon: "⚙" },
 ];
 
-export function Sidebar({ activePage, onChangePage, taskProgress }: SidebarProps) {
+export function Sidebar({ activePage, onChangePage, taskProgress, onOpenDebug }: SidebarProps) {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand compact-brand">
@@ -62,10 +62,11 @@ export function Sidebar({ activePage, onChangePage, taskProgress }: SidebarProps
         </div>
       )}
 
-      <div className="sidebar-footer">
-        <strong>v1.8.1</strong>
+      <div className="sidebar-footer" onDoubleClick={onOpenDebug} title="Double-click to open debug panel">
+        <strong>v1.8.2</strong>
         <br />
-        No startup repair.</div>
+        Setup + debug polish.
+      </div>
     </aside>
   );
 }

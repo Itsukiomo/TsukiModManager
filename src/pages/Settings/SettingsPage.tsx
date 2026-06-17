@@ -1,8 +1,7 @@
 import "./SettingsPage.css";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { AppSettings } from "../../models/settings";
-import type { InstallReceipt } from "../../models/receipt";
 import { APP_THEMES } from "../../models/theme";
 
 interface SettingsPageProps {
@@ -25,22 +24,20 @@ interface AppUpdateStatus {
   error?: string | null;
 }
 
-interface NexusAccountIntegrationStatus {
-  apiKeySaved: boolean;
-  validated: boolean;
-  userName?: string | null;
-  canLoadUpdatedMods: boolean;
-  canResolveDownloadLinks: boolean;
-  notes: string[];
+interface CacheStats {
+  appDataPath: string;
+  cachePath: string;
+  downloadCachePath: string;
+  extractionCachePath: string;
+  uninstalledPath: string;
+  downloadCacheSizeBytes: number;
+  extractionCacheSizeBytes: number;
+  totalCacheSizeBytes: number;
+  cachedDownloadCount: number;
+  temporaryExtractionFolderCount: number;
+  uninstalledStorageSizeBytes: number;
+  uninstalledEntryCount: number;
 }
-
-const fallbackDebugReport = [
-  "Tsuki Mod Manager Debug Report",
-  "Version: 0.20.0-source-completeness-polish",
-  "Backend: unavailable",
-  "Payday 3 Path: not configured",
-  "Last Error: backend debug command has not responded yet",
-].join("\n");
 
 function maskKey(value: string) {
   if (!value) return "Not saved";
@@ -48,21 +45,43 @@ function maskKey(value: string) {
   return `${"*".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
 }
 
-const SETTINGS_CATEGORIES = [
-  { id: "game", label: "Game/Admin" },
-  { id: "sources", label: "Sources" },
-  { id: "updates", label: "App Update" },
-  { id: "receipts", label: "Receipts" },
-  { id: "themes", label: "Themes" },
-  { id: "debug", label: "Debug" },
-] as const;
+type SettingsTab = "game" | "sources" | "cache" | "updates" | "themes";
 
-type SettingsTab = typeof SETTINGS_CATEGORIES[number]["id"];
+const SETTINGS_CATEGORIES: Array<{ id: SettingsTab; label: string }> = [
+  { id: "game", label: "Game" },
+  { id: "sources", label: "Sources" },
+  { id: "cache", label: "Cache" },
+  { id: "updates", label: "Updates" },
+  { id: "themes", label: "Themes" },
+];
+
+function reportTaskProgress(label: string, progress: number | null = null, detail = "") {
+  window.dispatchEvent(new CustomEvent("tsuki-task-progress", {
+    detail: { active: true, label, detail, progress },
+  }));
+}
+
+function clearTaskProgressSoon(ms = 700) {
+  window.setTimeout(() => {
+    window.dispatchEvent(new CustomEvent("tsuki-task-progress", {
+      detail: { active: false, label: "", detail: "", progress: null },
+    }));
+  }, ms);
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
 
 export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps) {
-  const [debugReport, setDebugReport] = useState(fallbackDebugReport);
-  const [debugCopied, setDebugCopied] = useState(false);
-  const [healthStatus, setHealthStatus] = useState("Health check has not been run yet.");
   const [detectedPath, setDetectedPath] = useState("Not checked yet.");
   const [manualPath, setManualPath] = useState("");
   const [modworkshopApiKey, setModworkshopApiKey] = useState("");
@@ -70,20 +89,19 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
   const [showAgeRestrictedNexus, setShowAgeRestrictedNexus] = useState(true);
   const [showKeys, setShowKeys] = useState(false);
   const [sourceStatus, setSourceStatus] = useState("Sources not verified yet.");
-  const [receipts, setReceipts] = useState<InstallReceipt[]>([]);
   const [saveStatus, setSaveStatus] = useState("Settings loaded from AppData when available.");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("game");
   const [adminStatus, setAdminStatus] = useState("Admin state not checked yet.");
   const [appUpdateStatus, setAppUpdateStatus] = useState("App update check has not run yet.");
   const [appUpdateBusy, setAppUpdateBusy] = useState(false);
+  const [keepDownloadedArchives, setKeepDownloadedArchives] = useState(true);
+  const [keepUninstalledMods, setKeepUninstalledMods] = useState(false);
+  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
+  const [cacheStatus, setCacheStatus] = useState("Cache stats not loaded yet.");
+  const [cacheBusy, setCacheBusy] = useState(false);
 
   const nexusConnected = nexusApiKey.trim().length > 0;
   const modworkshopAdvanced = modworkshopApiKey.trim().length > 0;
-
-  const receiptStats = useMemo(() => {
-    const fileCount = receipts.reduce((total, receipt) => total + receipt.files.length, 0);
-    return { count: receipts.length, fileCount };
-  }, [receipts]);
 
   async function loadSettings() {
     try {
@@ -92,56 +110,11 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       setModworkshopApiKey(settings.modworkshopApiKey ?? "");
       setNexusApiKey(settings.nexusApiKey ?? "");
       setShowAgeRestrictedNexus(settings.showAgeRestrictedNexus ?? true);
+      setKeepDownloadedArchives(settings.keepDownloadedArchives ?? true);
+      setKeepUninstalledMods(settings.keepUninstalledMods ?? false);
       // Theme is loaded once by App. Do not re-apply it here or Settings can snap back when reopened.
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function loadReceipts() {
-    try {
-      const result = await invoke<InstallReceipt[]>("list_install_receipts");
-      setReceipts(result);
-    } catch {
-      setReceipts([]);
-    }
-  }
-
-  async function refreshDebugReport() {
-    try {
-      const report = await invoke<string>("get_debug_report");
-      setDebugReport(report);
-    } catch (error) {
-      setDebugReport(
-        [
-          fallbackDebugReport,
-          "",
-          "Frontend Error:",
-          error instanceof Error ? error.message : String(error),
-        ].join("\n"),
-      );
-    }
-  }
-
-  async function copyDebugReport() {
-    try {
-      const report = await invoke<string>("get_debug_report");
-      setDebugReport(report);
-      await navigator.clipboard.writeText(report);
-      setDebugCopied(true);
-      window.setTimeout(() => setDebugCopied(false), 1800);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setDebugReport([fallbackDebugReport, "", "Copy Error:", message].join("\n"));
-    }
-  }
-
-  async function runHealthCheck() {
-    try {
-      const report = await invoke<string>("run_health_check");
-      setHealthStatus(report);
-    } catch (error) {
-      setHealthStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -149,7 +122,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     try {
       const result = await invoke<string>("detect_payday3_path");
       setDetectedPath(result);
-      await refreshDebugReport();
     } catch (error) {
       setDetectedPath(error instanceof Error ? error.message : String(error));
     }
@@ -160,7 +132,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       const result = await invoke<string>("save_game_path", { gamePath: manualPath });
       setSaveStatus(result);
       await detectPayday3();
-      await refreshDebugReport();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     }
@@ -172,7 +143,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       setManualPath("");
       setSaveStatus(result);
       await detectPayday3();
-      await refreshDebugReport();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     }
@@ -184,7 +154,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     try {
       const result = await invoke<string>("save_theme", { themeId });
       setSaveStatus(result);
-      await refreshDebugReport();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     }
@@ -198,7 +167,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
         showAgeRestrictedNexus,
       });
       setSaveStatus(result);
-      await refreshDebugReport();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     }
@@ -211,7 +179,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       setNexusApiKey("");
       setSourceStatus("Source keys cleared.");
       setSaveStatus(result);
-      await refreshDebugReport();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
     }
@@ -221,56 +188,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     try {
       const result = await invoke<string>("open_nexus_login_page");
       setSourceStatus(result);
-    } catch (error) {
-      setSourceStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function verifySources() {
-    try {
-      const result = await invoke<string>("verify_source_settings");
-      setSourceStatus(result);
-      await refreshDebugReport();
-    } catch (error) {
-      setSourceStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function checkNexusAccountIntegration() {
-    try {
-      const result = await invoke<NexusAccountIntegrationStatus>("nexus_account_integration_status");
-      setSourceStatus(
-        [
-          `Nexus key saved: ${result.apiKeySaved ? "yes" : "no"}`,
-          `validated: ${result.validated ? "yes" : "no"}`,
-          `user: ${result.userName ?? "unknown"}`,
-          `updated mods API: ${result.canLoadUpdatedMods ? "yes" : "no"}`,
-          `download link API: ${result.canResolveDownloadLinks ? "ready when a real file is selected" : "not ready"}`,
-          ...result.notes,
-        ].join(" | "),
-      );
-      await refreshDebugReport();
-    } catch (error) {
-      setSourceStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function checkNexusGraphqlV2() {
-    try {
-      const result = await invoke<string>("nexus_graphql_v2_status");
-      const diagnostic = await invoke<string>("get_nexus_graphql_diagnostic").catch(() => "");
-      setSourceStatus(diagnostic ? `${result}\n\n${diagnostic}` : result);
-      await refreshDebugReport();
-    } catch (error) {
-      setSourceStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function showNexusGraphqlDiagnostic() {
-    try {
-      const result = await invoke<string>("get_nexus_graphql_diagnostic");
-      setSourceStatus(result);
-      await refreshDebugReport();
     } catch (error) {
       setSourceStatus(error instanceof Error ? error.message : String(error));
     }
@@ -292,13 +209,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     } catch (error) {
       setAdminStatus(error instanceof Error ? error.message : String(error));
     }
-  }
-
-  function jumpToSettingsSection(sectionId: SettingsTab) {
-    setSettingsTab(sectionId);
-    window.setTimeout(() => {
-      document.getElementById(`settings-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 30);
   }
 
   async function copyNexusKey() {
@@ -356,26 +266,97 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     }
   }
 
+  async function refreshCacheStats(message = "Cache stats refreshed.") {
+    try {
+      const stats = await invoke<CacheStats>("get_cache_stats");
+      setCacheStats(stats);
+      setCacheStatus(message);
+    } catch (error) {
+      setCacheStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openTsukiDataFolder() {
+    try {
+      const result = await invoke<string>("open_app_data_folder");
+      setCacheStatus(result);
+    } catch (error) {
+      setCacheStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openCacheFolder() {
+    try {
+      const result = await invoke<string>("open_cache_folder");
+      setCacheStatus(result);
+    } catch (error) {
+      setCacheStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveKeepDownloadedArchives(next: boolean) {
+    setKeepDownloadedArchives(next);
+    try {
+      const result = await invoke<string>("save_cache_settings", { keepDownloadedArchives: next });
+      setCacheStatus(result);
+      await refreshCacheStats(result);
+    } catch (error) {
+      setKeepDownloadedArchives(!next);
+      setCacheStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveKeepUninstalledMods(next: boolean) {
+    setKeepUninstalledMods(next);
+    try {
+      const result = await invoke<string>("save_uninstall_storage_settings", { keepUninstalledMods: next });
+      setCacheStatus(result);
+      await refreshCacheStats(result);
+    } catch (error) {
+      setKeepUninstalledMods(!next);
+      setCacheStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function clearCache(command: "clear_download_cache" | "clear_extraction_cache" | "clear_all_download_cache", label: string) {
+    const confirmed = window.confirm(`Clear ${label}? This only deletes Tsuki cache files and does not delete receipts, backups, profiles, or logs.`);
+    if (!confirmed || cacheBusy) return;
+
+    setCacheBusy(true);
+    setCacheStatus(`Clearing ${label}...`);
+    reportTaskProgress("Clear Cache", 10, `Clearing ${label}...`);
+
+    try {
+      const result = await invoke<string>(command);
+      reportTaskProgress("Clear Cache", 72, "Refreshing cache stats...");
+      await refreshCacheStats(result);
+      reportTaskProgress("Clear Cache", 100, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCacheStatus(message);
+      reportTaskProgress("Cache cleanup failed", 100, message);
+    } finally {
+      setCacheBusy(false);
+      clearTaskProgressSoon();
+    }
+  }
+
   useEffect(() => {
     void loadSettings();
-    void loadReceipts();
-    void refreshDebugReport();
     void detectPayday3();
     void checkAdminState();
+    void refreshCacheStats("Cache stats loaded.");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  void jumpToSettingsSection;
-
   return (
-    <section className="page">
+    <section className="page settings-page modern-settings-page">
       <div className="settings-hero hero-glass">
         <div>
           <p className="eyebrow">Control panel</p>
           <h1>Settings</h1>
           <p className="page-description">
-            Configure Payday 3 paths, admin mode, source API keys, receipts, themes,
-            debug tools, and health checks.
+            Configure PAYDAY 3 paths, source keys, updates, and themes. Advanced diagnostics live in the secret debug panel.
           </p>
         </div>
         <div className="settings-category-nav">
@@ -433,35 +414,19 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
         </div>
 
         <div className="card settings-section-card">
-          <h2>Admin Mode</h2>
+          <h2>Admin Access</h2>
           <p>{adminStatus}</p>
           <br />
           <div className="button-row">
             <button className="ghost-button" type="button" onClick={checkAdminState}>
-              Check Admin
+              Check Admin State
             </button>
-            <button className="ghost-button danger-button" type="button" onClick={relaunchAsAdmin}>
+            <button className="ghost-button" type="button" onClick={relaunchAsAdmin}>
               Relaunch as Admin
             </button>
           </div>
-          <p className="source-mini-note">
-            Use this when replacing files in Program Files, especially Content\\Movies video replacers.
-          </p>
         </div>
 
-        <div className="card settings-section-card" id="settings-debug" hidden>
-          <h2>Debug Tools</h2>
-          <p>Copy a backend-generated report you can paste into chat when something breaks.</p>
-          <br />
-          <div className="button-row">
-            <button className="ghost-button" type="button" onClick={copyDebugReport}>
-              {debugCopied ? "Copied!" : "Copy Debug Report"}
-            </button>
-            <button className="ghost-button" type="button" onClick={runHealthCheck}>
-              Run Health Check
-            </button>
-          </div>
-        </div>
       </div>
       </div>
 
@@ -472,8 +437,8 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
           entry now, with login flow reserved for the next real OAuth step.
         </p>
 
-        <div className="source-card-grid">
-          <div className="card">
+        <div className="source-card-grid settings-source-grid">
+          <div className="card settings-source-card">
             <h3>ModWorkshop</h3>
             <div className="source-status-line">
               <strong>Public API</strong>
@@ -502,11 +467,11 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
             </p>
           </div>
 
-          <div className="card">
+          <div className="card settings-source-card">
             <h3>Nexus Mods</h3>
             <div className="source-status-line">
               <strong>{nexusConnected ? "Connected" : "Not connected"}</strong>
-              <span>{maskKey(nexusApiKey)}</span>
+              <span className="masked-key">{maskKey(nexusApiKey)}</span>
             </div>
 
             <br />
@@ -533,20 +498,11 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
             </label>
 
             <div className="source-key-actions">
-              <button className="ghost-button" type="button" onClick={loginWithNexus}>
-                Login with Nexus
+              <button className="ghost-button compact" type="button" onClick={loginWithNexus}>
+                Open Nexus API Page
               </button>
-              <button className="ghost-button" type="button" onClick={copyNexusKey}>
-                Copy
-              </button>
-              <button className="ghost-button" type="button" onClick={checkNexusAccountIntegration}>
-                Check Nexus Account
-              </button>
-              <button className="ghost-button" type="button" onClick={checkNexusGraphqlV2}>
-                Check GraphQL v2
-              </button>
-              <button className="ghost-button" type="button" onClick={showNexusGraphqlDiagnostic}>
-                Show GraphQL Diagnostic
+              <button className="ghost-button compact" type="button" onClick={copyNexusKey}>
+                Copy Key
               </button>
             </div>
 
@@ -559,23 +515,98 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
 
         <br />
 
-        <div className="button-row">
-          <button className="ghost-button" type="button" onClick={() => setShowKeys(!showKeys)}>
+        <div className="button-row source-save-row">
+          <button className="ghost-button compact" type="button" onClick={() => setShowKeys(!showKeys)}>
             {showKeys ? "Hide Keys" : "Show Keys"}
           </button>
-          <button className="ghost-button" type="button" onClick={saveSourceKeys}>
+          <button className="ghost-button install-button save-api-button" type="button" onClick={saveSourceKeys}>
             Save API Keys
           </button>
-          <button className="ghost-button" type="button" onClick={verifySources}>
-            Verify Sources
-          </button>
-          <button className="ghost-button" type="button" onClick={clearSourceKeys}>
+          <button className="ghost-button compact" type="button" onClick={clearSourceKeys}>
             Clear API Keys
           </button>
         </div>
 
         <br />
         <p>{sourceStatus}</p>
+      </article>
+
+
+      <article className="card settings-section-card settings-tab-panel" id="settings-cache" hidden={settingsTab !== "cache"}>
+        <h2>Cache Management</h2>
+        <p>
+          Downloads are stored for reinstall/debugging unless you turn archive retention off.
+          Temporary extraction folders are used only for archive inspection and install routing.
+        </p>
+
+        <label className="source-toggle-row">
+          <input
+            type="checkbox"
+            checked={keepDownloadedArchives}
+            onChange={(event) => saveKeepDownloadedArchives(event.target.checked)}
+          />
+          <span>Keep Downloaded Archives</span>
+        </label>
+
+        <label className="source-toggle-row">
+          <input
+            type="checkbox"
+            checked={keepUninstalledMods}
+            onChange={(event) => saveKeepUninstalledMods(event.target.checked)}
+          />
+          <span>Keep Uninstalled Mods</span>
+        </label>
+
+        <div className="source-card-grid settings-source-grid">
+          <div className="card settings-source-card">
+            <h3>Storage</h3>
+            <div className="source-status-line">
+              <strong>{formatBytes(cacheStats?.totalCacheSizeBytes ?? 0)}</strong>
+              <span>Total cache</span>
+            </div>
+            <p className="source-mini-note">Download cache: {formatBytes(cacheStats?.downloadCacheSizeBytes ?? 0)}</p>
+            <p className="source-mini-note">Extraction cache: {formatBytes(cacheStats?.extractionCacheSizeBytes ?? 0)}</p>
+            <p className="source-mini-note">Cached downloads: {cacheStats?.cachedDownloadCount ?? 0}</p>
+            <p className="source-mini-note">Temporary extraction folders: {cacheStats?.temporaryExtractionFolderCount ?? 0}</p>
+            <p className="source-mini-note">Uninstalled storage: {formatBytes(cacheStats?.uninstalledStorageSizeBytes ?? 0)}</p>
+            <p className="source-mini-note">Uninstalled entries: {cacheStats?.uninstalledEntryCount ?? 0}</p>
+          </div>
+
+          <div className="card settings-source-card">
+            <h3>Folders</h3>
+            <p className="source-mini-note">Tsuki data: {cacheStats?.appDataPath ?? "%APPDATA%/Tsuki Mod Manager"}</p>
+            <p className="source-mini-note">Cache: {cacheStats?.cachePath ?? "%APPDATA%/Tsuki Mod Manager/cache"}</p>
+            <p className="source-mini-note">Uninstalled: {cacheStats?.uninstalledPath ?? "%APPDATA%/Tsuki Mod Manager/uninstalled"}</p>
+            <div className="source-key-actions">
+              <button className="ghost-button compact" type="button" onClick={openTsukiDataFolder}>
+                Open Tsuki Data Folder
+              </button>
+              <button className="ghost-button compact" type="button" onClick={openCacheFolder}>
+                Open Cache Folder
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <br />
+
+        <div className="button-row source-save-row">
+          <button className="ghost-button compact" type="button" onClick={() => refreshCacheStats()} disabled={cacheBusy}>
+            Refresh Cache Stats
+          </button>
+          <button className="ghost-button compact" type="button" onClick={() => clearCache("clear_download_cache", "download cache")} disabled={cacheBusy}>
+            Clear Download Cache
+          </button>
+          <button className="ghost-button compact" type="button" onClick={() => clearCache("clear_extraction_cache", "extraction cache")} disabled={cacheBusy}>
+            Clear Extraction Cache
+          </button>
+          <button className="ghost-button compact danger-button" type="button" onClick={() => clearCache("clear_all_download_cache", "all download and extraction cache")} disabled={cacheBusy}>
+            Clear All Cache
+          </button>
+        </div>
+
+        <br />
+        <p>{cacheStatus}</p>
       </article>
 
 
@@ -587,7 +618,7 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
         </p>
 
         <p className="source-mini-note">
-          Update checks use Tsuki's built-in GitHub latest.json URL. There is no editable update URL setting anymore.
+          Update checks now use Tsuki's built-in latest.json on GitHub. There is no custom URL to configure.
         </p>
 
         <div className="button-row">
@@ -600,52 +631,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
         </div>
 
         <p>{appUpdateStatus}</p>
-
-        <div className="debug-box mini">
-{`latest.json example:
-{
-  "version": "1.0.7.28",
-  "notes": "Fixes and polish.",
-  "pubDate": "2026-06-15T00:00:00Z",
-  "releaseUrl": "https://github.com/YOURNAME/TsukiModManager/releases/latest",
-  "downloadUrl": "https://github.com/YOURNAME/TsukiModManager/releases/download/v1.0.7.28/Tsuki_Mod_Manager_v1.0.7.28_Setup.exe",
-  "sha256": "optional sha256 of the exe"
-}`}
-        </div>
-      </article>
-
-      <article className="card settings-section-card settings-tab-panel" id="settings-receipts" hidden={settingsTab !== "receipts"}>
-        <h2>Install Receipts</h2>
-        <p>
-          Receipts will power safe uninstall, enable/disable, update checks, mod names,
-          thumbnails, backup matching, and hash verification.
-        </p>
-
-        <div className="card-grid">
-          <div className="card">
-            <h3>Receipts</h3>
-            <div className="stat-number">{receiptStats.count}</div>
-          </div>
-          <div className="card">
-            <h3>Tracked Files</h3>
-            <div className="stat-number">{receiptStats.fileCount}</div>
-          </div>
-          <div className="card">
-            <h3>Storage</h3>
-            <p>%APPDATA%\Tsuki Mod Manager\receipts</p>
-          </div>
-        </div>
-
-        {receipts.length > 0 && (
-          <div className="receipt-preview-list">
-            {receipts.slice(0, 5).map((receipt) => (
-              <div className="receipt-preview-row" key={receipt.id}>
-                <strong>{receipt.displayName}</strong>
-                <span>{receipt.files.length} files</span>
-              </div>
-            ))}
-          </div>
-        )}
       </article>
 
       <article className="card settings-section-card settings-tab-panel" id="settings-themes" hidden={settingsTab !== "themes"}>
@@ -672,28 +657,6 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
         </div>
       </article>
 
-      <div className="settings-tab-panel" id="settings-debug-panel" hidden={settingsTab !== "debug"}>
-        <div className="card">
-          <h2>Debug Tools</h2>
-          <p>Copy a backend-generated report you can paste into chat when something breaks.</p>
-          <br />
-          <div className="button-row">
-            <button className="ghost-button" type="button" onClick={copyDebugReport}>
-              {debugCopied ? "Copied!" : "Copy Debug Report"}
-            </button>
-            <button className="ghost-button" type="button" onClick={runHealthCheck}>
-              Run Health Check
-            </button>
-          </div>
-        </div>
-
-        <div className="card">
-          <h2>Health Check</h2>
-          <p>{healthStatus}</p>
-        </div>
-
-        <div className="debug-box">{debugReport}</div>
-      </div>
     </section>
   );
 }

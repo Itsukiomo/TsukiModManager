@@ -22,7 +22,7 @@ mod source_http;
 mod nexus;
 mod modworkshop;
 
-const APP_VERSION: &str = "1.8.1";
+const APP_VERSION: &str = "1.8.2";
 const APP_DIR_NAME: &str = "Tsuki Mod Manager";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const DEFAULT_THEME_ID: &str = "moonveil";
@@ -128,6 +128,10 @@ struct InstallReceipt {
     mod_type: String,
     source_mod_id: Option<String>,
     source_file_id: Option<String>,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     version: Option<String>,
     author: Option<String>,
     thumbnail_url: Option<String>,
@@ -207,6 +211,10 @@ struct InstalledStateRecord {
     receipt_id: Option<String>,
     source_mod_id: Option<String>,
     source_file_id: Option<String>,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     page_url: Option<String>,
     thumbnail_url: Option<String>,
     banner_url: Option<String>,
@@ -551,26 +559,31 @@ fn restore_path_merge(source: &Path, destination: &Path, skipped: &mut Vec<Strin
     }
 
     if destination.exists() {
-        let holding_root = uninstalled_dir()?.join(format!("vanilla_restore_conflict_{}", current_timestamp()));
-        fs::create_dir_all(&holding_root)
-            .map_err(|err| format!("Failed to create restore conflict folder {}: {}", holding_root.display(), err))?;
+        if keep_uninstalled_mods_enabled() {
+            let holding_root = uninstalled_dir()?.join(format!("vanilla_restore_conflict_{}", current_timestamp()));
+            fs::create_dir_all(&holding_root)
+                .map_err(|err| format!("Failed to create restore conflict folder {}: {}", holding_root.display(), err))?;
 
-        let fallback_name = destination
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("unknown_restore_conflict"));
-        let conflict_destination = unique_destination_path(&holding_root.join(fallback_name));
+            let fallback_name = destination
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("unknown_restore_conflict"));
+            let conflict_destination = unique_destination_path(&holding_root.join(fallback_name));
 
-        move_path_to_target(destination, &conflict_destination).map_err(|err| {
-            format!(
-                "Could not move existing restore conflict {} out of the way before restoring {}: {}",
-                destination.display(),
-                source.display(),
-                err
-            )
-        })?;
+            move_path_to_target(destination, &conflict_destination).map_err(|err| {
+                format!(
+                    "Could not move existing restore conflict {} out of the way before restoring {}: {}",
+                    destination.display(),
+                    source.display(),
+                    err
+                )
+            })?;
 
-        skipped.push(format!("Moved existing restore conflict to {}", conflict_destination.display()));
+            skipped.push(format!("Moved existing restore conflict to {}", conflict_destination.display()));
+        } else {
+            delete_file_permanently(destination, "restore conflict")?;
+            skipped.push(format!("Deleted existing restore conflict {}", destination.display()));
+        }
     }
 
     move_path_to_target(source, destination)?;
@@ -751,6 +764,8 @@ struct AppSettings {
     nexus_api_key: Option<String>,
     show_age_restricted_nexus: bool,
     app_update_manifest_url: Option<String>,
+    keep_downloaded_archives: bool,
+    keep_uninstalled_mods: bool,
 }
 
 impl Default for AppSettings {
@@ -762,8 +777,27 @@ impl Default for AppSettings {
             nexus_api_key: None,
             show_age_restricted_nexus: true,
             app_update_manifest_url: None,
+            keep_downloaded_archives: true,
+            keep_uninstalled_mods: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheStats {
+    app_data_path: String,
+    cache_path: String,
+    download_cache_path: String,
+    extraction_cache_path: String,
+    uninstalled_path: String,
+    download_cache_size_bytes: u64,
+    extraction_cache_size_bytes: u64,
+    total_cache_size_bytes: u64,
+    cached_download_count: usize,
+    temporary_extraction_folder_count: usize,
+    uninstalled_storage_size_bytes: u64,
+    uninstalled_entry_count: usize,
 }
 
 
@@ -806,16 +840,55 @@ fn app_data_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(appdata).join(APP_DIR_NAME))
 }
 
-fn backups_dir() -> Result<PathBuf, String> {
+fn legacy_backups_dir() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("backups"))
+}
+
+fn backups_dir() -> Result<PathBuf, String> {
+    if let Some(paths) = detect_payday3_paths_internal() {
+        return Ok(paths.pak_mods.join("Tsuki_Backups"));
+    }
+
+    legacy_backups_dir()
 }
 
 fn downloads_cache_dir() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("cache").join("downloads"))
 }
 
+fn cache_dir() -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join("cache"))
+}
+
+fn extraction_cache_dir() -> Result<PathBuf, String> {
+    Ok(downloads_cache_dir()?.join("external_extract"))
+}
+
+fn source_download_cache_dirs() -> Result<Vec<PathBuf>, String> {
+    let downloads = downloads_cache_dir()?;
+    Ok(vec![downloads.join("nexus"), downloads.join("modworkshop")])
+}
+
 fn uninstalled_dir() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("uninstalled"))
+}
+
+fn keep_uninstalled_mods_enabled() -> bool {
+    load_settings_internal().keep_uninstalled_mods
+}
+
+fn delete_file_permanently(path: &Path, context: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|err| format!("Failed to delete {} folder {}: {}", context, path.display(), err))
+    } else {
+        fs::remove_file(path)
+            .map_err(|err| format!("Failed to delete {} file {}: {}", context, path.display(), err))
+    }
 }
 
 fn settings_file_path() -> Result<PathBuf, String> {
@@ -841,6 +914,39 @@ struct RuntimeProcessDiagnostic {
     status: String,
     reason: String,
     details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeLockStatus {
+    payday3_running: bool,
+    vanilla_session_active: bool,
+    toggle_locked: bool,
+    message: String,
+}
+
+#[tauri::command]
+fn payday3_runtime_lock_status() -> Result<RuntimeLockStatus, String> {
+    let payday3_running = payday_process_running();
+    let vanilla_session_active = read_vanilla_launch_session().is_some();
+    let toggle_locked = payday3_running || vanilla_session_active;
+    let message = if payday3_running {
+        "PAYDAY 3 is running. Tsuki cannot enable, disable, uninstall, or replace mod files until the game closes.".to_string()
+    } else if vanilla_session_active {
+        "Vanilla launch session is active. Mods are temporarily shown Off and will restore after PAYDAY 3 closes.".to_string()
+    } else {
+        "No PAYDAY 3 runtime lock.".to_string()
+    };
+
+    Ok(RuntimeLockStatus { payday3_running, vanilla_session_active, toggle_locked, message })
+}
+
+fn runtime_mutation_locked_message() -> Option<String> {
+    if payday_process_running() {
+        return Some("PAYDAY 3 is running. Close the game before enabling, disabling, uninstalling, or replacing mod files.".to_string());
+    }
+
+    None
 }
 
 fn runtime_diagnostic_file_path() -> Result<PathBuf, String> {
@@ -1457,6 +1563,69 @@ fn modified_unix(metadata: &fs::Metadata) -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
+fn scan_pak_file_into_scan(path: &Path, pak_mods: &mut Vec<PakModFile>, hash_cache: &mut std::collections::BTreeMap<String, FileHashCacheRecord>) -> Result<(), String> {
+    if !path.is_file() || !is_pak_related_file(path) {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path)
+        .map_err(|err| format!("Failed to read metadata for {}: {}", path.display(), err))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let extension = pak_file_kind_from_name(&file_name).unwrap_or_else(|| {
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    });
+
+    let size_bytes = metadata.len();
+    let modified = modified_unix(&metadata);
+    let sha256 = cached_sha256_for_file(path, size_bytes, modified, hash_cache);
+
+    pak_mods.push(PakModFile {
+        priority: extract_priority(&enabled_name_from_disabled(&file_name)),
+        enabled: !is_disabled_pak_name(&file_name),
+        extension,
+        size_bytes,
+        modified_unix: modified,
+        full_path: path.display().to_string(),
+        file_name,
+        sha256,
+    });
+
+    Ok(())
+}
+
+fn scan_disabled_pak_tree_into_scan(current: &Path, pak_mods: &mut Vec<PakModFile>, hash_cache: &mut std::collections::BTreeMap<String, FileHashCacheRecord>) -> Result<(), String> {
+    if !current.exists() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(current)
+        .map_err(|err| format!("Failed to read disabled pak folder {}: {}", current.display(), err))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Failed to read disabled pak folder entry: {}", err))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Never scan inside zip backups or unrelated helper folders. The disabled_pak_mods
+            // root should only contain Tsuki-created ModName folders, but this keeps it safe.
+            scan_disabled_pak_tree_into_scan(&path, pak_mods, hash_cache)?;
+        } else {
+            scan_pak_file_into_scan(&path, pak_mods, hash_cache)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn scan_pak_mods_internal() -> Result<PakScanResult, String> {
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
@@ -1464,6 +1633,7 @@ fn scan_pak_mods_internal() -> Result<PakScanResult, String> {
     let mut pak_mods = Vec::new();
     let mut hash_cache = read_hash_cache();
 
+    // Enabled loose PAK-family files live directly in ~mods. The game scans this level.
     if paths.pak_mods.exists() {
         let entries = fs::read_dir(&paths.pak_mods)
             .map_err(|err| format!("Failed to read pak mods folder: {}", err))?;
@@ -1471,47 +1641,58 @@ fn scan_pak_mods_internal() -> Result<PakScanResult, String> {
         for entry in entries {
             let entry = entry.map_err(|err| format!("Failed to read folder entry: {}", err))?;
             let path = entry.path();
+            scan_pak_file_into_scan(&path, &mut pak_mods, &mut hash_cache)?;
+        }
+    }
 
-            if !path.is_file() || !is_pak_related_file(&path) {
+    // Disabled PAK-family files are intentionally moved under:
+    // ~mods/Tsuki_Disabled_Mods/disabled_pak_mods/<ModName>/*.disabled
+    // They still need to show in Installed so the user can re-enable them.
+    for disabled_root in disabled_pak_mods_root_candidates(&paths) {
+        let _ = scan_disabled_pak_tree_into_scan(&disabled_root, &mut pak_mods, &mut hash_cache);
+    }
+
+    // Vanilla launch temporarily moves enabled PAK-family files outside ~mods.
+    // Show them as Off in Installed while PAYDAY 3 is running, instead of making them vanish.
+    if let Some(session) = read_vanilla_launch_session() {
+        for record in session.temp_files {
+            let hidden = PathBuf::from(&record.disabled_path);
+            let original = PathBuf::from(&record.original_path);
+            if !hidden.exists() || !is_pak_related_file(&hidden) && !is_pak_related_file(&original) {
                 continue;
             }
 
-            let metadata = fs::metadata(&path)
-                .map_err(|err| format!("Failed to read metadata for {}: {}", path.display(), err))?;
-
-            let file_name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            let extension = pak_file_kind_from_name(&file_name).unwrap_or_else(|| {
-                path.extension()
+            if let Ok(metadata) = fs::metadata(&hidden) {
+                let file_name = original
+                    .file_name()
                     .and_then(|value| value.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase()
-            });
+                    .unwrap_or_else(|| hidden.file_name().and_then(|value| value.to_str()).unwrap_or("unknown.pak"))
+                    .to_string();
+                let extension = pak_file_kind_from_name(&file_name).unwrap_or_else(|| "pak".to_string());
+                let size_bytes = metadata.len();
+                let modified = modified_unix(&metadata);
+                let sha256 = cached_sha256_for_file(&hidden, size_bytes, modified, &mut hash_cache);
 
-            let size_bytes = metadata.len();
-            let modified = modified_unix(&metadata);
-            let sha256 = cached_sha256_for_file(&path, size_bytes, modified, &mut hash_cache);
-
-            pak_mods.push(PakModFile {
-                priority: extract_priority(&enabled_name_from_disabled(&file_name)),
-                enabled: !is_disabled_pak_name(&file_name),
-                extension,
-                size_bytes,
-                modified_unix: modified,
-                full_path: path.display().to_string(),
-                file_name,
-                sha256,
-            });
+                pak_mods.push(PakModFile {
+                    priority: extract_priority(&file_name),
+                    enabled: false,
+                    extension,
+                    size_bytes,
+                    modified_unix: modified,
+                    full_path: hidden.display().to_string(),
+                    file_name,
+                    sha256,
+                });
+            }
         }
     }
 
     write_hash_cache(&hash_cache);
 
-    pak_mods.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+    pak_mods.sort_by(|a, b| {
+        enabled_name_from_disabled(&a.file_name).to_lowercase()
+            .cmp(&enabled_name_from_disabled(&b.file_name).to_lowercase())
+    });
 
     Ok(PakScanResult {
         game_root: paths.game_root.display().to_string(),
@@ -1522,9 +1703,63 @@ fn scan_pak_mods_internal() -> Result<PakScanResult, String> {
     })
 }
 
+fn find_disabled_pak_file(paths: &PaydayPaths, clean_name: &str) -> Option<PathBuf> {
+    let wanted_disabled = disabled_name_from_enabled(clean_name).to_lowercase();
+    let wanted_enabled = enabled_name_from_disabled(clean_name).to_lowercase();
+
+    fn visit(current: &Path, wanted_disabled: &str, wanted_enabled: &str) -> Option<PathBuf> {
+        let entries = fs::read_dir(current).ok()?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = visit(&path, wanted_disabled, wanted_enabled) {
+                    return Some(found);
+                }
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|value| value.to_str()).map(|value| value.to_lowercase()) else {
+                continue;
+            };
+
+            if name == wanted_disabled || enabled_name_from_disabled(&name) == wanted_enabled {
+                return Some(path);
+            }
+        }
+
+        None
+    }
+
+    for disabled_root in disabled_pak_mods_root_candidates(paths) {
+        if let Some(found) = visit(&disabled_root, &wanted_disabled, &wanted_enabled) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn raw_disabled_pak_destination(paths: &PaydayPaths, file_name: &str) -> PathBuf {
+    let enabled_name = enabled_name_from_disabled(file_name);
+    let folder_name = sanitize_file_component(
+        Path::new(&enabled_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(enabled_name.as_str()),
+    );
+
+    disabled_pak_mods_root(paths)
+        .join(if folder_name.is_empty() { "Loose_PAK_Mod".to_string() } else { folder_name })
+        .join(disabled_name_from_enabled(&enabled_name))
+}
 
 #[tauri::command]
 fn set_pak_mod_files_enabled(file_names: Vec<String>, enabled: bool) -> Result<String, String> {
+    if let Some(message) = runtime_mutation_locked_message() {
+        return Err(message);
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
@@ -1547,62 +1782,67 @@ fn set_pak_mod_files_enabled(file_names: Vec<String>, enabled: bool) -> Result<S
             continue;
         }
 
-        let current_name = if enabled {
-            if is_disabled_pak_name(clean_name) {
-                clean_name.to_string()
-            } else {
-                disabled_name_from_enabled(clean_name)
+        if enabled {
+            let enabled_name = enabled_name_from_disabled(clean_name);
+            let destination = paths.pak_mods.join(&enabled_name);
+            let source_path = find_disabled_pak_file(&paths, clean_name)
+                .or_else(|| {
+                    let local_disabled = paths.pak_mods.join(disabled_name_from_enabled(clean_name));
+                    if local_disabled.exists() { Some(local_disabled) } else { None }
+                });
+
+            let Some(source_path) = source_path else {
+                skipped.push(format!("Missing disabled PAK-family file {}", clean_name));
+                continue;
+            };
+
+            if destination.exists() {
+                skipped.push(format!("Target already exists: {}", destination.display()));
+                continue;
             }
+
+            let source_parent = source_path.parent().map(PathBuf::from);
+            move_file_to_target(&source_path, &destination)?;
+            if let Some(parent) = source_parent {
+                for root in disabled_pak_mods_root_candidates(&paths) {
+                    if parent.starts_with(&root) {
+                        remove_empty_dirs_up_to(&parent, &root);
+                    }
+                }
+            }
+            changed += 1;
         } else {
-            enabled_name_from_disabled(clean_name)
-        };
+            let enabled_name = enabled_name_from_disabled(clean_name);
+            let source_path = paths.pak_mods.join(&enabled_name);
 
-        let target_name = if enabled {
-            enabled_name_from_disabled(&current_name)
-        } else {
-            disabled_name_from_enabled(&current_name)
-        };
+            if !source_path.exists() {
+                skipped.push(format!("Missing enabled PAK-family file {}", enabled_name));
+                continue;
+            }
 
-        if current_name == target_name {
-            skipped.push(format!("{} already {}", clean_name, if enabled { "enabled" } else { "disabled" }));
-            continue;
+            let destination = raw_disabled_pak_destination(&paths, &enabled_name);
+            if destination.exists() {
+                skipped.push(format!("Disabled target already exists: {}", destination.display()));
+                continue;
+            }
+
+            move_file_to_target(&source_path, &destination)?;
+            changed += 1;
         }
-
-        let current_path = paths.pak_mods.join(&current_name);
-        let target_path = paths.pak_mods.join(&target_name);
-
-        if !current_path.exists() {
-            skipped.push(format!("Missing {}", current_name));
-            continue;
-        }
-
-        if target_path.exists() {
-            skipped.push(format!("Target already exists: {}", target_name));
-            continue;
-        }
-
-        fs::rename(&current_path, &target_path).map_err(|err| {
-            format!(
-                "Failed to rename {} to {}: {}",
-                current_path.display(),
-                target_path.display(),
-                err
-            )
-        })?;
-
-        changed += 1;
     }
+
+    let _ = sync_installed_state_database();
 
     if skipped.is_empty() {
         Ok(format!(
-            "{} {} file{}.",
+            "{} {} PAK-family file{} using Tsuki_Disabled_Mods storage.",
             if enabled { "Enabled" } else { "Disabled" },
             changed,
             if changed == 1 { "" } else { "s" }
         ))
     } else {
         Ok(format!(
-            "{} {} file{}. {}",
+            "{} {} PAK-family file{} using Tsuki_Disabled_Mods storage. {}",
             if enabled { "Enabled" } else { "Disabled" },
             changed,
             if changed == 1 { "" } else { "s" },
@@ -1987,6 +2227,11 @@ fn move_path_to_uninstalled(path: &Path, holding_root: &Path) -> Result<Option<S
         return Ok(None);
     }
 
+    if !keep_uninstalled_mods_enabled() {
+        delete_file_permanently(path, "uninstalled mod")?;
+        return Ok(Some(format!("Deleted {}", path.display())));
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?;
 
@@ -2046,10 +2291,46 @@ fn receipt_safe_folder_name(receipt: &InstallReceipt) -> String {
     }
 }
 
+fn tsuki_disabled_root(paths: &PaydayPaths) -> PathBuf {
+    paths.pak_mods.join("Tsuki_Disabled_Mods")
+}
+
+fn legacy_typo_tsuki_disabled_root(paths: &PaydayPaths) -> PathBuf {
+    // Older prompt/prototype text had a space before _mods. Never create it,
+    // but scan it so a user's existing disabled files are not orphaned.
+    paths.pak_mods.join("Tsuki_Disabled _mods")
+}
+
+fn disabled_pak_mods_root(paths: &PaydayPaths) -> PathBuf {
+    tsuki_disabled_root(paths).join("disabled_pak_mods")
+}
+
+fn disabled_ue4ss_mods_root(paths: &PaydayPaths) -> PathBuf {
+    tsuki_disabled_root(paths).join("disabled_UE4SS_Mods")
+}
+
+fn disabled_pak_mods_root_candidates(paths: &PaydayPaths) -> Vec<PathBuf> {
+    vec![
+        disabled_pak_mods_root(paths),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_pak_mods"),
+    ]
+}
+
+fn disabled_ue4ss_mods_root_candidates(paths: &PaydayPaths) -> Vec<PathBuf> {
+    vec![
+        disabled_ue4ss_mods_root(paths),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_UE4SS_Mods"),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_UES4_Mods"),
+    ]
+}
+
 fn disabled_receipt_root(paths: &PaydayPaths, receipt: &InstallReceipt) -> PathBuf {
-    paths.win64
-        .join("disabled")
-        .join(receipt_safe_folder_name(receipt))
+    // Default display/root path for UI. Individual files may be split into PAK vs UE4SS disabled roots.
+    if receipt.files.iter().any(|file| receipt_is_pak_file_path(&file.relative_path)) {
+        disabled_pak_mods_root(paths).join(receipt_safe_folder_name(receipt))
+    } else {
+        disabled_ue4ss_mods_root(paths).join(receipt_safe_folder_name(receipt))
+    }
 }
 
 fn legacy_disabled_receipt_root(paths: &PaydayPaths, receipt: &InstallReceipt) -> PathBuf {
@@ -2062,19 +2343,314 @@ fn legacy_disabled_receipt_root(paths: &PaydayPaths, receipt: &InstallReceipt) -
         ))
 }
 
-fn disabled_manifest_path(paths: &PaydayPaths, receipt: &InstallReceipt) -> PathBuf {
-    let primary = disabled_receipt_root(paths, receipt).join("tsuki-disabled.json");
-    if primary.exists() {
-        return primary;
-    }
-
-    let legacy = legacy_disabled_receipt_root(paths, receipt).join("tsuki-disabled.json");
-    if legacy.exists() {
-        return legacy;
-    }
-
-    primary
+fn legacy_disabled_receipt_root_plain(paths: &PaydayPaths, receipt: &InstallReceipt) -> PathBuf {
+    paths.win64.join("disabled").join(receipt_safe_folder_name(receipt))
 }
+
+fn disabled_receipt_root_candidates(paths: &PaydayPaths, receipt: &InstallReceipt) -> Vec<PathBuf> {
+    let receipt_folder = receipt_safe_folder_name(receipt);
+    let mut roots = vec![
+        disabled_receipt_root(paths, receipt),
+        legacy_disabled_receipt_root(paths, receipt),
+        legacy_disabled_receipt_root_plain(paths, receipt),
+    ];
+
+    for root in disabled_pak_mods_root_candidates(paths) {
+        roots.push(root.join(&receipt_folder));
+    }
+
+    for root in disabled_ue4ss_mods_root_candidates(paths) {
+        roots.push(root.join(&receipt_folder));
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn disabled_manifest_candidates(paths: &PaydayPaths, receipt: &InstallReceipt) -> Vec<PathBuf> {
+    disabled_receipt_root_candidates(paths, receipt)
+        .into_iter()
+        .map(|root| root.join("tsuki-disabled.json"))
+        .collect()
+}
+
+fn folder_has_non_manifest_files_recursive(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    if path.is_file() {
+        return path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|name| !name.eq_ignore_ascii_case("tsuki-disabled.json"))
+            .unwrap_or(true);
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        if folder_has_non_manifest_files_recursive(&entry.path()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn receipt_disabled_storage_has_files(paths: &PaydayPaths, receipt: &InstallReceipt) -> bool {
+    disabled_receipt_root_candidates(paths, receipt)
+        .into_iter()
+        .any(|root| folder_has_non_manifest_files_recursive(&root))
+}
+
+fn disabled_manifest_path(paths: &PaydayPaths, receipt: &InstallReceipt) -> PathBuf {
+    for candidate in disabled_manifest_candidates(paths, receipt) {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    disabled_receipt_root(paths, receipt).join("tsuki-disabled.json")
+}
+
+fn risky_disabled_file_name(file_name: &str) -> String {
+    let lower = file_name.to_lowercase();
+    let risky = lower.ends_with(".pak")
+        || lower.ends_with(".ucas")
+        || lower.ends_with(".utoc")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".asi")
+        || lower.ends_with(".ini")
+        || lower.ends_with(".toml")
+        || lower.ends_with(".lua")
+        || lower.ends_with(".json");
+
+    if risky && !lower.ends_with(".disabled") {
+        format!("{}.disabled", file_name)
+    } else {
+        file_name.to_string()
+    }
+}
+
+fn disabled_destination_for_receipt_file(paths: &PaydayPaths, receipt: &InstallReceipt, original: &Path, file: &InstallReceiptFile) -> PathBuf {
+    let receipt_folder = receipt_safe_folder_name(receipt);
+    let is_pak = receipt_is_pak_file_path(&file.relative_path) || original.starts_with(&paths.pak_mods);
+    let root = if is_pak {
+        disabled_pak_mods_root(paths).join(receipt_folder)
+    } else {
+        disabled_ue4ss_mods_root(paths).join(receipt_folder)
+    };
+
+    let relative = if is_pak {
+        original
+            .strip_prefix(&paths.pak_mods)
+            .map(|value| value.to_path_buf())
+            .unwrap_or_else(|_| original.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("unknown_file")))
+    } else if let Ok(relative) = original.strip_prefix(&paths.win64) {
+        relative.to_path_buf()
+    } else if let Ok(relative) = original.strip_prefix(&paths.game_root) {
+        relative.to_path_buf()
+    } else {
+        original.file_name().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("unknown_file"))
+    };
+
+    let mut destination = root.join(relative);
+    if let Some(file_name) = destination.file_name().and_then(|value| value.to_str()).map(|value| value.to_string()) {
+        destination.set_file_name(risky_disabled_file_name(&file_name));
+    }
+
+    destination
+}
+
+fn remove_empty_dirs_up_to(path: &Path, stop_at: &Path) {
+    let mut current = if path.is_file() {
+        path.parent().map(PathBuf::from)
+    } else {
+        Some(path.to_path_buf())
+    };
+
+    while let Some(dir) = current {
+        if dir == stop_at || !dir.starts_with(stop_at) {
+            break;
+        }
+
+        let is_empty = fs::read_dir(&dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+
+        if !is_empty {
+            break;
+        }
+
+        if fs::remove_dir(&dir).is_err() {
+            break;
+        }
+
+        current = dir.parent().map(PathBuf::from);
+    }
+}
+
+fn cleanup_disabled_receipt_folders(paths: &PaydayPaths, receipt: &InstallReceipt) {
+    let stop_roots = vec![
+        disabled_pak_mods_root(paths),
+        disabled_ue4ss_mods_root(paths),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_pak_mods"),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_UE4SS_Mods"),
+        legacy_typo_tsuki_disabled_root(paths).join("disabled_UES4_Mods"),
+    ];
+
+    for candidate in disabled_receipt_root_candidates(paths, receipt) {
+        let stop = stop_roots
+            .iter()
+            .find(|root| candidate.starts_with(root))
+            .cloned()
+            .or_else(|| candidate.parent().map(PathBuf::from));
+
+        if let Some(stop) = stop {
+            remove_empty_dirs_up_to(&candidate, &stop);
+        }
+    }
+}
+
+fn allowed_win64_receipt_companion_extension(path: &Path) -> bool {
+    let lower = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    lower.ends_with(".dll")
+        || lower.ends_with(".ini")
+        || lower.ends_with(".toml")
+        || lower.ends_with(".lua")
+        || lower.eq_ignore_ascii_case("mods.txt")
+        || lower.eq_ignore_ascii_case("enabled.txt")
+}
+
+fn compact_receipt_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn collect_allowed_files_recursive(root: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+    if out.len() >= limit || !root.exists() {
+        return;
+    }
+
+    if root.is_file() {
+        if allowed_win64_receipt_companion_extension(root) {
+            out.push(root.to_path_buf());
+        }
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        collect_allowed_files_recursive(&entry.path(), out, limit);
+        if out.len() >= limit {
+            break;
+        }
+    }
+}
+
+fn extra_win64_companion_files_for_receipt(paths: &PaydayPaths, receipt: &InstallReceipt) -> Vec<PathBuf> {
+    let mut already = receipt
+        .files
+        .iter()
+        .map(|file| receipt_destination_path(file).display().to_string().to_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut roots = Vec::<PathBuf>::new();
+    let mut keys = vec![compact_receipt_key(&receipt.display_name)];
+
+    for file in &receipt.files {
+        let path = receipt_destination_path(file);
+        if !path.starts_with(&paths.win64) {
+            continue;
+        }
+
+        if let Ok(relative) = path.strip_prefix(&paths.win64) {
+            let parts = relative.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>();
+            if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("Mods") {
+                let mod_root = paths.win64.join("Mods").join(&parts[1]);
+                if !roots.iter().any(|root| root == &mod_root) {
+                    roots.push(mod_root);
+                }
+                keys.push(compact_receipt_key(&parts[1]));
+            } else if let Some(parent) = path.parent() {
+                if parent != paths.win64 && !roots.iter().any(|root| root == parent) {
+                    roots.push(parent.to_path_buf());
+                }
+            }
+        }
+
+        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+            keys.push(compact_receipt_key(stem));
+        }
+    }
+
+    keys.retain(|key| key.len() >= 4);
+    keys.sort();
+    keys.dedup();
+
+    let mut found = Vec::<PathBuf>::new();
+    for root in roots {
+        collect_allowed_files_recursive(&root, &mut found, 256);
+    }
+
+    if let Ok(entries) = fs::read_dir(&paths.win64) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !allowed_win64_receipt_companion_extension(&path) {
+                continue;
+            }
+
+            let stem_key = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(compact_receipt_key)
+                .unwrap_or_default();
+
+            if stem_key.len() >= 4 && keys.iter().any(|key| key.contains(&stem_key) || stem_key.contains(key)) {
+                found.push(path);
+            }
+        }
+    }
+
+    found.sort();
+    found.dedup();
+    found
+        .into_iter()
+        .filter(|path| {
+            let key = path.display().to_string().to_lowercase();
+            if already.contains(&key) {
+                return false;
+            }
+            already.insert(key);
+            true
+        })
+        .collect()
+}
+
+fn install_receipt_file_for_existing_path(path: &Path) -> InstallReceiptFile {
+    let size_bytes = fs::metadata(path).ok().map(|metadata| metadata.len());
+    InstallReceiptFile {
+        relative_path: path.display().to_string(),
+        size_bytes,
+        sha256: sha256_file(path).ok(),
+    }
+}
+
 
 fn vanilla_temp_base_root(paths: &PaydayPaths) -> PathBuf {
     // Never store hidden vanilla files inside PAYDAY3/Content/Paks or ~mods.
@@ -2134,24 +2710,6 @@ fn receipt_is_shared_loader_path(path: &Path) -> bool {
             | "d3d11.dll"
             | "dxgi.dll"
     )
-}
-
-fn path_relative_for_disabled(paths: &PaydayPaths, path: &Path) -> PathBuf {
-    if let Ok(relative) = path.strip_prefix(&paths.win64) {
-        return relative.to_path_buf();
-    }
-
-    if let Ok(relative) = path.strip_prefix(&paths.pak_mods) {
-        return PathBuf::from("Paks").join(relative);
-    }
-
-    if let Ok(relative) = path.strip_prefix(&paths.game_root) {
-        return relative.to_path_buf();
-    }
-
-    path.file_name()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("unknown_file"))
 }
 
 fn path_relative_for_vanilla_temp(paths: &PaydayPaths, receipt: Option<&InstallReceipt>, path: &Path) -> PathBuf {
@@ -2415,7 +2973,21 @@ fn vanilla_session_contains_original(original_path: &Path) -> bool {
 }
 
 fn receipt_enabled_internal(paths: &PaydayPaths, receipt: &InstallReceipt) -> bool {
-    if disabled_manifest_path(paths, receipt).exists() {
+    if disabled_manifest_path(paths, receipt).exists() || receipt_disabled_storage_has_files(paths, receipt) {
+        return false;
+    }
+
+    // During a vanilla launch session, Tsuki moved the files away on purpose.
+    // Show those mods as Off while keeping the receipt/state visible.
+    if read_vanilla_launch_session()
+        .map(|session| {
+            receipt.files.iter().any(|file| {
+                let original = receipt_destination_path(file);
+                session.temp_files.iter().any(|record| record.original_path.eq_ignore_ascii_case(&original.display().to_string()))
+            })
+        })
+        .unwrap_or(false)
+    {
         return false;
     }
 
@@ -2424,7 +2996,7 @@ fn receipt_enabled_internal(paths: &PaydayPaths, receipt: &InstallReceipt) -> bo
         .iter()
         .any(|file| {
             let original = receipt_destination_path(file);
-            original.exists() || vanilla_session_contains_original(&original)
+            original.exists()
         })
 }
 
@@ -2449,7 +3021,7 @@ fn receipt_has_live_files_internal(paths: &PaydayPaths, receipt: &InstallReceipt
             .any(|record| PathBuf::from(&record.disabled_path).exists());
     }
 
-    false
+    receipt_disabled_storage_has_files(paths, receipt)
 }
 
 
@@ -2487,6 +3059,26 @@ fn installed_state_location_for_path(paths: &PaydayPaths, path: &Path) -> String
     }
 }
 
+
+fn receipt_file_disabled_path_exists(paths: &PaydayPaths, receipt: &InstallReceipt, original: &Path, file: &InstallReceiptFile) -> bool {
+    let original_display = original.display().to_string();
+
+    for manifest_path in disabled_manifest_candidates(paths, receipt) {
+        if let Some(manifest) = read_disabled_manifest(&manifest_path) {
+            for record in manifest.files {
+                if record.original_path.eq_ignore_ascii_case(&original_display)
+                    && PathBuf::from(&record.disabled_path).exists()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    disabled_destination_for_receipt_file(paths, receipt, original, file).exists()
+        || receipt_disabled_storage_has_files(paths, receipt)
+}
+
 fn installed_state_record_from_receipt(paths: &PaydayPaths, receipt: &InstallReceipt) -> InstalledStateRecord {
     let enabled = receipt_enabled_internal(paths, receipt);
     let files = receipt
@@ -2507,7 +3099,7 @@ fn installed_state_record_from_receipt(paths: &PaydayPaths, receipt: &InstallRec
                 file_type: installed_state_file_type(&file.relative_path),
                 size_bytes: file.size_bytes,
                 sha256: file.sha256.clone(),
-                live: path.exists() || vanilla_session_contains_original(&path),
+                live: path.exists() || vanilla_session_contains_original(&path) || receipt_file_disabled_path_exists(paths, receipt, &path, file),
             }
         })
         .collect::<Vec<_>>();
@@ -2553,6 +3145,10 @@ fn installed_state_record_from_receipt(paths: &PaydayPaths, receipt: &InstallRec
         receipt_id: Some(receipt.id.clone()),
         source_mod_id: receipt.source_mod_id.clone(),
         source_file_id: receipt.source_file_id.clone(),
+        source_file_name: receipt.source_file_name.clone(),
+        source_file_category: receipt.source_file_category.clone(),
+        source_file_uploaded_at: receipt.source_file_uploaded_at.clone(),
+        source_file_version: receipt.source_file_version.clone(),
         page_url: receipt.page_url.clone(),
         thumbnail_url: receipt.thumbnail_url.clone(),
         banner_url: receipt.banner_url.clone(),
@@ -2782,6 +3378,205 @@ fn latest_source_file(files: &[SourceFileItem]) -> Option<SourceFileItem> {
         .cloned()
 }
 
+fn source_file_text_is_explicit_old(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["old", "legacy", "previous", "archive", "archived", "deprecated", "outdated", "unsupported"]
+        .iter()
+        .any(|needle| lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == *needle))
+}
+
+fn source_file_text_is_optional(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["optional", "addon", "add", "patch", "compat", "plugin", "extra", "lite", "translation", "variant", "bonus", "separate", "requirement", "required"]
+        .iter()
+        .any(|needle| lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == *needle))
+}
+
+fn source_file_category_for_update(file: &SourceFileItem, main_id: Option<&str>, source: &str) -> &'static str {
+    let text = format!("{} {} {}", file.name, file.version.clone().unwrap_or_default(), file.download_url.clone().unwrap_or_default());
+
+    if source_file_text_is_explicit_old(&text) {
+        return "old";
+    }
+
+    if main_id.map(|id| id == file.id).unwrap_or(false) {
+        return "main";
+    }
+
+    if source.eq_ignore_ascii_case("modworkshop") {
+        return "optional";
+    }
+
+    if source_file_text_is_optional(&text) {
+        return "optional";
+    }
+
+    "optional"
+}
+
+fn main_source_file_for_update(files: &[SourceFileItem], source: &str) -> Option<SourceFileItem> {
+    let installable = files
+        .iter()
+        .filter(|file| !file.id.trim().is_empty() && file.id != "unknown")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if source.eq_ignore_ascii_case("modworkshop") {
+        return installable
+            .iter()
+            .find(|file| !source_file_text_is_explicit_old(&format!("{} {}", file.name, file.version.clone().unwrap_or_default())))
+            .cloned()
+            .or_else(|| installable.first().cloned());
+    }
+
+    installable
+        .iter()
+        .filter(|file| {
+            let text = format!("{} {}", file.name, file.version.clone().unwrap_or_default());
+            !source_file_text_is_explicit_old(&text) && !source_file_text_is_optional(&text)
+        })
+        .max_by_key(|file| source_file_update_sort_key(file))
+        .cloned()
+        .or_else(|| latest_source_file(&installable))
+}
+
+fn normalized_source_file_family_name(value: &str) -> String {
+    let mut text = value
+        .to_lowercase()
+        .replace(".zip", " ")
+        .replace(".rar", " ")
+        .replace(".7z", " ")
+        .replace(".pak", " ")
+        .replace(".ucas", " ")
+        .replace(".utoc", " ")
+        .replace(".dll", " ")
+        .replace(".lua", " ")
+        .replace(".ini", " ");
+
+    for marker in ["version", "ver"] {
+        text = text.replace(marker, " v ");
+    }
+
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| {
+            let token = token.trim();
+            if token.len() <= 1 && token != "fov" {
+                return false;
+            }
+            if token == "v" || token == "ver" || token == "version" {
+                return false;
+            }
+            !token.chars().all(|ch| ch.is_ascii_digit())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn source_file_family_similarity_name(left: &str, right: &str) -> u32 {
+    let left = normalized_source_file_family_name(left);
+    let right = normalized_source_file_family_name(right);
+
+    if left.is_empty() || right.is_empty() {
+        return 0;
+    }
+
+    if left == right {
+        return 100;
+    }
+
+    if left.contains(&right) || right.contains(&left) {
+        return 88;
+    }
+
+    let left_tokens = left.split_whitespace().collect::<std::collections::BTreeSet<_>>();
+    let right_tokens = right.split_whitespace().collect::<std::collections::BTreeSet<_>>();
+
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0;
+    }
+
+    let overlap = left_tokens.iter().filter(|token| right_tokens.contains(**token)).count();
+    ((overlap as f32 / left_tokens.len().max(right_tokens.len()) as f32) * 78.0).round() as u32
+}
+
+fn source_file_version_score_from_text(value: &str) -> f64 {
+    let mut score = 0.0_f64;
+    let mut index = 0_i32;
+
+    for token in value.split(|ch: char| !(ch.is_ascii_digit() || ch == '.')) {
+        if token.trim().is_empty() {
+            continue;
+        }
+
+        let parsed = token
+            .split('.')
+            .filter_map(|part| part.parse::<f64>().ok())
+            .collect::<Vec<_>>();
+
+        if parsed.is_empty() {
+            continue;
+        }
+
+        for part in parsed.into_iter().take(4) {
+            score += part / 1000_f64.powi(index);
+            index += 1;
+        }
+
+        if index >= 4 {
+            break;
+        }
+    }
+
+    score
+}
+
+fn source_file_version_score_for_update(file: &SourceFileItem) -> f64 {
+    source_file_version_score_from_text(&format!("{} {}", file.version.clone().unwrap_or_default(), file.name))
+}
+
+fn source_file_uploaded_unix(file: &SourceFileItem) -> Option<u64> {
+    file.uploaded_at
+        .as_deref()
+        .and_then(|value| parse_source_timestamp_to_unix(Some(value)))
+}
+
+fn source_file_is_newer_than_record(file: &SourceFileItem, record: &InstalledStateRecord) -> bool {
+    let candidate_version = source_file_version_score_for_update(file);
+    let installed_version = source_file_version_score_from_text(&format!(
+        "{} {} {}",
+        record.source_file_version.clone().or(record.version.clone()).unwrap_or_default(),
+        record.source_file_name.clone().unwrap_or_default(),
+        record.filename
+    ));
+
+    if candidate_version > 0.0 && installed_version > 0.0 && candidate_version > installed_version {
+        return true;
+    }
+
+    let candidate_upload = source_file_uploaded_unix(file);
+    let installed_upload = record
+        .source_file_uploaded_at
+        .as_deref()
+        .and_then(|value| parse_source_timestamp_to_unix(Some(value)));
+
+    matches!((candidate_upload, installed_upload), (Some(candidate), Some(installed)) if candidate > installed)
+}
+
+fn same_update_category(record_category: &str, candidate_category: &str) -> bool {
+    let normalized = |value: &str| {
+        let lower = value.to_lowercase();
+        if source_file_text_is_explicit_old(&lower) {
+            "old"
+        } else if source_file_text_is_optional(&lower) {
+            "optional"
+        } else {
+            "main"
+        }
+    };
+
+    normalized(record_category) == candidate_category
+}
+
 fn check_update_for_record(record: InstalledStateRecord) -> SourceUpdateStatus {
     let mut status = SourceUpdateStatus {
         uid: persistent_uid_for_state(&record),
@@ -2811,39 +3606,62 @@ fn check_update_for_record(record: InstalledStateRecord) -> SourceUpdateStatus {
 
     status.page_url = detail.page_url.clone().or(status.page_url);
 
-    let Some(latest) = latest_source_file(&detail.files) else {
-        status.reason = "Source detail did not expose a usable latest file.".to_string();
+    let main_file = main_source_file_for_update(&detail.files, &record.source);
+    let main_id = main_file.as_ref().map(|file| file.id.as_str());
+    let installed_category = record
+        .source_file_category
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+    let installed_family_name = record
+        .source_file_name
+        .clone()
+        .unwrap_or_else(|| record.filename.clone());
+    let installed_file_id = record
+        .source_file_id
+        .clone()
+        .or(record.file_id.clone())
+        .unwrap_or_default();
+
+    if installed_file_id.trim().is_empty() {
+        status.reason = "No saved source file ID; update cannot be trusted without manual confirmation.".to_string();
         return status;
-    };
+    }
+
+    let mut candidates = detail
+        .files
+        .iter()
+        .filter(|file| !file.id.trim().is_empty() && file.id != "unknown")
+        .filter(|file| file.id != installed_file_id)
+        .filter(|file| {
+            let category = source_file_category_for_update(file, main_id, &record.source);
+            same_update_category(&installed_category, category)
+        })
+        .filter(|file| source_file_family_similarity_name(&installed_family_name, &file.name) >= 70)
+        .filter(|file| source_file_is_newer_than_record(file, &record))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        status.reason = "No newer same-family file in the same category was proven.".to_string();
+        return status;
+    }
+
+    candidates.sort_by_key(|file| source_file_update_sort_key(file));
+    let latest = candidates.last().cloned().expect("candidates checked non-empty");
 
     status.latest_file_id = Some(latest.id.clone());
     status.latest_file_name = Some(latest.name.clone());
     status.latest_version = latest.version.clone().or(detail.version.clone());
-
-    match record.file_id.as_ref() {
-        Some(installed_file_id) if installed_file_id == &latest.id => {
-            status.update_available = false;
-            status.can_update = false;
-            status.reason = format!(
-                "Already on latest known source file {}.",
-                installed_file_id
-            );
-        }
-        Some(installed_file_id) => {
-            status.update_available = true;
-            status.can_update = true;
-            status.reason = format!(
-                "Saved source/file identity says installed file {} but latest source file is {}.",
-                installed_file_id,
-                latest.id
-            );
-        }
-        None => {
-            status.update_available = false;
-            status.can_update = false;
-            status.reason = "No saved source file ID; update cannot be trusted without manual confirmation.".to_string();
-        }
-    }
+    status.update_available = true;
+    status.can_update = true;
+    status.reason = format!(
+        "Newer same-family {} file proven: installed {} ({}) -> latest {} ({}).",
+        source_file_category_for_update(&latest, main_id, &record.source),
+        installed_file_id,
+        installed_family_name,
+        latest.id,
+        latest.name
+    );
 
     status
 }
@@ -2880,28 +3698,11 @@ fn list_installed_state_records() -> Result<Vec<InstalledStateRecord>, String> {
 
 
 fn prune_stale_receipts_internal() -> Result<usize, String> {
-    let Some(paths) = detect_payday3_paths_internal() else {
-        return Ok(0);
-    };
-
-    let receipts = list_install_receipts_internal()?;
-    let mut removed = 0usize;
-
-    for receipt in receipts {
-        if receipt_has_live_files_internal(&paths, &receipt) {
-            continue;
-        }
-
-        let receipt_path = receipt_file_path(&receipt.id)?;
-
-        if receipt_path.exists() {
-            fs::remove_file(&receipt_path)
-                .map_err(|err| format!("Failed to remove stale receipt {}: {}", receipt_path.display(), err))?;
-            removed += 1;
-        }
-    }
-
-    Ok(removed)
+    // v1.8.31: Conservative by design. Installed receipts are Tsuki's ownership ledger.
+    // Auto-pruning before the UI has finished discovering disabled PAK/UE4SS storage
+    // can orphan mods and make disabled Win64/UE4SS installs disappear. Explicit
+    // uninstall commands remove receipts directly, so background refresh should not.
+    Ok(0)
 }
 
 #[tauri::command]
@@ -2941,6 +3742,10 @@ fn write_disabled_manifest(path: &Path, manifest: &DisabledInstallManifest) -> R
 }
 
 fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<String, String> {
+    if let Some(message) = runtime_mutation_locked_message() {
+        return Err(message);
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
     let receipt = find_receipt_by_id(receipt_id)?;
@@ -2954,10 +3759,9 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
             disabled_at_unix: now_unix_seconds(),
             files: receipt.files.iter().map(|file| {
                 let original = receipt_destination_path(file);
-                let relative = path_relative_for_disabled(&paths, &original);
                 DisabledInstallFileRecord {
                     original_path: original.display().to_string(),
-                    disabled_path: disabled_root.join(relative).display().to_string(),
+                    disabled_path: disabled_destination_for_receipt_file(&paths, &receipt, &original, file).display().to_string(),
                 }
             }).collect(),
         });
@@ -2980,19 +3784,37 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
                 }
             }
 
+            let source_parent = source_path.parent().map(PathBuf::from);
             move_file_to_target(&source_path, &destination)?;
+            if let Some(parent) = source_parent {
+                for root in disabled_receipt_root_candidates(&paths, &receipt) {
+                    if parent.starts_with(&root) {
+                        remove_empty_dirs_up_to(&parent, &root);
+                    }
+                }
+                for root in disabled_ue4ss_mods_root_candidates(&paths) {
+                    if parent.starts_with(&root) {
+                        remove_empty_dirs_up_to(&parent, &root);
+                    }
+                }
+                for root in disabled_pak_mods_root_candidates(&paths) {
+                    if parent.starts_with(&root) {
+                        remove_empty_dirs_up_to(&parent, &root);
+                    }
+                }
+            }
             moved += 1;
         }
 
         let _ = fs::remove_file(&manifest_path);
+        cleanup_disabled_receipt_folders(&paths, &receipt);
 
         let _ = sync_installed_state_database();
 
         return Ok(format!(
-            "Enabled {} by moving {} file(s) from Win64/disabled/{} back into Win64. {}",
+            "Enabled {} by moving {} file(s) from Tsuki disabled storage back to their original paths and cleaned empty disabled folders. {}",
             receipt.display_name,
             moved,
-            receipt_safe_folder_name(&receipt),
             skipped.join(" | ")
         ));
     }
@@ -3001,21 +3823,21 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
     let mut moved = 0usize;
     let mut skipped = Vec::new();
 
-    for file in &receipt.files {
+    let mut files_to_disable = receipt.files.clone();
+    for extra in extra_win64_companion_files_for_receipt(&paths, &receipt) {
+        let extra_display = extra.display().to_string();
+        if files_to_disable.iter().any(|file| file.relative_path.eq_ignore_ascii_case(&extra_display)) {
+            continue;
+        }
+        skipped.push(format!("Rescued untracked Win64 companion file into disabled manifest: {}", extra.display()));
+        files_to_disable.push(install_receipt_file_for_existing_path(&extra));
+    }
+
+    for file in &files_to_disable {
         let original = receipt_destination_path(file);
 
-        if receipt_is_pak_file_path(&file.relative_path) {
-            skipped.push(format!("Skipped PAK-family file {} because PAK toggles use the PAK tab.", original.display()));
-            continue;
-        }
-
         if receipt_is_movie_file_path(&file.relative_path) {
-            skipped.push(format!("Skipped movie/video file {}. Movies are not toggled by Tsuki.", original.display()));
-            continue;
-        }
-
-        if receipt_is_shared_loader_path(&original) {
-            skipped.push(format!("Skipped shared loader/dependency {}", original.display()));
+            skipped.push(format!("Skipped movie/video file {}. Movies are not toggled by Tsuki because movie replacers overwrite real game movie files.", original.display()));
             continue;
         }
 
@@ -3029,10 +3851,13 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
             continue;
         }
 
-        let relative = path_relative_for_disabled(&paths, &original);
-        let disabled_path = disabled_root.join(relative);
+        let disabled_path = disabled_destination_for_receipt_file(&paths, &receipt, &original, file);
 
+        let original_parent = original.parent().map(PathBuf::from);
         move_file_to_target(&original, &disabled_path)?;
+        if let Some(parent) = original_parent {
+            remove_empty_dirs_up_to(&parent, &paths.win64);
+        }
 
         records.push(DisabledInstallFileRecord {
             original_path: original.display().to_string(),
@@ -3056,7 +3881,7 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
     let _ = sync_installed_state_database();
 
     Ok(format!(
-        "Disabled {} by moving {} Win64 file(s) into {}. {}",
+        "Disabled {} by moving {} file(s) into Tsuki disabled storage at {}. {}",
         receipt.display_name,
         moved,
         disabled_root.display(),
@@ -3066,16 +3891,23 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
 
 
 fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String> {
+    if let Some(message) = runtime_mutation_locked_message() {
+        return Err(message);
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
+    let keep_uninstalled = keep_uninstalled_mods_enabled();
     let holding_root = uninstalled_dir()?.join(format!(
         "uninstall_{}_{}",
         sanitize_file_component(&receipt.display_name),
         current_timestamp()
     ));
-    fs::create_dir_all(&holding_root)
-        .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    if keep_uninstalled {
+        fs::create_dir_all(&holding_root)
+            .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    }
 
     let mut moved = Vec::new();
     let mut skipped = Vec::new();
@@ -3085,7 +3917,16 @@ fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String
         .map(|file| receipt_destination_path(file).display().to_string())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for file in &receipt.files {
+    let mut files_to_uninstall = receipt.files.clone();
+    for extra in extra_win64_companion_files_for_receipt(&paths, receipt) {
+        let extra_display = extra.display().to_string();
+        if files_to_uninstall.iter().any(|file| file.relative_path.eq_ignore_ascii_case(&extra_display)) {
+            continue;
+        }
+        files_to_uninstall.push(install_receipt_file_for_existing_path(&extra));
+    }
+
+    for file in &files_to_uninstall {
         let original = receipt_destination_path(file);
 
         match move_path_to_uninstalled(&original, &holding_root)? {
@@ -3094,12 +3935,7 @@ fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String
         }
     }
 
-    for root in [
-        disabled_receipt_root(&paths, receipt),
-        legacy_disabled_receipt_root(&paths, receipt),
-    ] {
-        let manifest_path = root.join("tsuki-disabled.json");
-
+    for manifest_path in disabled_manifest_candidates(&paths, receipt) {
         if let Some(manifest) = read_disabled_manifest(&manifest_path) {
             for record in manifest.files {
                 let disabled_path = PathBuf::from(record.disabled_path);
@@ -3112,6 +3948,8 @@ fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String
             let _ = fs::remove_file(&manifest_path);
         }
     }
+
+    cleanup_disabled_receipt_folders(&paths, receipt);
 
     if let Some(mut session) = read_vanilla_launch_session() {
         let mut kept = Vec::new();
@@ -3142,10 +3980,11 @@ fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String
     let _ = sync_installed_state_database();
 
     Ok(format!(
-        "Uninstalled {}. Moved {} file(s) to {}. {}",
+        "Uninstalled {}. {} {} file(s){}. {}",
         receipt.display_name,
+        if keep_uninstalled { "Moved" } else { "Deleted" },
         moved.len(),
-        holding_root.display(),
+        if keep_uninstalled { format!(" to {}", holding_root.display()) } else { String::new() },
         if skipped.is_empty() { String::new() } else { skipped.join(" | ") }
     ))
 }
@@ -3507,8 +4346,16 @@ fn validate_movie_replacer_receipts() -> Result<Vec<MovieValidationItem>, String
 }
 
 
-fn mod_profiles_dir() -> Result<PathBuf, String> {
+fn legacy_mod_profiles_dir() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("profiles"))
+}
+
+fn mod_profiles_dir() -> Result<PathBuf, String> {
+    if let Some(paths) = detect_payday3_paths_internal() {
+        return Ok(paths.pak_mods.join("Tsuki_Profiles"));
+    }
+
+    legacy_mod_profiles_dir()
 }
 
 fn profile_file_name(name: &str) -> String {
@@ -3651,6 +4498,72 @@ fn apply_mod_profile(profile_id: String) -> Result<String, String> {
 }
 
 
+
+#[tauri::command]
+fn delete_mod_profile(profile_id: String) -> Result<String, String> {
+    let target = profile_id.trim();
+    if target.is_empty() {
+        return Err("Profile id is required.".to_string());
+    }
+
+    let folder = mod_profiles_dir()?;
+    fs::create_dir_all(&folder)
+        .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
+
+    let mut removed = 0usize;
+    let mut matched_name = None::<String>;
+
+    for entry in fs::read_dir(&folder)
+        .map_err(|err| format!("Failed to read profiles folder: {}", err))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to read profile entry: {}", err))?;
+        let path = entry.path();
+
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+
+        let file_stem_matches = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(|stem| stem.eq_ignore_ascii_case(target) || stem.eq_ignore_ascii_case(&sanitize_file_component(target)))
+            .unwrap_or(false);
+
+        let profile_matches = fs::read_to_string(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<ModProfile>(&contents).ok())
+            .map(|profile| {
+                let matches = profile.id.eq_ignore_ascii_case(target)
+                    || profile.name.eq_ignore_ascii_case(target)
+                    || sanitize_file_component(&profile.name).eq_ignore_ascii_case(target);
+
+                if matches {
+                    matched_name = Some(profile.name);
+                }
+
+                matches
+            })
+            .unwrap_or(false);
+
+        if file_stem_matches || profile_matches {
+            fs::remove_file(&path)
+                .map_err(|err| format!("Failed to delete profile {}: {}", path.display(), err))?;
+            removed += 1;
+        }
+    }
+
+    if removed == 0 {
+        return Err(format!("Profile not found: {}", target));
+    }
+
+    Ok(format!(
+        "Deleted profile '{}' ({} file{} removed).",
+        matched_name.unwrap_or_else(|| target.to_string()),
+        removed,
+        if removed == 1 { "" } else { "s" }
+    ))
+}
+
 fn list_install_receipts_internal() -> Result<Vec<InstallReceipt>, String> {
     let receipt_root = receipts_dir()?;
     fs::create_dir_all(&receipt_root)
@@ -3694,8 +4607,7 @@ fn is_running_as_admin() -> Result<bool, String> {
 
 #[tauri::command]
 fn relaunch_tsuki_as_admin() -> Result<String, String> {
-    relaunch_current_exe_as_admin_internal()?;
-    Ok("Opened the Windows administrator prompt for Tsuki. In dev mode, use this manual button instead of auto-admin so localhost/Vite stays alive.".to_string())
+    Ok("Admin relaunch is disabled. Tsuki now launches normally.".to_string())
 }
 
 
@@ -3783,13 +4695,21 @@ fn start_vanilla_restore_watcher() {
         }
 
         if saw_game {
+            let mut not_running_ticks = 0u8;
+
             loop {
-                if !payday_process_running() {
-                    // Crash/close recovery: restore on the first confirmed missing process tick.
+                if payday_process_running() {
+                    not_running_ticks = 0;
+                } else {
+                    not_running_ticks = not_running_ticks.saturating_add(1);
+                }
+
+                // Crash/close recovery: about 1 second closed, then restore.
+                if not_running_ticks >= 2 {
                     break;
                 }
 
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
 
@@ -4197,6 +5117,188 @@ fn open_external_url(url: String) -> Result<String, String> {
     open_http_url(&url)
 }
 
+fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    let candidate_key = candidate.display().to_string().to_lowercase();
+
+    if !paths.iter().any(|path| path.display().to_string().to_lowercase() == candidate_key) {
+        paths.push(candidate);
+    }
+}
+
+fn receipt_existing_file_locations(paths: &PaydayPaths, receipt: &InstallReceipt) -> Vec<PathBuf> {
+    let mut locations = Vec::new();
+
+    for file in &receipt.files {
+        let original = receipt_destination_path(file);
+
+        if original.exists() {
+            push_unique_path(&mut locations, original.clone());
+            continue;
+        }
+
+        let original_display = original.display().to_string();
+        for manifest_path in disabled_manifest_candidates(paths, receipt) {
+            if let Some(manifest) = read_disabled_manifest(&manifest_path) {
+                for record in manifest.files {
+                    let disabled = PathBuf::from(&record.disabled_path);
+
+                    if record.original_path.eq_ignore_ascii_case(&original_display) && disabled.exists() {
+                        push_unique_path(&mut locations, disabled);
+                    }
+                }
+            }
+        }
+
+        let disabled_guess = disabled_destination_for_receipt_file(paths, receipt, &original, file);
+        if disabled_guess.exists() {
+            push_unique_path(&mut locations, disabled_guess);
+        }
+    }
+
+    locations
+}
+
+fn common_existing_parent(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut current = paths
+        .first()
+        .and_then(|path| if path.is_dir() { Some(path.as_path()) } else { path.parent() })
+        .map(PathBuf::from)?;
+
+    loop {
+        if paths.iter().all(|path| path.starts_with(&current)) {
+            return Some(current);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn best_installed_location_target(paths: &PaydayPaths, candidates: &[PathBuf]) -> Option<PathBuf> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if candidates.len() == 1 {
+        return candidates.first().cloned();
+    }
+
+    if candidates.iter().all(|path| path.starts_with(&paths.pak_mods)) {
+        return Some(paths.pak_mods.clone());
+    }
+
+    if candidates.iter().all(|path| path.starts_with(&paths.ue4ss_mods)) {
+        return Some(paths.ue4ss_mods.clone());
+    }
+
+    if candidates.iter().all(|path| path.starts_with(&paths.win64)) {
+        return common_existing_parent(candidates).or_else(|| Some(paths.win64.clone()));
+    }
+
+    common_existing_parent(candidates)
+}
+
+fn open_path_in_explorer(path: &Path) -> Result<String, String> {
+    if !path.exists() {
+        return Err("File location not found. The file may have been moved or deleted.".to_string());
+    }
+
+    if path.is_file() {
+        Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .spawn()
+            .map_err(|err| format!("Failed to open file location in Explorer: {}", err))?;
+
+        return Ok(format!("Opened file location: {}", path.display()));
+    }
+
+    if path.is_dir() {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|err| format!("Failed to open folder in Explorer: {}", err))?;
+
+        return Ok(format!("Opened folder: {}", path.display()));
+    }
+
+    Err("File location not found. The file may have been moved or deleted.".to_string())
+}
+
+fn staged_download_location_for_source(source: &str, source_id: &str) -> Option<PathBuf> {
+    let diagnostic = read_last_install_diagnostic()?;
+
+    if !diagnostic.source.eq_ignore_ascii_case(source) || diagnostic.mod_id != source_id {
+        return None;
+    }
+
+    if let Some(staged_file) = diagnostic.staged_file_path {
+        let path = PathBuf::from(staged_file);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    if let Some(staged_folder) = diagnostic.staged_folder_path {
+        let path = PathBuf::from(staged_folder);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+fn open_installed_mod_file_location(
+    source: String,
+    source_id: String,
+    matched_files: Vec<String>,
+    match_kind: Option<String>,
+) -> Result<String, String> {
+    let paths = detect_payday3_paths_internal()
+        .ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?;
+
+    let source = source.trim().to_string();
+    let source_id = source_id.trim().to_string();
+    let match_kind = match_kind.unwrap_or_default();
+
+    match find_receipt_by_source(&source, &source_id) {
+        Ok(receipt) => {
+            let locations = receipt_existing_file_locations(&paths, &receipt);
+
+            if let Some(target) = best_installed_location_target(&paths, &locations) {
+                return open_path_in_explorer(&target);
+            }
+
+            return Err("File location not found. The file may have been moved or deleted.".to_string());
+        }
+        Err(error) => {
+            if match_kind.eq_ignore_ascii_case("receipt") && matched_files.is_empty() {
+                return Err(error);
+            }
+        }
+    }
+
+    let mut locations = Vec::new();
+    for file_name in matched_files {
+        if let Some(path) = resolve_installed_file_path(&paths, &file_name) {
+            push_unique_path(&mut locations, path);
+        }
+    }
+
+    if let Some(target) = best_installed_location_target(&paths, &locations) {
+        return open_path_in_explorer(&target);
+    }
+
+    if let Some(staged) = staged_download_location_for_source(&source, &source_id) {
+        return open_path_in_explorer(&staged);
+    }
+
+    Err("File location not found. The file may have been moved or deleted.".to_string())
+}
+
 #[tauri::command]
 fn open_nexus_login_page() -> Result<String, String> {
     Command::new("cmd")
@@ -4401,11 +5503,15 @@ fn resolve_installed_file_path(paths: &PaydayPaths, file_name: &str) -> Option<P
         }
     }
 
-    None
+    find_disabled_pak_file(paths, clean)
 }
 
 #[tauri::command]
 fn uninstall_pak_mod_files(file_names: Vec<String>) -> Result<String, String> {
+    if let Some(message) = runtime_mutation_locked_message() {
+        return Err(message);
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
@@ -4413,11 +5519,14 @@ fn uninstall_pak_mod_files(file_names: Vec<String>) -> Result<String, String> {
         return Err("No files were selected for uninstall.".to_string());
     }
 
+    let keep_uninstalled = keep_uninstalled_mods_enabled();
     let trash_root = uninstalled_dir()?.join(current_timestamp());
-    fs::create_dir_all(&trash_root)
-        .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    if keep_uninstalled {
+        fs::create_dir_all(&trash_root)
+            .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    }
 
-    let mut moved = 0usize;
+    let mut removed = 0usize;
     let mut skipped = Vec::new();
 
     for file_name in file_names {
@@ -4443,25 +5552,42 @@ fn uninstall_pak_mod_files(file_names: Vec<String>) -> Result<String, String> {
             .unwrap_or(clean_name)
             .to_string();
 
-        let target_path = trash_root.join(&actual_name);
+        let source_parent = source_path.parent().map(PathBuf::from);
+        if keep_uninstalled {
+            let target_path = trash_root.join(&actual_name);
 
-        if target_path.exists() {
-            skipped.push(format!("Already moved target exists: {}", clean_name));
-            continue;
+            if target_path.exists() {
+                skipped.push(format!("Already moved target exists: {}", clean_name));
+                continue;
+            }
+
+            if let Err(rename_err) = fs::rename(&source_path, &target_path) {
+                fs::copy(&source_path, &target_path)
+                    .map_err(|copy_err| format!("Failed to uninstall {}: rename failed ({}) and copy failed ({})", clean_name, rename_err, copy_err))?;
+
+                fs::remove_file(&source_path)
+                    .map_err(|remove_err| format!("Copied {} to uninstall holding folder but failed to remove original: {}", clean_name, remove_err))?;
+            }
+        } else {
+            delete_file_permanently(&source_path, "uninstalled mod")?;
         }
 
-        if let Err(rename_err) = fs::rename(&source_path, &target_path) {
-            fs::copy(&source_path, &target_path)
-                .map_err(|copy_err| format!("Failed to uninstall {}: rename failed ({}) and copy failed ({})", clean_name, rename_err, copy_err))?;
-
-            fs::remove_file(&source_path)
-                .map_err(|remove_err| format!("Copied {} to uninstall holding folder but failed to remove original: {}", clean_name, remove_err))?;
+        if let Some(parent) = source_parent {
+            for root in disabled_pak_mods_root_candidates(&paths) {
+                if parent.starts_with(&root) {
+                    remove_empty_dirs_up_to(&parent, &root);
+                }
+            }
         }
 
-        moved += 1;
+        removed += 1;
     }
 
-    let mut message = format!("Uninstalled {} file(s). Files were moved to: {}", moved, trash_root.display());
+    let mut message = if keep_uninstalled {
+        format!("Uninstalled {} file(s). Files were moved to: {}", removed, trash_root.display())
+    } else {
+        format!("Uninstalled {} file(s). Files were permanently deleted.", removed)
+    };
 
     if !skipped.is_empty() {
         message.push_str(" | ");
@@ -4501,6 +5627,214 @@ fn open_backups_folder() -> Result<String, String> {
         .map_err(|err| format!("Failed to open backups folder: {}", err))?;
 
     Ok(format!("Opened {}", backup_root.display()))
+}
+
+#[tauri::command]
+fn open_mod_profiles_folder() -> Result<String, String> {
+    let profile_root = mod_profiles_dir()?;
+    fs::create_dir_all(&profile_root)
+        .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
+
+    Command::new("explorer")
+        .arg(&profile_root)
+        .spawn()
+        .map_err(|err| format!("Failed to open profiles folder: {}", err))?;
+
+    Ok(format!("Opened {}", profile_root.display()))
+}
+
+fn directory_size_and_file_count(path: &Path) -> (u64, usize) {
+    fn visit(path: &Path, size: &mut u64, count: &mut usize) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                visit(&child, size, count);
+            } else if child.is_file() {
+                if let Ok(metadata) = fs::metadata(&child) {
+                    *size = size.saturating_add(metadata.len());
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    if !path.exists() {
+        return (0, 0);
+    }
+
+    let mut size = 0;
+    let mut count = 0;
+    visit(path, &mut size, &mut count);
+    (size, count)
+}
+
+fn direct_child_directory_count(path: &Path) -> usize {
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| entry.path().is_dir())
+        .count()
+}
+
+fn direct_child_entry_count(path: &Path) -> usize {
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .count()
+}
+
+fn cache_stats_internal() -> Result<CacheStats, String> {
+    let app_root = ensure_app_data_dirs()?;
+    let cache_root = cache_dir()?;
+    let downloads_root = downloads_cache_dir()?;
+    let extraction_root = extraction_cache_dir()?;
+    let uninstalled_root = uninstalled_dir()?;
+    fs::create_dir_all(&downloads_root)
+        .map_err(|err| format!("Failed to create downloads cache folder: {}", err))?;
+    fs::create_dir_all(&extraction_root)
+        .map_err(|err| format!("Failed to create extraction cache folder: {}", err))?;
+    fs::create_dir_all(&uninstalled_root)
+        .map_err(|err| format!("Failed to create uninstalled storage folder: {}", err))?;
+
+    let mut download_size = 0u64;
+    let mut download_count = 0usize;
+    for folder in source_download_cache_dirs()? {
+        let (size, count) = directory_size_and_file_count(&folder);
+        download_size = download_size.saturating_add(size);
+        download_count += count;
+    }
+
+    let (extraction_size, _) = directory_size_and_file_count(&extraction_root);
+    let (uninstalled_size, _) = directory_size_and_file_count(&uninstalled_root);
+
+    Ok(CacheStats {
+        app_data_path: app_root.display().to_string(),
+        cache_path: cache_root.display().to_string(),
+        download_cache_path: downloads_root.display().to_string(),
+        extraction_cache_path: extraction_root.display().to_string(),
+        uninstalled_path: uninstalled_root.display().to_string(),
+        download_cache_size_bytes: download_size,
+        extraction_cache_size_bytes: extraction_size,
+        total_cache_size_bytes: download_size.saturating_add(extraction_size),
+        cached_download_count: download_count,
+        temporary_extraction_folder_count: direct_child_directory_count(&extraction_root),
+        uninstalled_storage_size_bytes: uninstalled_size,
+        uninstalled_entry_count: direct_child_entry_count(&uninstalled_root),
+    })
+}
+
+#[tauri::command]
+fn get_cache_stats() -> Result<CacheStats, String> {
+    cache_stats_internal()
+}
+
+fn remove_dir_contents(path: &Path) -> Result<(u64, usize), String> {
+    let before = directory_size_and_file_count(path);
+    if !path.exists() {
+        fs::create_dir_all(path)
+            .map_err(|err| format!("Failed to create cache folder {}: {}", path.display(), err))?;
+        return Ok(before);
+    }
+
+    for entry in fs::read_dir(path)
+        .map_err(|err| format!("Failed to read cache folder {}: {}", path.display(), err))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to read cache entry: {}", err))?;
+        let child = entry.path();
+        if child.is_dir() {
+            fs::remove_dir_all(&child)
+                .map_err(|err| format!("Failed to delete cache folder {}: {}", child.display(), err))?;
+        } else if child.is_file() {
+            fs::remove_file(&child)
+                .map_err(|err| format!("Failed to delete cache file {}: {}", child.display(), err))?;
+        }
+    }
+
+    Ok(before)
+}
+
+#[tauri::command]
+fn clear_download_cache() -> Result<String, String> {
+    let mut removed_size = 0u64;
+    let mut removed_files = 0usize;
+
+    for folder in source_download_cache_dirs()? {
+        fs::create_dir_all(&folder)
+            .map_err(|err| format!("Failed to prepare download cache folder {}: {}", folder.display(), err))?;
+        let (size, count) = remove_dir_contents(&folder)?;
+        removed_size = removed_size.saturating_add(size);
+        removed_files += count;
+    }
+
+    Ok(format!("Cleared download cache: removed {} file(s), {} byte(s).", removed_files, removed_size))
+}
+
+#[tauri::command]
+fn clear_extraction_cache() -> Result<String, String> {
+    let folder = extraction_cache_dir()?;
+    fs::create_dir_all(&folder)
+        .map_err(|err| format!("Failed to prepare extraction cache folder: {}", err))?;
+    let (size, count) = remove_dir_contents(&folder)?;
+    Ok(format!("Cleared extraction cache: removed {} file(s), {} byte(s).", count, size))
+}
+
+#[tauri::command]
+fn clear_all_download_cache() -> Result<String, String> {
+    let downloads = clear_download_cache()?;
+    let extraction = clear_extraction_cache()?;
+    Ok(format!("{} {}", downloads, extraction))
+}
+
+#[tauri::command]
+fn open_app_data_folder() -> Result<String, String> {
+    let root = ensure_app_data_dirs()?;
+    Command::new("explorer")
+        .arg(&root)
+        .spawn()
+        .map_err(|err| format!("Failed to open Tsuki data folder: {}", err))?;
+    Ok(format!("Opened {}", root.display()))
+}
+
+#[tauri::command]
+fn open_cache_folder() -> Result<String, String> {
+    let root = cache_dir()?;
+    fs::create_dir_all(&root)
+        .map_err(|err| format!("Failed to create cache folder: {}", err))?;
+    Command::new("explorer")
+        .arg(&root)
+        .spawn()
+        .map_err(|err| format!("Failed to open cache folder: {}", err))?;
+    Ok(format!("Opened {}", root.display()))
+}
+
+#[tauri::command]
+fn save_cache_settings(keep_downloaded_archives: bool) -> Result<String, String> {
+    let mut settings = load_settings_internal();
+    settings.keep_downloaded_archives = keep_downloaded_archives;
+    save_settings_internal(&settings)?;
+    Ok(if keep_downloaded_archives {
+        "Downloaded archives will be kept after successful installs.".to_string()
+    } else {
+        "Downloaded archives will be deleted after successful installs.".to_string()
+    })
+}
+
+#[tauri::command]
+fn save_uninstall_storage_settings(keep_uninstalled_mods: bool) -> Result<String, String> {
+    let mut settings = load_settings_internal();
+    settings.keep_uninstalled_mods = keep_uninstalled_mods;
+    save_settings_internal(&settings)?;
+    Ok(if keep_uninstalled_mods {
+        "Uninstalled mods will be moved to Tsuki's uninstalled storage.".to_string()
+    } else {
+        "Uninstalled mods will be permanently deleted to reclaim disk space.".to_string()
+    })
 }
 
 #[tauri::command]
@@ -4598,6 +5932,7 @@ fn restore_pak_backup(file_name: String) -> Result<String, String> {
     let mut archive = ZipArchive::new(backup_file)
         .map_err(|err| format!("Failed to read backup zip: {}", err))?;
 
+    let keep_uninstalled = keep_uninstalled_mods_enabled();
     let holding_root = uninstalled_dir()?.join(format!("backup_restore_conflict_{}", current_timestamp()));
     let mut restored = 0usize;
     let mut moved_conflicts = 0usize;
@@ -4643,7 +5978,11 @@ fn restore_pak_backup(file_name: String) -> Result<String, String> {
         if destination.exists() && destination.is_file() {
             if let Some(moved) = move_path_to_uninstalled(&destination, &holding_root)? {
                 moved_conflicts += 1;
-                notes.push(format!("Moved existing {} to {}", file_name, moved));
+                notes.push(if keep_uninstalled {
+                    format!("Moved existing {} to {}", file_name, moved)
+                } else {
+                    format!("Deleted existing {}", file_name)
+                });
             }
         }
 
@@ -4667,10 +6006,12 @@ fn restore_pak_backup(file_name: String) -> Result<String, String> {
     let _ = sync_installed_state_database();
 
     let mut message = format!(
-        "Restored {} PAK-family file(s) from backup '{}'. Moved {} conflicting current file(s) to Tsuki's uninstalled/conflict folder.",
+        "Restored {} PAK-family file(s) from backup '{}'. {} {} conflicting current file(s){}.",
         restored,
         backup.file_name,
-        moved_conflicts
+        if keep_uninstalled { "Moved" } else { "Deleted" },
+        moved_conflicts,
+        if keep_uninstalled { " to Tsuki's uninstalled/conflict folder" } else { "" }
     );
 
     if !notes.is_empty() {
@@ -4720,9 +6061,19 @@ fn format_last_install_diagnostic_for_report() -> String {
     lines.push(format!("  Source: {}", report.source));
     lines.push(format!("  Mod ID: {}", report.mod_id));
     lines.push(format!("  File ID: {}", report.file_id));
+    lines.push(format!("  Selected File Name: {}", report.selected_file_name.unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  URL Host/Path: {}", report.download_url_host_path.unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  HTTP Status: {}", report.http_status.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  Content Type: {}", report.content_type.unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  Content-Disposition: {}", report.content_disposition.unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  Saved Filename: {}", report.saved_file_name.unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  Saved File Kind: {}", report.saved_file_kind.unwrap_or_else(|| "unknown".to_string())));
     lines.push(format!("  Staged File: {}", report.staged_file_path.unwrap_or_else(|| "none".to_string())));
     lines.push(format!("  Archive Kind: {}", report.archive_kind.unwrap_or_else(|| "unknown".to_string())));
     lines.push(format!("  Download Size Bytes: {}", report.download_size_bytes.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())));
+    lines.push(format!("  Archive Entry Count: {}", report.archive_entry_count.max(report.entries.len())));
+    lines.push(format!("  Installable Count: {}", report.installable_count));
+    lines.push(format!("  Skipped Count: {}", report.skipped_count));
     lines.push(format!("  Route Entries: {}", report.entries.len()));
     lines.push(format!("  Installed Files: {}", report.installed_files.len()));
     lines.push(format!("  Replaced Files: {}", report.replaced_files.len()));
@@ -4740,6 +6091,14 @@ fn format_last_install_diagnostic_for_report() -> String {
     }
 
     if !report.entries.is_empty() {
+        if !report.first_archive_entries.is_empty() {
+            lines.push("  First Archive Entries:".to_string());
+
+            for entry in report.first_archive_entries.iter().take(20) {
+                lines.push(format!("    - {}", entry));
+            }
+        }
+
         lines.push("  Routing:".to_string());
 
         for entry in report.entries.iter().take(30) {
@@ -4826,6 +6185,7 @@ fn get_debug_report() -> Result<String, String> {
     let source_index_nexus_count = source_index.records.values().filter(|record| record.source.eq_ignore_ascii_case("nexus")).count();
     let source_index_modworkshop_count = source_index.records.values().filter(|record| record.source.eq_ignore_ascii_case("modworkshop")).count();
     let hash_cache_count = read_hash_cache().len();
+    let cache_stats = cache_stats_internal().ok();
 
     let manual_path = settings
         .game_path
@@ -4856,6 +6216,12 @@ Latest Pak Backup: {latest_backup}\n\
 Install Receipts: {install_receipt_count}\n\
 Install Receipt Tracked Files: {install_receipt_file_count}\n\
 Cache Folder: {cache}\n\
+Download Cache Size Bytes: {download_cache_size_bytes}\n\
+Extraction Cache Size Bytes: {extraction_cache_size_bytes}\n\
+Cached Downloads: {cached_download_count}\n\
+Temporary Extraction Folders: {temporary_extraction_folder_count}\n\
+Uninstalled Storage Size Bytes: {uninstalled_storage_size_bytes}\n\
+Uninstalled Entry Count: {uninstalled_entry_count}\n\
 Receipts Folder: {receipts}\n\
 Profiles Folder: {profiles}\n\
 Installed State File: {installed_state_file}\n\
@@ -4864,14 +6230,17 @@ Persistent Pairs File: {persistent_pairs_file}\n\
 Persistent Pairs: {persistent_pair_count} (Nexus {persistent_pair_nexus_count}, ModWorkshop {persistent_pair_modworkshop_count})\n\
 Source Index Records: {source_index_count} (Nexus {source_index_nexus_count}, ModWorkshop {source_index_modworkshop_count})\n\
 Hash Cache Entries: {hash_cache_count}\n\
-Nexus Browse Order: GraphQL live page -> REST updated/latest/trending -> website cards -> sorted source-index fallback. Detail files are REST-first.\n\
+Nexus Browse Order: live source pages decide ordering/page membership; cache/source-index may only appear as temporary metadata placeholders. Detail files are live-only.\n\
 Progress Events: Browse live load/search/detail/download/install + Installed scan/detail/try-pair/reinstall/rebuild\nWrong-game Pair Guard: rejects RAID/PD2/other-game ModWorkshop cards before scoring; exact PAK stem matches can pair\n\
 {modworkshop_pairing_diagnostics}\
 Nexus GraphQL v2 Endpoint: https://api.nexusmods.com/v2/graphql\n\
 {nexus_graphql_diagnostic}\
 Audit Cleanup: Home automatic matching capped/manual only; Installed auto-pair disabled on open\n\
 Nexus v0.98.1: search command + ordered rebuild, no raw ID browse paging + compile-fixed source-index cache fallback\n\
-Release v1.0.7.27.3: compile fix for unused ModWorkshop search page state\n\
+Release v1.0.7.27.3: compile fix for unused ModWorkshop search page state\nv1.8.32: cleaned profile view/folder opener and unified source detail page template\nv1.8.34: profile cards/folder opener + unified Browse/Installed detail downloads cleanup\nv1.8.35: detail tabs/files/comments/changelog + rebuilt themes and profile sizing\nv1.8.36: file grouping, unified installed details, author fallback, theme surface fixes\n\
+v1.8.37: author fallback on cards, responsive details, Browse back restore, Home/Installed theme coverage\n\
+v1.8.38: ModWorkshop author-card rescue, faster detail tabs, Settings makeover with dev tools removed from normal view\n\
+v1.8.2: setup wizard, session-only debug logs, home ModWorkshop descriptions, faster detail actions, Settings cleanup\n\
 {path_status}\n\
 Installed Pak Files: {pak_file_count}\n\
 Enabled Pak Files: {pak_file_count}\n\
@@ -4879,13 +6248,13 @@ Active Profile: Default\n\
 {last_install_diagnostic}\
 {runtime_process_diagnostic}\
 Last Error: none\n\
-Recent Logs:\n\
-- Backend debug report generated\n\
-- AppData folders verified\n\
-- Settings loaded\n\
-- Payday 3 path detection attempted\n\
-- Pak mods folder scan attempted\n\
-- Pak backups indexed",
+Session Debug Log:\n\
+- Backend debug report generated for this request\n\
+- AppData folders verified during this request\n\
+- Settings loaded during this request\n\
+- PAYDAY 3 paths checked during this request\n\
+- Pak mods indexed during this request\n\
+- Backups indexed during this request",
         version = APP_VERSION,
         os = os,
         arch = arch,
@@ -4907,6 +6276,12 @@ Recent Logs:\n\
         install_receipt_count = install_receipt_count,
         install_receipt_file_count = install_receipt_file_count,
         cache = app_root.join("cache").display(),
+        download_cache_size_bytes = cache_stats.as_ref().map(|stats| stats.download_cache_size_bytes).unwrap_or(0),
+        extraction_cache_size_bytes = cache_stats.as_ref().map(|stats| stats.extraction_cache_size_bytes).unwrap_or(0),
+        cached_download_count = cache_stats.as_ref().map(|stats| stats.cached_download_count).unwrap_or(0),
+        temporary_extraction_folder_count = cache_stats.as_ref().map(|stats| stats.temporary_extraction_folder_count).unwrap_or(0),
+        uninstalled_storage_size_bytes = cache_stats.as_ref().map(|stats| stats.uninstalled_storage_size_bytes).unwrap_or(0),
+        uninstalled_entry_count = cache_stats.as_ref().map(|stats| stats.uninstalled_entry_count).unwrap_or(0),
         receipts = app_root.join("receipts").display(),
         profiles = app_root.join("profiles").display(),
         installed_state_file = installed_state_file_path()?.display(),
@@ -5007,6 +6382,8 @@ struct SourceFileItem {
     size_label: Option<String>,
     uploaded_at: Option<String>,
     download_url: Option<String>,
+    file_type: Option<String>,
+    download_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5110,10 +6487,32 @@ struct LastInstallDiagnostic {
     source: String,
     mod_id: String,
     file_id: String,
+    #[serde(default)]
+    download_url_host_path: Option<String>,
+    #[serde(default)]
+    http_status: Option<u16>,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    content_disposition: Option<String>,
+    #[serde(default)]
+    selected_file_name: Option<String>,
+    #[serde(default)]
+    saved_file_name: Option<String>,
+    #[serde(default)]
+    saved_file_kind: Option<String>,
     staged_file_path: Option<String>,
     staged_folder_path: Option<String>,
     archive_kind: Option<String>,
     download_size_bytes: Option<u64>,
+    #[serde(default)]
+    archive_entry_count: usize,
+    #[serde(default)]
+    installable_count: usize,
+    #[serde(default)]
+    skipped_count: usize,
+    #[serde(default)]
+    first_archive_entries: Vec<String>,
     entries: Vec<InstallDiagnosticEntry>,
     installed_files: Vec<AppliedInstallFile>,
     replaced_files: Vec<String>,
@@ -5163,6 +6562,11 @@ struct InstalledSourceMatch {
     confidence: u32,
     reason: String,
     matched_files: Vec<String>,
+    source_file_id: Option<String>,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     installed_modified_unix: Option<u64>,
     source_updated_at: Option<String>,
     source_updated_unix: Option<u64>,
@@ -5261,14 +6665,8 @@ fn json_id_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn source_nexus_mod_key(summary: &SourceModSummary) -> Option<String> {
-    let game_id = summary.game_id.as_deref().and_then(normalize_nexus_id_string)?;
-    let mod_id = normalize_nexus_id_string(&summary.source_id)?;
-
-    Some(format!("nexus:{}:{}", game_id, mod_id))
-}
-
 const MODWORKSHOP_PAYDAY3_GAME_ID: &str = "payday-3";
+const MODWORKSHOP_PAYDAY3_NUMERIC_GAME_ID: &str = "853";
 
 fn normalize_modworkshop_id_string(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -5314,7 +6712,7 @@ fn is_modworkshop_payday3_game_id(value: &str) -> bool {
 
     matches!(
         normalized.as_str(),
-        "payday-3" | "payday3" | "pd3" | "payday 3" | "payday_3"
+        "payday-3" | "payday3" | "pd3" | "payday 3" | "payday_3" | MODWORKSHOP_PAYDAY3_NUMERIC_GAME_ID
     )
 }
 
@@ -5333,22 +6731,6 @@ fn modworkshop_game_id_from_value(value: &serde_json::Value) -> Option<String> {
                 })
         })
 }
-
-fn source_modworkshop_mod_key(summary: &SourceModSummary) -> Option<String> {
-    let game_id = summary
-        .game_id
-        .as_deref()
-        .and_then(normalize_modworkshop_id_string)
-        .unwrap_or_else(|| MODWORKSHOP_PAYDAY3_GAME_ID.to_string());
-    let mod_id = normalize_modworkshop_id_string(&summary.source_id)?;
-
-    Some(format!("modworkshop:{}:{}", game_id, mod_id))
-}
-
-
-
-
-
 
 fn json_timestamp_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     for key in keys {
@@ -5478,7 +6860,7 @@ fn json_nested_string(value: &serde_json::Value, paths: &[&[&str]]) -> Option<St
 }
 
 fn first_media_url(value: &serde_json::Value) -> Option<String> {
-    for key in ["thumbnail", "image", "logo", "cover"] {
+    for key in ["thumbnail", "image", "logo", "cover", "banner", "background"] {
         if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
             if !text.trim().is_empty() {
                 return Some(text.to_string());
@@ -5486,7 +6868,19 @@ fn first_media_url(value: &serde_json::Value) -> Option<String> {
         }
 
         if let Some(obj) = value.get(key) {
-            if let Some(text) = json_string(obj, &["url", "src", "path", "original", "thumb", "thumbnail"]) {
+            if let Some(text) = json_string(obj, &["url", "src", "path", "original", "thumb", "thumbnail", "file"]) {
+                if !text.starts_with("http://") && !text.starts_with("https://") && text.contains('.') {
+                    let prefix = if obj
+                        .get("has_thumb")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                    {
+                        "thumbnail_"
+                    } else {
+                        ""
+                    };
+                    return Some(format!("https://storage.modworkshop.net/mods/images/{}{}", prefix, text));
+                }
                 return Some(text);
             }
         }
@@ -5827,6 +7221,36 @@ fn http_get_json(url: &str, api_key: Option<&str>) -> Result<serde_json::Value, 
     let response = request
         .send()
         .map_err(|err| format!("Request failed for {}: {}", url, err))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|err| format!("Failed to read response body: {}", err))?;
+
+    if !status.is_success() {
+        return Err(format!("{} returned HTTP {}: {}", url, status, text.chars().take(240).collect::<String>()));
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|err| format!("Failed to parse JSON from {}: {}", url, err))
+}
+
+
+fn http_post_json(url: &str, body: serde_json::Value, timeout_secs: u64) -> Result<serde_json::Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("TsukiModManager/{}", APP_VERSION))
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|err| format!("Failed to create HTTP client: {}", err))?;
+
+    let response = client
+        .post(url)
+        .header("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
+        .header("Content-Type", "application/json")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .json(&body)
+        .send()
+        .map_err(|err| format!("POST request failed for {}: {}", url, err))?;
 
     let status = response.status();
     let text = response
@@ -6479,10 +7903,53 @@ fn modworkshop_relative_age_seconds(text: &str) -> Option<u64> {
     None
 }
 
+fn modworkshop_relative_updated_label(text: &str) -> Option<String> {
+    let cleaned = clean_html_text(text).to_lowercase();
+
+    if cleaned.contains("just now") || cleaned.contains("moments ago") {
+        return Some("just now".to_string());
+    }
+
+    let tokens = cleaned
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    for index in 0..tokens.len() {
+        let unit = match tokens[index] {
+            "minute" | "minutes" | "min" | "mins" => "minute",
+            "hour" | "hours" | "hr" | "hrs" => "hour",
+            "day" | "days" => "day",
+            "week" | "weeks" => "week",
+            "month" | "months" => "month",
+            "year" | "years" => "year",
+            _ => continue,
+        };
+
+        if tokens.get(index + 1).copied() != Some("ago") {
+            continue;
+        }
+
+        let amount = if index > 0 {
+            match tokens[index - 1] {
+                "a" | "an" => Some(1),
+                value => value.parse::<u64>().ok(),
+            }
+        } else {
+            None
+        };
+
+        if let Some(amount) = amount {
+            let plural = if amount == 1 { "" } else { "s" };
+            return Some(format!("{} {}{} ago", amount, unit, plural));
+        }
+    }
+
+    None
+}
+
 fn modworkshop_relative_updated_at(window: &str) -> Option<String> {
-    let age = modworkshop_relative_age_seconds(window)?;
-    let now = now_unix_seconds();
-    Some(now.saturating_sub(age).to_string())
+    modworkshop_relative_updated_label(window)
 }
 
 fn scrape_modworkshop_summary_from_listing(html: &str, id: &str) -> SourceModSummary {
@@ -6564,7 +8031,7 @@ fn scrape_modworkshop_detail_from_html(id: &str, html: &str) -> SourceModDetail 
         .and_then(|url| absolutize_source_url("modworkshop", Some(url)))
         .or_else(|| extract_first_img_near(html, 0));
 
-    let mut files = modworkshop_download_files_from_html(id, html);
+    let files = modworkshop_download_files_from_html(id, html);
 
     let mut images = Vec::new();
     let mut img_search = 0;
@@ -6771,10 +8238,6 @@ fn nexus_graphql_payday3_filter() -> serde_json::Value {
             { "value": "payday3", "op": "EQUALS" }
         ]
     })
-}
-
-fn nexus_graphql_query_variants(sort: &str) -> Vec<(&'static str, serde_json::Value)> {
-    nexus_graphql_query_variants_for_page(sort, 1, 24)
 }
 
 fn nexus_graphql_query_variants_for_page(sort: &str, page: u32, count: usize) -> Vec<(&'static str, serde_json::Value)> {
@@ -7067,59 +8530,6 @@ fn fetch_nexus_graphql_mods_page_paged(
         "Nexus GraphQL browse failed. {}",
         errors.into_iter().take(2).collect::<Vec<_>>().join(" | ")
     ))
-}
-
-fn nexus_graphql_file_from_node(mod_id: &str, node: &serde_json::Value) -> Option<SourceFileItem> {
-    let id = json_u64(node, &["fileId", "file_id", "id", "uid"])
-        .map(|value| value.to_string())
-        .or_else(|| json_string(node, &["fileId", "file_id", "id", "uid"]))?;
-
-    let name = json_string(node, &[
-        "name",
-        "fileName",
-        "file_name",
-        "displayName",
-        "display_name",
-        "archiveName",
-        "archive_name",
-    ])
-    .unwrap_or_else(|| format!("Nexus file {}", id));
-
-    Some(SourceFileItem {
-        id: id.clone(),
-        name,
-        version: json_string(node, &["version", "fileVersion", "file_version"]),
-        size_label: format_size_from_value(node),
-        uploaded_at: json_timestamp_string(node, &[
-            "uploadedAt",
-            "uploaded_at",
-            "createdAt",
-            "created_at",
-            "updatedAt",
-            "updated_at",
-            "date",
-        ]),
-        download_url: json_string(node, &["downloadUrl", "download_url", "uri", "url"])
-            .or_else(|| Some(format!("https://www.nexusmods.com/payday3/mods/{}?tab=files&file_id={}", mod_id, id))),
-    })
-}
-
-fn nexus_graphql_files_from_value(mod_id: &str, value: &serde_json::Value) -> Vec<SourceFileItem> {
-    let data = unwrap_graphql_data(value);
-    let mut files = Vec::new();
-
-    if let Some(array) = json_deep_find_array(data, &["files", "modFiles", "nodes", "items", "results", "edges"], 10) {
-        for item in array {
-            let node = item.get("node").unwrap_or(item);
-
-            if let Some(file) = nexus_graphql_file_from_node(mod_id, node) {
-                files.push(file);
-            }
-        }
-    }
-
-    sort_source_files_newest_first(&mut files);
-    files
 }
 
 fn nexus_graphql_detail_queries(game_id: &str, mod_id: &str) -> Vec<(&'static str, serde_json::Value)> {
@@ -7757,7 +9167,7 @@ fn rename_staged_download_if_fake_zip(staged_file: &Path, source: &str, mod_id: 
     let detected_extension = magic_archive_extension(staged_file).unwrap_or_else(|| {
         // ModWorkshop often returns a loose .pak from an API/download endpoint with no filename.
         // Older builds saved that as ".zip", then tried to unzip it and failed with EOCD.
-        if source.eq_ignore_ascii_case("modworkshop") {
+        if source.eq_ignore_ascii_case("modworkshop") || source.eq_ignore_ascii_case("nexus") {
             "pak"
         } else {
             "bin"
@@ -7819,37 +9229,6 @@ fn unique_destination_path(path: &Path) -> PathBuf {
 
     path.to_path_buf()
 }
-
-fn file_name_from_content_disposition(value: &str) -> Option<String> {
-    for part in value.split(';') {
-        let trimmed = part.trim();
-
-        if let Some(name) = trimmed.strip_prefix("filename*=") {
-            let decoded = name
-                .trim_matches('"')
-                .split("''")
-                .last()
-                .unwrap_or(name)
-                .replace("%20", " ");
-            let clean = sanitize_file_component(&decoded);
-
-            if !clean.is_empty() && Path::new(&clean).extension().is_some() {
-                return Some(clean);
-            }
-        }
-
-        if let Some(name) = trimmed.strip_prefix("filename=") {
-            let clean = sanitize_file_component(name.trim_matches('"'));
-
-            if !clean.is_empty() && Path::new(&clean).extension().is_some() {
-                return Some(clean);
-            }
-        }
-    }
-
-    None
-}
-
 
 fn open_http_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
@@ -8158,6 +9537,8 @@ fn fetch_nexus_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
                         id
                     ))
                 }),
+                file_type: None,
+                download_count: None,
             }
         })
         .filter(|file| normalize_nexus_id_string(&file.id).is_some())
@@ -8325,6 +9706,8 @@ fn modworkshop_download_files_from_html(mod_id: &str, html: &str) -> Vec<SourceF
                                 size_label: None,
                                 uploaded_at: None,
                                 download_url: Some(url),
+                                file_type: None,
+                                download_count: None,
                             });
                         }
                     }
@@ -8357,6 +9740,8 @@ fn modworkshop_download_files_from_html(mod_id: &str, html: &str) -> Vec<SourceF
                     size_label: None,
                     uploaded_at: None,
                     download_url: Some(url),
+                    file_type: None,
+                    download_count: None,
                 });
             }
 
@@ -8374,6 +9759,8 @@ fn modworkshop_download_files_from_html(mod_id: &str, html: &str) -> Vec<SourceF
             size_label: None,
             uploaded_at: None,
             download_url: Some(format!("https://api.modworkshop.net/mods/{}/files/latest/download", mod_id)),
+            file_type: None,
+            download_count: None,
         });
     }
 
@@ -8416,9 +9803,9 @@ fn name_or_url_has_install_route_hint(file: &SourceFileItem) -> bool {
 
 fn prefer_named_modworkshop_files(files: Vec<SourceFileItem>) -> Vec<SourceFileItem> {
     let has_named_route_file = files.iter().any(|file| {
-        !is_generic_modworkshop_file_name(&file.name)
+                !is_generic_modworkshop_file_name(&file.name)
             && (
-                Path::new(&file.name).extension().is_some()
+                known_download_extension(&file.name).is_some()
                     || name_or_url_has_install_route_hint(file)
             )
     });
@@ -8431,7 +9818,7 @@ fn prefer_named_modworkshop_files(files: Vec<SourceFileItem>) -> Vec<SourceFileI
         .into_iter()
         .filter(|file| {
             !is_generic_modworkshop_file_name(&file.name)
-                || Path::new(&file.name).extension().is_some()
+                || known_download_extension(&file.name).is_some()
         })
         .collect()
 }
@@ -8461,8 +9848,8 @@ fn modworkshop_file_item_from_json(mod_id: &str, file: &serde_json::Value) -> Op
     .or_else(|| {
         if file_id != "unknown" && file_id != "latest" {
             Some(format!(
-                "https://api.modworkshop.net/mods/{}/files/{}/download",
-                mod_id, file_id
+                "https://api.modworkshop.net/files/{}/download",
+                file_id
             ))
         } else {
             Some(format!(
@@ -8494,7 +9881,7 @@ fn modworkshop_file_item_from_json(mod_id: &str, file: &serde_json::Value) -> Op
     if let Some(url_name) = download_url
         .as_ref()
         .and_then(|url| file_name_from_download_url(url))
-        .filter(|value| Path::new(value).extension().is_some())
+        .filter(|value| known_download_extension(value).is_some())
     {
         let current_is_generic = name
             .as_ref()
@@ -8504,7 +9891,7 @@ fn modworkshop_file_item_from_json(mod_id: &str, file: &serde_json::Value) -> Op
                     || lower == "latest"
                     || lower == "latest modworkshop file"
                     || lower.starts_with("modworkshop file")
-                    || Path::new(value).extension().is_none()
+                    || known_download_extension(value).is_none()
             })
             .unwrap_or(true);
 
@@ -8536,16 +9923,33 @@ fn modworkshop_file_item_from_json(mod_id: &str, file: &serde_json::Value) -> Op
             "date",
         ]),
         download_url,
+        file_type: json_string(file, &["type", "file_type", "fileType", "extension"]),
+        download_count: json_u64(file, &["downloads", "download_count", "downloadCount"]),
     };
 
     if is_likely_source_download_file(&item)
-        || Path::new(&item.name).extension().is_some()
+        || known_download_extension(&item.name).is_some()
         || item.download_url.as_deref().unwrap_or("").contains("/download")
     {
         Some(item)
     } else {
         None
     }
+}
+
+fn is_real_modworkshop_file_item(mod_id: &str, file: &SourceFileItem) -> bool {
+    file.id != mod_id
+        && file.id != "unknown"
+        && file.id != "latest"
+        && !file.id.starts_with("direct-")
+        && !file.id.starts_with("download-")
+        && (
+            !is_generic_modworkshop_file_name(&file.name)
+                || file.download_url
+                    .as_deref()
+                    .map(|url| url.contains("storage.modworkshop.net") || url.contains("api.modworkshop.net/files/"))
+                    .unwrap_or(false)
+        )
 }
 
 fn collect_modworkshop_file_items_recursive(mod_id: &str, value: &serde_json::Value, out: &mut Vec<SourceFileItem>, depth: usize) {
@@ -8564,7 +9968,6 @@ fn collect_modworkshop_file_items_recursive(mod_id: &str, value: &serde_json::Va
                     | "originalFilename"
                     | "download_url"
                     | "downloadUrl"
-                    | "download"
                     | "file_size"
                     | "fileSize"
                     | "size"
@@ -8623,10 +10026,11 @@ fn modworkshop_file_items_from_api(mod_id: &str, data: &serde_json::Value) -> Ve
                 "https://api.modworkshop.net/mods/{}/files/latest/download",
                 mod_id
             )),
+            file_type: None,
+            download_count: None,
         });
     }
 
-    sort_source_files_newest_first(&mut files);
     files
 }
 
@@ -8634,6 +10038,7 @@ fn modworkshop_file_items_from_api(mod_id: &str, data: &serde_json::Value) -> Ve
 fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
     let id = mod_id.trim().to_string();
     let page_url = format!("https://modworkshop.net/mod/{}", id);
+    let modworkshop_api_key = load_settings_internal().modworkshop_api_key;
 
     if let Ok(html) = http_get_text(&page_url) {
         let mut detail = scrape_modworkshop_detail_from_html(&id, &html);
@@ -8643,7 +10048,11 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
             detail.files = html_files;
         }
 
-        if let Ok(value) = http_get_json(&format!("https://api.modworkshop.net/mods/{}", id), None) {
+        if let Ok(value) = http_get_json_fast_with_api_key(
+            &format!("https://api.modworkshop.net/mods/{}", id),
+            10,
+            modworkshop_api_key.as_deref(),
+        ) {
             let data = unwrap_data(value);
 
             detail.description = choose_better_description(
@@ -8675,7 +10084,11 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
                     format!("https://api.modworkshop.net/mods/{}/versions", id),
                     format!("https://api.modworkshop.net/mods/{}/downloads", id),
                 ] {
-                    if let Ok(files_value) = http_get_json(&endpoint, None) {
+                    if let Ok(files_value) = http_get_json_fast_with_api_key(
+                        &endpoint,
+                        10,
+                        modworkshop_api_key.as_deref(),
+                    ) {
                         let file_data = unwrap_data(files_value);
                         api_files.extend(modworkshop_file_items_from_api(&id, &file_data));
                         api_files = prefer_named_modworkshop_files(filter_source_download_files(api_files));
@@ -8695,10 +10108,16 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
                 lower == "download"
                     || lower == "latest modworkshop file"
                     || lower.starts_with("modworkshop file")
-                    || Path::new(&file.name).extension().is_none()
+                    || known_download_extension(&file.name).is_none()
             });
 
-            if !api_files.is_empty() && (html_has_only_generic || api_files.len() >= detail.files.len()) {
+            let api_has_real_files = api_files
+                .iter()
+                .any(|file| is_real_modworkshop_file_item(&id, file));
+
+            if !api_files.is_empty()
+                && (api_has_real_files || html_has_only_generic || api_files.len() >= detail.files.len())
+            {
                 detail.files = api_files;
             }
 
@@ -8721,15 +10140,19 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
                 size_label: None,
                 uploaded_at: None,
                 download_url: Some(format!("https://api.modworkshop.net/mods/{}/files/latest/download", id)),
+                file_type: None,
+                download_count: None,
             });
         }
-
-        sort_source_files_newest_first(&mut detail.files);
 
         return Ok(detail);
     }
 
-    let value = http_get_json(&format!("https://api.modworkshop.net/mods/{}", id), None)?;
+    let value = http_get_json_fast_with_api_key(
+        &format!("https://api.modworkshop.net/mods/{}", id),
+        10,
+        modworkshop_api_key.as_deref(),
+    )?;
     let data = unwrap_data(value);
 
     let name = json_string(&data, &["name", "title"])
@@ -8797,10 +10220,6 @@ fn payday_wwise_media_path(paths: &PaydayPaths) -> PathBuf {
     payday_content_root(paths).join("WwiseAudio").join("Media")
 }
 
-fn payday_wwise_localized_media_path(paths: &PaydayPaths) -> PathBuf {
-    payday_content_root(paths).join("WwiseAudio").join("Localized").join("Media")
-}
-
 fn payday_content_paks_path(paths: &PaydayPaths) -> PathBuf {
     payday_content_root(paths).join("Paks")
 }
@@ -8858,7 +10277,7 @@ fn relative_after_path_markers(path: &str, markers: &[&str], fallback: &str) -> 
 fn looks_like_root_ue4ss_file(file_name: &str, extension: &str) -> bool {
     let lower = file_name.to_lowercase();
 
-    matches!(extension, "dll" | "ini" | "toml" | "lua" | "json")
+    matches!(extension, "dll" | "ini" | "toml" | "lua")
         || lower.eq_ignore_ascii_case("mods.txt")
         || lower.eq_ignore_ascii_case("enabled.txt")
         || lower.contains("ue4ss")
@@ -8976,6 +10395,43 @@ fn guess_file_name_from_url(url: &str) -> Option<String> {
 
     Some(sanitize_file_component(name))
 }
+
+fn known_download_extension(path_or_name: &str) -> Option<String> {
+    let extension = Path::new(path_or_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_lowercase())?;
+
+    if matches!(
+        extension.as_str(),
+        "zip"
+            | "rar"
+            | "7z"
+            | "pak"
+            | "ucas"
+            | "utoc"
+            | "dll"
+            | "lua"
+            | "ini"
+            | "json"
+            | "toml"
+            | "bk2"
+            | "bik"
+            | "mp4"
+            | "webm"
+            | "usm"
+            | "wmv"
+            | "m4v"
+            | "mov"
+            | "wem"
+            | "bnk"
+    ) {
+        Some(extension)
+    } else {
+        None
+    }
+}
+
 fn file_looks_like_html_or_error_page(path: &Path) -> bool {
     let mut buffer = [0u8; 256];
 
@@ -8995,6 +10451,11 @@ fn file_looks_like_html_or_error_page(path: &Path) -> bool {
         || text.contains("<title>nexus mods")
         || text.contains("cloudflare")
         || text.contains("access denied")
+        || (text.starts_with('{')
+            && (text.contains("\"error\"")
+                || text.contains("\"errors\"")
+                || text.contains("\"message\"")
+                || text.contains("\"exception\"")))
 }
 
 fn validate_staged_download_payload(path: &Path, source: &str, mod_id: &str, file_id: &str) -> Result<(), String> {
@@ -9007,7 +10468,7 @@ fn validate_staged_download_payload(path: &Path, source: &str, mod_id: &str, fil
 
     if file_looks_like_html_or_error_page(path) {
         return Err(format!(
-            "Downloaded payload looks like an HTML/error page, not a mod file. Source: {}, mod {}, file {}. Refresh the mod detail/files and try again.",
+            "Downloaded payload looks like an HTML/API error page, not a mod file. Source: {}, mod {}, file {}. Refresh the mod detail/files and try again.",
             source, mod_id, file_id
         ));
     }
@@ -9072,27 +10533,11 @@ fn guess_archive_kind(path: &Path) -> String {
         "7z" => "7z-external-archive".to_string(),
         "tar" | "gz" | "tgz" | "bz2" | "xz" => "tar-external-archive".to_string(),
         "pak" | "ucas" | "utoc" => "loose-pak-file".to_string(),
-        "dll" | "lua" | "ini" | "json" => "loose-win64-file".to_string(),
+        "dll" | "lua" | "ini" | "toml" | "json" => "loose-win64-file".to_string(),
         "bk2" | "bik" | "mp4" | "webm" | "usm" | "wmv" | "m4v" | "mov" => "loose-movie-file".to_string(),
         "wem" | "bnk" => "loose-wwise-file".to_string(),
         _ => "unknown".to_string(),
     }
-}
-
-fn safe_join_display(base: &Path, child: &str) -> String {
-    let mut out = base.to_path_buf();
-
-    for part in child.replace('\\', "/").split('/') {
-        let part = part.trim();
-
-        if part.is_empty() || part == "." || part == ".." {
-            continue;
-        }
-
-        out.push(part);
-    }
-
-    out.display().to_string()
 }
 
 fn normalize_archive_path(input: &str) -> String {
@@ -9107,7 +10552,18 @@ fn normalize_archive_path(input: &str) -> String {
 }
 
 fn common_archive_root(paths: &[String]) -> Option<String> {
-    let mut roots = paths
+    // Only strip a wrapper folder when every real file actually sits under that folder.
+    // A ZIP that contains a single file named SomeMod.pak must not report SomeMod.pak as a wrapper.
+    let candidates = paths
+        .iter()
+        .filter(|path| path.contains('/'))
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut roots = candidates
         .iter()
         .filter_map(|path| path.split('/').next())
         .filter(|part| !part.trim().is_empty())
@@ -9144,24 +10600,6 @@ fn strip_common_root(path: &str, root: Option<&str>) -> String {
     } else {
         path.to_string()
     }
-}
-
-fn strip_after_marker(path: &str, markers: &[&str]) -> Option<String> {
-    let lower = path.to_lowercase();
-
-    for marker in markers {
-        let marker_lower = marker.to_lowercase();
-        if let Some(pos) = lower.find(&marker_lower) {
-            let start = pos + marker.len();
-            let remainder = path[start..].trim_start_matches('/').trim_start_matches('\\');
-
-            if !remainder.is_empty() {
-                return Some(remainder.to_string());
-            }
-        }
-    }
-
-    None
 }
 
 fn archive_entry_is_folder_marker(path: &str, size_bytes: u64, all_paths: &[String]) -> bool {
@@ -9569,23 +11007,7 @@ fn relaunch_current_exe_as_admin_internal() -> Result<(), String> {
 }
 
 fn should_auto_relaunch_as_admin() -> bool {
-    if cfg!(not(target_os = "windows")) {
-        return false;
-    }
-
-    // Do not auto-elevate in `npm run tauri dev`.
-    // Dev builds load the UI from the Vite localhost server.
-    // If Tsuki relaunches outside the dev runner, that server can disappear,
-    // causing the WebView to show "localhost refused to connect."
-    if cfg!(debug_assertions) {
-        return false;
-    }
-
-    if env::var("TSUKI_NO_AUTO_ADMIN").ok().as_deref() == Some("1") {
-        return false;
-    }
-
-    !is_running_as_admin_internal()
+    false
 }
 
 fn find_movie_same_name_destination(paths: &PaydayPaths, file_name: &str) -> Option<PathBuf> {
@@ -9636,6 +11058,40 @@ fn known_payday_movie_file_name(file_name: &str) -> bool {
 }
 
 
+fn should_ignore_archive_entry_as_junk_or_manager(path: &str, file_name: &str, extension: &str) -> Option<String> {
+    let lower = path.to_lowercase();
+    let name = file_name.to_lowercase();
+
+    if lower.contains("__macosx/") || name == ".ds_store" || name == "thumbs.db" || name == "desktop.ini" {
+        return Some("OS metadata/helper file, not a mod file.".to_string());
+    }
+
+    if lower.contains("fomod/")
+        || lower.contains("mod organizer")
+        || lower.contains("modorganizer")
+        || lower.contains("vortex")
+        || lower.contains("r2modman")
+        || lower.contains("thunderstore")
+        || lower.contains("mod manager")
+        || lower.contains("modmanager")
+        || name == "moduleconfig.xml"
+        || name == "meta.ini"
+    {
+        return Some("External mod-manager metadata/artifact, not a PAYDAY 3 runtime mod file.".to_string());
+    }
+
+    if matches!(extension, "txt" | "md" | "rtf" | "pdf" | "url" | "lnk" | "xml" | "yaml" | "yml" | "log") {
+        return Some("Readme/documentation/metadata file skipped. Tsuki only installs runtime mod files.".to_string());
+    }
+
+    if matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "bmp" | "avif") {
+        return Some("Image/preview asset skipped. Tsuki only installs runtime mod files.".to_string());
+    }
+
+    None
+}
+
+
 fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, description: &str) -> ArchiveInspectEntry {
     let normalized = normalize_archive_path(archive_path);
     let lower = normalized.to_lowercase();
@@ -9666,6 +11122,18 @@ fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, desc
             confidence: "n/a".to_string(),
             reason: "Folder entry, not copied directly.".to_string(),
             blocked: false,
+            size_bytes: 0,
+        };
+    }
+
+    if let Some(skip_reason) = should_ignore_archive_entry_as_junk_or_manager(&normalized, &file_name, &extension) {
+        return ArchiveInspectEntry {
+            archive_path: normalized,
+            route_kind: "ignored-junk".to_string(),
+            destination: "ignored".to_string(),
+            confidence: "n/a".to_string(),
+            reason: skip_reason,
+            blocked: true,
             size_bytes: 0,
         };
     }
@@ -9722,6 +11190,10 @@ fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, desc
             && (lower.contains("/scripts/") || lower.contains("/enabled") || lower.contains("/config"))
         {
             format!("Mods/{}", normalized)
+        } else if matches!(extension.as_str(), "lua" | "json" | "toml")
+            || (extension == "ini" && !file_name.to_lowercase().contains("ue4ss"))
+        {
+            format!("Mods/{}", file_name)
         } else {
             file_name.clone()
         };
@@ -9974,6 +11446,20 @@ fn collect_files_recursive(root: &Path) -> Result<Vec<(String, PathBuf, u64)>, S
     Ok(out)
 }
 
+fn cleanup_temp_extraction_folder(path: &Path, warnings: &mut Vec<String>) {
+    if !path.exists() {
+        return;
+    }
+
+    if let Err(error) = fs::remove_dir_all(path) {
+        warnings.push(format!(
+            "Temporary extraction folder could not be deleted automatically: {} ({})",
+            path.display(),
+            error
+        ));
+    }
+}
+
 
 fn inspect_staged_file(paths: &PaydayPaths, staged_file: &Path, description: &str) -> Result<(String, Vec<ArchiveInspectEntry>, Vec<String>), String> {
     let mut warnings = Vec::new();
@@ -10038,7 +11524,13 @@ fn inspect_staged_file(paths: &PaydayPaths, staged_file: &Path, description: &st
     if archive_kind.contains("external-archive") {
         match extract_external_archive(staged_file, "inspect") {
             Ok(extracted_root) => {
-                let files = collect_files_recursive(&extracted_root)?;
+                let files = match collect_files_recursive(&extracted_root) {
+                    Ok(files) => files,
+                    Err(error) => {
+                        cleanup_temp_extraction_folder(&extracted_root, &mut warnings);
+                        return Err(error);
+                    }
+                };
                 let raw_paths = files.iter().map(|(relative, _, _)| relative.clone()).collect::<Vec<_>>();
                 let root = common_archive_root(&raw_paths);
                 let stripped_paths = raw_paths
@@ -10080,6 +11572,8 @@ fn inspect_staged_file(paths: &PaydayPaths, staged_file: &Path, description: &st
                         root
                     ));
                 }
+
+                cleanup_temp_extraction_folder(&extracted_root, &mut warnings);
 
                 return Ok((archive_kind, entries, warnings));
             }
@@ -10190,6 +11684,32 @@ fn resolve_source_file_download_url(source: &str, mod_id: &str, file_id: &str, d
             }
         }
 
+        if !clean_file_id.is_empty()
+            && clean_file_id != "unknown"
+            && clean_file_id != "latest"
+            && !clean_file_id.starts_with("download-")
+            && !clean_file_id.starts_with("direct-")
+        {
+            let modworkshop_api_key = load_settings_internal().modworkshop_api_key;
+            if let Ok(value) = http_get_json_fast_with_api_key(
+                &format!("https://api.modworkshop.net/files/{}", clean_file_id),
+                8,
+                modworkshop_api_key.as_deref(),
+            ) {
+                let data = unwrap_data(value);
+                if let Some(file) = modworkshop_file_item_from_json(mod_id, &data) {
+                    if let Some(url) = file.download_url {
+                        return Ok(url);
+                    }
+                }
+            }
+
+            return Ok(format!(
+                "https://api.modworkshop.net/files/{}/download",
+                clean_file_id
+            ));
+        }
+
         if let Ok(html) = http_get_text(&format!("https://modworkshop.net/mod/{}", mod_id)) {
             let files = modworkshop_download_files_from_html(mod_id, &html);
 
@@ -10210,19 +11730,6 @@ fn resolve_source_file_download_url(source: &str, mod_id: &str, file_id: &str, d
             if let Some(real_url) = first_modworkshop_storage_url_from_html(&html) {
                 return Ok(real_url);
             }
-        }
-
-        if !clean_file_id.is_empty()
-            && clean_file_id != "unknown"
-            && clean_file_id != "latest"
-            && !clean_file_id.starts_with("download-")
-            && !clean_file_id.starts_with("direct-")
-        {
-            return Ok(format!(
-                "https://modworkshop.net/mod/{}/download/{}",
-                mod_id,
-                clean_file_id
-            ));
         }
 
         return Ok(format!("https://modworkshop.net/mod/{}/download", mod_id));
@@ -10246,18 +11753,16 @@ fn source_file_download_candidates(
     download_url: Option<String>,
 ) -> Vec<String> {
     let mut urls = Vec::new();
+    let caller_url_allowed = !source.eq_ignore_ascii_case("nexus") && !source.eq_ignore_ascii_case("modworkshop");
+    let trusted_download_url = if caller_url_allowed { download_url.clone() } else { None };
 
-    if let Ok(primary) = resolve_source_file_download_url(source, mod_id, file_id, download_url.clone()) {
+    if let Ok(primary) = resolve_source_file_download_url(source, mod_id, file_id, trusted_download_url.clone()) {
         push_unique_url(&mut urls, primary);
     }
 
     if source.eq_ignore_ascii_case("nexus") {
         let clean_mod_id = mod_id.trim();
         let clean_file_id = file_id.trim();
-
-        if let Some(url) = download_url.clone() {
-            push_unique_url(&mut urls, url);
-        }
 
         if !clean_mod_id.is_empty() && !clean_file_id.is_empty() && clean_file_id != "unknown" {
             if let Some(api_key) = load_settings_internal().nexus_api_key {
@@ -10289,16 +11794,16 @@ fn source_file_download_candidates(
         let mod_id = mod_id.trim();
         let file_id = file_id.trim();
 
-        if let Some(url) = download_url {
-            push_unique_url(&mut urls, url);
-        }
-
         if !file_id.is_empty()
             && file_id != "unknown"
             && file_id != "latest"
             && !file_id.starts_with("direct-")
             && !file_id.starts_with("download-")
         {
+            push_unique_url(
+                &mut urls,
+                format!("https://api.modworkshop.net/files/{}/download", file_id),
+            );
             push_unique_url(
                 &mut urls,
                 format!("https://api.modworkshop.net/mods/{}/files/{}/download", mod_id, file_id),
@@ -10323,10 +11828,118 @@ fn source_file_download_candidates(
         );
     }
 
+    if caller_url_allowed {
+        if let Some(url) = download_url {
+            push_unique_url(&mut urls, url);
+        }
+    }
+
     urls
 }
 
-fn download_url_to_file_with_depth(url: &str, destination: &Path, depth: u8) -> Result<u64, String> {
+#[derive(Debug, Clone)]
+struct DownloadHttpDiagnostic {
+    url_host_path: String,
+    http_status: u16,
+    content_type: Option<String>,
+    content_disposition: Option<String>,
+    size_bytes: u64,
+}
+
+fn safe_url_host_path(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            let host = parsed.host_str()?.to_string();
+            Some(format!("{}{}", host, parsed.path()))
+        })
+        .unwrap_or_else(|| url.split('?').next().unwrap_or(url).to_string())
+}
+
+fn archive_installable_count(entries: &[ArchiveInspectEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.route_kind != "folder" && !entry.blocked)
+        .count()
+}
+
+fn archive_skipped_count(entries: &[ArchiveInspectEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| entry.route_kind != "folder" && entry.blocked)
+        .count()
+}
+
+fn first_archive_entries(entries: &[ArchiveInspectEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.route_kind != "folder")
+        .take(20)
+        .map(|entry| entry.archive_path.clone())
+        .collect()
+}
+
+fn apply_archive_diagnostic_summary(report: &mut LastInstallDiagnostic, entries: &[ArchiveInspectEntry]) {
+    report.archive_entry_count = entries.len();
+    report.installable_count = archive_installable_count(entries);
+    report.skipped_count = archive_skipped_count(entries);
+    report.first_archive_entries = first_archive_entries(entries);
+}
+
+fn write_stage_download_diagnostic(
+    status: &str,
+    source: &str,
+    mod_id: &str,
+    file_id: &str,
+    mod_name: &str,
+    selected_file_name: &str,
+    staged_file: &Path,
+    stage_root: &Path,
+    size_bytes: u64,
+    download_http: Option<&DownloadHttpDiagnostic>,
+    archive_kind: Option<String>,
+    entries: &[ArchiveInspectEntry],
+    warnings: Vec<String>,
+    error: Option<String>,
+) {
+    let mut report = LastInstallDiagnostic {
+        timestamp_unix: now_unix_seconds(),
+        status: status.to_string(),
+        mod_name: mod_name.to_string(),
+        source: source.to_string(),
+        mod_id: mod_id.to_string(),
+        file_id: file_id.to_string(),
+        download_url_host_path: download_http.map(|value| value.url_host_path.clone()),
+        http_status: download_http.map(|value| value.http_status),
+        content_type: download_http.and_then(|value| value.content_type.clone()),
+        content_disposition: download_http.and_then(|value| value.content_disposition.clone()),
+        selected_file_name: Some(selected_file_name.to_string()),
+        saved_file_name: staged_file
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string()),
+        saved_file_kind: Some(guess_archive_kind(staged_file)),
+        staged_file_path: Some(staged_file.display().to_string()),
+        staged_folder_path: Some(stage_root.display().to_string()),
+        archive_kind,
+        download_size_bytes: Some(size_bytes),
+        archive_entry_count: 0,
+        installable_count: 0,
+        skipped_count: 0,
+        first_archive_entries: Vec::new(),
+        entries: entries.iter().map(archive_entry_to_diagnostic).collect(),
+        installed_files: Vec::new(),
+        replaced_files: Vec::new(),
+        receipt_path: None,
+        warnings,
+        error,
+    };
+
+    apply_archive_diagnostic_summary(&mut report, entries);
+    write_last_install_diagnostic(&report);
+}
+
+fn download_url_to_file_with_depth(url: &str, destination: &Path, depth: u8) -> Result<DownloadHttpDiagnostic, String> {
     if depth > 3 {
         return Err("Download resolution looped too many times.".to_string());
     }
@@ -10345,28 +11958,58 @@ fn download_url_to_file_with_depth(url: &str, destination: &Path, depth: u8) -> 
         .map_err(|err| format!("Download request failed for {}: {}", url, err))?;
 
     let status = response.status();
+    let final_url_host_path = safe_url_host_path(response.url().as_str());
     if !status.is_success() {
-        return Err(format!("Download server returned {} for {}", status, url));
+        return Err(format!(
+            "Download server returned HTTP {} from {}.",
+            status.as_u16(),
+            final_url_host_path
+        ));
     }
 
-    let content_type = response
+    let content_type_raw = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
+        .map(|value| value.to_string());
+    let content_disposition = response
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let content_type = content_type_raw.as_deref().unwrap_or("").to_lowercase();
 
     if content_type.contains("text/html") {
         let mut html = String::new();
         response
             .read_to_string(&mut html)
-            .map_err(|err| format!("Failed to read ModWorkshop download page: {}", err))?;
+            .map_err(|err| format!("Failed to read download page from {}: {}", final_url_host_path, err))?;
 
         if let Some(storage_url) = first_modworkshop_storage_url_from_html(&html) {
             return download_url_to_file_with_depth(&storage_url, destination, depth + 1);
         }
 
-        return Err("ModWorkshop returned a web page instead of a file, and no storage download link was found on it.".to_string());
+        return Err(format!(
+            "Download returned an HTML page instead of a file from {} (HTTP {}, content-type {}). No direct storage link was found.",
+            final_url_host_path,
+            status.as_u16(),
+            content_type_raw.as_deref().unwrap_or("unknown")
+        ));
+    }
+
+    if content_type.contains("application/json") {
+        let mut body = String::new();
+        response
+            .read_to_string(&mut body)
+            .map_err(|err| format!("Failed to read JSON download response from {}: {}", final_url_host_path, err))?;
+
+        return Err(format!(
+            "Download returned JSON instead of an archive from {} (HTTP {}, content-type {}). Body starts with: {}",
+            final_url_host_path,
+            status.as_u16(),
+            content_type_raw.as_deref().unwrap_or("unknown"),
+            body.chars().take(180).collect::<String>()
+        ));
     }
 
     let mut output = File::create(destination)
@@ -10375,10 +12018,16 @@ fn download_url_to_file_with_depth(url: &str, destination: &Path, depth: u8) -> 
     let bytes = io::copy(&mut response, &mut output)
         .map_err(|err| format!("Failed to save download: {}", err))?;
 
-    Ok(bytes)
+    Ok(DownloadHttpDiagnostic {
+        url_host_path: final_url_host_path,
+        http_status: status.as_u16(),
+        content_type: content_type_raw,
+        content_disposition,
+        size_bytes: bytes,
+    })
 }
 
-fn download_url_to_file(url: &str, destination: &Path) -> Result<u64, String> {
+fn download_url_to_file_with_diagnostic(url: &str, destination: &Path) -> Result<DownloadHttpDiagnostic, String> {
     download_url_to_file_with_depth(url, destination, 0)
 }
 
@@ -10432,6 +12081,11 @@ fn move_conflicting_file_out_of_way(path: &Path, label: &str) -> Result<Option<S
         return Ok(None);
     }
 
+    if !keep_uninstalled_mods_enabled() {
+        delete_file_permanently(path, "conflicting install path")?;
+        return Ok(Some(format!("Deleted {}", path.display())));
+    }
+
     let holding_root = uninstalled_dir()?.join(format!("conflict_{}_{}", sanitize_file_component(label), current_timestamp()));
     fs::create_dir_all(&holding_root)
         .map_err(|err| format!("Failed to create conflict holding folder: {}", err))?;
@@ -10457,6 +12111,11 @@ fn move_conflicting_file_out_of_way(path: &Path, label: &str) -> Result<Option<S
 fn move_existing_destination_file_for_install(destination: &Path, label: &str) -> Result<Option<String>, String> {
     if !destination.exists() || destination.is_dir() {
         return Ok(None);
+    }
+
+    if !keep_uninstalled_mods_enabled() {
+        delete_file_permanently(destination, "replaced install file")?;
+        return Ok(Some(format!("Deleted {}", destination.display())));
     }
 
     let holding_root = uninstalled_dir()?.join(format!("replaced_{}_{}", sanitize_file_component(label), current_timestamp()));
@@ -10523,9 +12182,12 @@ fn move_existing_files_to_uninstalled(paths: &PaydayPaths, file_names: &[String]
         return Ok(Vec::new());
     }
 
+    let keep_uninstalled = keep_uninstalled_mods_enabled();
     let trash_root = uninstalled_dir()?.join(format!("{}_{}", sanitize_file_component(label), current_timestamp()));
-    fs::create_dir_all(&trash_root)
-        .map_err(|err| format!("Failed to create update holding folder: {}", err))?;
+    if keep_uninstalled {
+        fs::create_dir_all(&trash_root)
+            .map_err(|err| format!("Failed to create update holding folder: {}", err))?;
+    }
 
     let mut moved = Vec::new();
 
@@ -10550,22 +12212,27 @@ fn move_existing_files_to_uninstalled(paths: &PaydayPaths, file_names: &[String]
             .unwrap_or(clean_name)
             .to_string();
 
-        let target_path = trash_root.join(&actual_name);
+        if keep_uninstalled {
+            let target_path = trash_root.join(&actual_name);
 
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("Failed to prepare update holding folder: {}", err))?;
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("Failed to prepare update holding folder: {}", err))?;
+            }
+
+            if let Err(rename_err) = fs::rename(&source_path, &target_path) {
+                fs::copy(&source_path, &target_path)
+                    .map_err(|copy_err| format!("Failed to move old file {}: rename failed ({}) and copy failed ({})", clean_name, rename_err, copy_err))?;
+
+                fs::remove_file(&source_path)
+                    .map_err(|remove_err| format!("Copied old file {} but failed to remove original: {}", clean_name, remove_err))?;
+            }
+
+            moved.push(target_path.display().to_string());
+        } else {
+            delete_file_permanently(&source_path, "replaced install file")?;
+            moved.push(format!("Deleted {}", source_path.display()));
         }
-
-        if let Err(rename_err) = fs::rename(&source_path, &target_path) {
-            fs::copy(&source_path, &target_path)
-                .map_err(|copy_err| format!("Failed to move old file {}: rename failed ({}) and copy failed ({})", clean_name, rename_err, copy_err))?;
-
-            fs::remove_file(&source_path)
-                .map_err(|remove_err| format!("Copied old file {} but failed to remove original: {}", clean_name, remove_err))?;
-        }
-
-        moved.push(target_path.display().to_string());
     }
 
     Ok(moved)
@@ -10576,6 +12243,10 @@ fn write_install_receipt(
     source: &str,
     mod_id: &str,
     file_id: &str,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     version: Option<String>,
     author: Option<String>,
     thumbnail_url: Option<String>,
@@ -10602,6 +12273,10 @@ fn write_install_receipt(
         mod_type: "source-install".to_string(),
         source_mod_id: Some(mod_id.to_string()),
         source_file_id: Some(file_id.to_string()),
+        source_file_name,
+        source_file_category,
+        source_file_uploaded_at,
+        source_file_version,
         version,
         author,
         thumbnail_url,
@@ -10638,6 +12313,10 @@ fn install_staged_file_to_game_internal(
     source: &str,
     mod_id: &str,
     file_id: &str,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     version: Option<String>,
     author: Option<String>,
     thumbnail_url: Option<String>,
@@ -10646,6 +12325,12 @@ fn install_staged_file_to_game_internal(
     description: &str,
     replace_file_names: Vec<String>,
 ) -> Result<InstallApplyResult, String> {
+    let previous_diagnostic = read_last_install_diagnostic().filter(|report| {
+        report.source.eq_ignore_ascii_case(source)
+            && report.mod_id == mod_id
+            && report.file_id == file_id
+    });
+
     let mut diagnostic = LastInstallDiagnostic {
         timestamp_unix: now_unix_seconds(),
         status: "started".to_string(),
@@ -10653,12 +12338,34 @@ fn install_staged_file_to_game_internal(
         source: source.to_string(),
         mod_id: mod_id.to_string(),
         file_id: file_id.to_string(),
+        download_url_host_path: previous_diagnostic
+            .as_ref()
+            .and_then(|report| report.download_url_host_path.clone()),
+        http_status: previous_diagnostic.as_ref().and_then(|report| report.http_status),
+        content_type: previous_diagnostic
+            .as_ref()
+            .and_then(|report| report.content_type.clone()),
+        content_disposition: previous_diagnostic
+            .as_ref()
+            .and_then(|report| report.content_disposition.clone()),
+        selected_file_name: previous_diagnostic
+            .as_ref()
+            .and_then(|report| report.selected_file_name.clone()),
+        saved_file_name: Path::new(staged_file_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string()),
+        saved_file_kind: Some(guess_archive_kind(Path::new(staged_file_path))),
         staged_file_path: Some(staged_file_path.to_string()),
         staged_folder_path: Path::new(staged_file_path)
             .parent()
             .map(|value| value.display().to_string()),
         archive_kind: None,
         download_size_bytes: None,
+        archive_entry_count: 0,
+        installable_count: 0,
+        skipped_count: 0,
+        first_archive_entries: Vec::new(),
         entries: Vec::new(),
         installed_files: Vec::new(),
         replaced_files: Vec::new(),
@@ -10679,12 +12386,18 @@ fn install_staged_file_to_game_internal(
 
         staged_file = rename_staged_download_if_fake_zip(&staged_file, source, mod_id, file_id, mod_name)?;
         diagnostic.staged_file_path = Some(staged_file.display().to_string());
+        diagnostic.saved_file_name = staged_file
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_string());
+        diagnostic.saved_file_kind = Some(guess_archive_kind(&staged_file));
         diagnostic.download_size_bytes = fs::metadata(&staged_file).ok().map(|value| value.len());
 
         let (archive_kind, entries, mut warnings) = inspect_staged_file(&paths, &staged_file, description)?;
 
         diagnostic.archive_kind = Some(archive_kind.clone());
         diagnostic.entries = entries.iter().map(archive_entry_to_diagnostic).collect();
+        apply_archive_diagnostic_summary(&mut diagnostic, &entries);
         diagnostic.warnings = warnings.clone();
 
         let installable_entries = entries
@@ -10771,7 +12484,7 @@ fn install_staged_file_to_game_internal(
                     continue;
                 }
 
-                let mut destination = PathBuf::from(&entry.destination);
+                let destination = PathBuf::from(&entry.destination);
 
                 if !path_is_allowed_destination(&paths, &destination) {
                     return Err(format!("Refused unsafe destination: {}", destination.display()));
@@ -10809,7 +12522,13 @@ fn install_staged_file_to_game_internal(
             }
         } else if archive_kind.contains("external-archive") {
             let extracted_root = extract_external_archive(&staged_file, mod_name)?;
-            let files = collect_files_recursive(&extracted_root)?;
+            let files = match collect_files_recursive(&extracted_root) {
+                Ok(files) => files,
+                Err(error) => {
+                    cleanup_temp_extraction_folder(&extracted_root, &mut warnings);
+                    return Err(error);
+                }
+            };
             let raw_paths = files.iter().map(|(relative, _, _)| relative.clone()).collect::<Vec<_>>();
             let root = common_archive_root(&raw_paths);
             let stripped_paths = raw_paths
@@ -10874,9 +12593,11 @@ fn install_staged_file_to_game_internal(
                     size_bytes: entry.size_bytes,
                 });
             }
+
+            cleanup_temp_extraction_folder(&extracted_root, &mut warnings);
         } else {
             let entry = installable_entries[0];
-            let mut destination = PathBuf::from(&entry.destination);
+            let destination = PathBuf::from(&entry.destination);
 
             if !path_is_allowed_destination(&paths, &destination) {
                 return Err(format!("Refused unsafe destination: {}", destination.display()));
@@ -10909,13 +12630,21 @@ fn install_staged_file_to_game_internal(
             return Err("No files were copied into the game folder.".to_string());
         }
 
-        warnings.push("Installed into detected PAYDAY 3 paths. Old update files were moved to the uninstalled holding folder when provided.".to_string());
+        warnings.push(if keep_uninstalled_mods_enabled() {
+            "Installed into detected PAYDAY 3 paths. Old update files were moved to the uninstalled holding folder when provided.".to_string()
+        } else {
+            "Installed into detected PAYDAY 3 paths. Old update files were permanently deleted when provided.".to_string()
+        });
 
         let receipt_path = write_install_receipt(
             mod_name,
             source,
             mod_id,
             file_id,
+            source_file_name,
+            source_file_category,
+            source_file_uploaded_at,
+            source_file_version,
             version,
             author,
             thumbnail_url,
@@ -10923,6 +12652,27 @@ fn install_staged_file_to_game_internal(
             page_url,
             &installed_files,
         )?;
+
+        if !load_settings_internal().keep_downloaded_archives {
+            match fs::remove_file(&staged_file) {
+                Ok(_) => {
+                    warnings.push(format!(
+                        "Deleted staged downloaded archive after successful install because Keep Downloaded Archives is off: {}",
+                        staged_file.display()
+                    ));
+                    if let Some(parent) = staged_file.parent() {
+                        if let Ok(download_root) = downloads_cache_dir() {
+                            remove_empty_dirs_up_to(parent, &download_root);
+                        }
+                    }
+                }
+                Err(error) => warnings.push(format!(
+                    "Could not delete staged downloaded archive {} after install: {}",
+                    staged_file.display(),
+                    error
+                )),
+            }
+        }
 
         let mut all_replaced_files = replaced_files.clone();
         for replaced in &diagnostic.replaced_files {
@@ -10968,6 +12718,10 @@ async fn install_staged_file_to_game(
     source: String,
     mod_id: String,
     file_id: String,
+    source_file_name: Option<String>,
+    source_file_category: Option<String>,
+    source_file_uploaded_at: Option<String>,
+    source_file_version: Option<String>,
     version: Option<String>,
     author: Option<String>,
     thumbnail_url: Option<String>,
@@ -10983,6 +12737,10 @@ async fn install_staged_file_to_game(
             &source,
             &mod_id,
             &file_id,
+            source_file_name,
+            source_file_category,
+            source_file_uploaded_at,
+            source_file_version,
             version,
             author,
             thumbnail_url,
@@ -11018,10 +12776,14 @@ async fn stage_source_file_download(
 
         if source.eq_ignore_ascii_case("modworkshop")
             && is_generic_modworkshop_file_name(&file_name)
-            && Path::new(&file_name).extension().is_none()
+            && known_download_extension(&file_name).is_none()
+            && download_url
+                .as_deref()
+                .map(|url| !url.to_lowercase().contains("/download") && !url.to_lowercase().contains("storage.modworkshop.net"))
+                .unwrap_or(true)
         {
             return Err(format!(
-                "Blocked generic ModWorkshop placeholder '{}'. Choose a named file like .pak/.zip/.dll/.ini/Mods-folder archive. Tsuki blocks these placeholders because they can point at the wrong payload and break the mod.",
+                "Blocked generic ModWorkshop placeholder '{}'. Choose a named file like .pak/.zip/.dll/.ini/Mods-folder archive. Tsuki blocks placeholders only when no usable download endpoint is available.",
                 file_name
             ));
         }
@@ -11050,15 +12812,12 @@ async fn stage_source_file_download(
 
         let clean_source_name = sanitize_file_component(&file_name);
         let guessed_from_url = guess_file_name_from_url(&direct_url)
-            .filter(|name| Path::new(name).extension().is_some());
+            .filter(|name| known_download_extension(name).is_some());
 
-        let guessed = if Path::new(&clean_source_name).extension().is_some() {
+        let guessed = if known_download_extension(&clean_source_name).is_some() {
             clean_source_name
         } else if let Some(url_name) = guessed_from_url.clone() {
-            let url_extension = Path::new(&url_name)
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("zip");
+            let url_extension = known_download_extension(&url_name).unwrap_or_else(|| "zip".to_string());
 
             // Prefer the human/source file name over ModWorkshop/Nexus random storage blobs.
             // Example: "Keycard Outline Fix" + random-url.pak => "Keycard Outline Fix.pak".
@@ -11072,6 +12831,7 @@ async fn stage_source_file_download(
         let mut staged_file = stage_root.join(guessed);
         let mut last_download_error = String::new();
         let mut size_bytes: Option<u64> = None;
+        let mut download_http: Option<DownloadHttpDiagnostic> = None;
 
         for candidate in download_candidates {
             if is_image_or_page_asset_name(&candidate) {
@@ -11079,9 +12839,10 @@ async fn stage_source_file_download(
                 continue;
             }
 
-            match download_url_to_file(&candidate, &staged_file) {
-                Ok(bytes) => {
-                    size_bytes = Some(bytes);
+            match download_url_to_file_with_diagnostic(&candidate, &staged_file) {
+                Ok(diagnostic) => {
+                    size_bytes = Some(diagnostic.size_bytes);
+                    download_http = Some(diagnostic);
                     break;
                 }
                 Err(error) => {
@@ -11091,15 +12852,60 @@ async fn stage_source_file_download(
             }
         }
 
-        let size_bytes = size_bytes.ok_or_else(|| {
-            if last_download_error.is_empty() {
-                "Every download candidate was rejected before download.".to_string()
-            } else {
-                format!("All download candidates failed. Last error: {}", last_download_error)
-            }
-        })?;
+        let size_bytes = match size_bytes {
+            Some(bytes) => bytes,
+            None => {
+                let error = if last_download_error.is_empty() {
+                    "Every download candidate was rejected before download.".to_string()
+                } else {
+                    format!("All download candidates failed. Last error: {}", last_download_error)
+                };
+                let warnings = if last_download_error.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![last_download_error.clone()]
+                };
 
-        validate_staged_download_payload(&staged_file, &source, &mod_id, &file_id)?;
+                write_stage_download_diagnostic(
+                    "failed",
+                    &source,
+                    &mod_id,
+                    &file_id,
+                    &mod_name,
+                    &file_name,
+                    &staged_file,
+                    &stage_root,
+                    0,
+                    download_http.as_ref(),
+                    None,
+                    &[],
+                    warnings,
+                    Some(error.clone()),
+                );
+
+                return Err(error);
+            }
+        };
+
+        if let Err(error) = validate_staged_download_payload(&staged_file, &source, &mod_id, &file_id) {
+            write_stage_download_diagnostic(
+                "failed",
+                &source,
+                &mod_id,
+                &file_id,
+                &mod_name,
+                &file_name,
+                &staged_file,
+                &stage_root,
+                size_bytes,
+                download_http.as_ref(),
+                None,
+                &[],
+                Vec::new(),
+                Some(error.clone()),
+            );
+            return Err(error);
+        }
 
         let fake_zip_label = {
             let clean_file_name = sanitize_file_component(&file_name);
@@ -11116,15 +12922,74 @@ async fn stage_source_file_download(
             }
         };
 
-        staged_file = rename_staged_download_if_fake_zip(&staged_file, &source, &mod_id, &file_id, &fake_zip_label)?;
+        staged_file = match rename_staged_download_if_fake_zip(&staged_file, &source, &mod_id, &file_id, &fake_zip_label) {
+            Ok(path) => path,
+            Err(error) => {
+                write_stage_download_diagnostic(
+                    "failed",
+                    &source,
+                    &mod_id,
+                    &file_id,
+                    &mod_name,
+                    &file_name,
+                    &staged_file,
+                    &stage_root,
+                    size_bytes,
+                    download_http.as_ref(),
+                    None,
+                    &[],
+                    Vec::new(),
+                    Some(error.clone()),
+                );
+                return Err(error);
+            }
+        };
 
-        let (archive_kind, entries, mut warnings) = inspect_staged_file(&paths, &staged_file, &description)?;
+        let (archive_kind, entries, mut warnings) = match inspect_staged_file(&paths, &staged_file, &description) {
+            Ok(result) => result,
+            Err(error) => {
+                write_stage_download_diagnostic(
+                    "failed",
+                    &source,
+                    &mod_id,
+                    &file_id,
+                    &mod_name,
+                    &file_name,
+                    &staged_file,
+                    &stage_root,
+                    size_bytes,
+                    download_http.as_ref(),
+                    None,
+                    &[],
+                    Vec::new(),
+                    Some(error.clone()),
+                );
+                return Err(error);
+            }
+        };
 
         if entries.iter().any(|entry| entry.blocked) {
             warnings.push("One or more entries are blocked until the installer has safer handling for this route.".to_string());
         }
 
         warnings.push("Downloaded to Tsuki staging and inspected. Install can now copy safe routes into detected PAYDAY 3 paths.".to_string());
+
+        write_stage_download_diagnostic(
+            "staged",
+            &source,
+            &mod_id,
+            &file_id,
+            &mod_name,
+            &file_name,
+            &staged_file,
+            &stage_root,
+            size_bytes,
+            download_http.as_ref(),
+            Some(archive_kind.clone()),
+            &entries,
+            warnings.clone(),
+            None,
+        );
 
         Ok(StagedDownloadResult {
             mod_name,
@@ -11278,30 +13143,6 @@ fn compact_match_text(input: &str) -> String {
     input.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect()
 }
 
-fn normalize_installed_file_stem_for_pairing(value: &str) -> String {
-    let file_name = value
-        .split([',', '/', '\\'])
-        .next()
-        .unwrap_or(value)
-        .trim();
-
-    let without_ext = file_name
-        .rsplit_once('.')
-        .map(|(left, _)| left)
-        .unwrap_or(file_name);
-
-    let without_p = without_ext
-        .strip_suffix("_P")
-        .or_else(|| without_ext.strip_suffix("_p"))
-        .unwrap_or(without_ext);
-
-    normalize_mod_match_text(without_p)
-}
-
-fn compact_file_stem_for_pairing(value: &str) -> String {
-    compact_match_text(&normalize_installed_file_stem_for_pairing(value))
-}
-
 fn modworkshop_source_has_file_proof(source: &SourceModSummary) -> bool {
     let combined = format!(
         "{} {} {}",
@@ -11347,22 +13188,6 @@ fn token_list(input: &str) -> Vec<String> {
     tokens.sort();
     tokens.dedup();
     tokens
-}
-
-fn source_match_text(summary: &SourceModSummary) -> String {
-    let mut combined = summary.name.clone();
-
-    if let Some(description) = summary.short_description.as_ref() {
-        combined.push(' ');
-        combined.push_str(description);
-    }
-
-    if !summary.tags.is_empty() {
-        combined.push(' ');
-        combined.push_str(&summary.tags.join(" "));
-    }
-
-    normalize_mod_match_text(&combined)
 }
 
 fn source_updated_unix(summary: &SourceModSummary) -> Option<u64> {
@@ -12259,9 +14084,12 @@ fn remove_raid_ww2_bad_install() -> Result<String, String> {
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?;
 
+    let keep_uninstalled = keep_uninstalled_mods_enabled();
     let holding_root = uninstalled_dir()?.join(format!("uninstall_bad_raid_ww2_{}", current_timestamp()));
-    fs::create_dir_all(&holding_root)
-        .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    if keep_uninstalled {
+        fs::create_dir_all(&holding_root)
+            .map_err(|err| format!("Failed to create uninstall holding folder: {}", err))?;
+    }
 
     let mut moved = Vec::new();
     for file_name in ["mod.lua", "mod.xml"] {
@@ -12277,9 +14105,10 @@ fn remove_raid_ww2_bad_install() -> Result<String, String> {
         Err("No RAID WW2 receipt was found and mod.lua/mod.xml were not present in Win64.".to_string())
     } else {
         Ok(format!(
-            "Removed suspected RAID WW2 loose files. Moved {} file(s) to {}.",
+            "Removed suspected RAID WW2 loose files. {} {} file(s){}.",
+            if keep_uninstalled { "Moved" } else { "Deleted" },
             moved.len(),
-            holding_root.display()
+            if keep_uninstalled { format!(" to {}", holding_root.display()) } else { String::new() }
         ))
     }
 }
@@ -12303,6 +14132,11 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
                 confidence: 0,
                 reason: "Rejected source card because it appears to be for another game, not PAYDAY 3.".to_string(),
                 matched_files: Vec::new(),
+                source_file_id: None,
+                source_file_name: None,
+                source_file_category: None,
+                source_file_uploaded_at: None,
+                source_file_version: None,
                 installed_modified_unix: None,
                 source_updated_at: source_mod.updated_at.clone(),
                 source_updated_unix: parse_source_timestamp_to_unix(source_mod.updated_at.as_deref()),
@@ -12317,6 +14151,11 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
         let mut best_modified: Option<u64> = None;
         let mut best_enabled = true;
         let mut best_receipt_live = true;
+        let mut best_source_file_id: Option<String> = None;
+        let mut best_source_file_name: Option<String> = None;
+        let mut best_source_file_category: Option<String> = None;
+        let mut best_source_file_uploaded_at: Option<String> = None;
+        let mut best_source_file_version: Option<String> = None;
         let mut match_kind = "unpaired".to_string();
 
         for receipt in &receipts {
@@ -12332,6 +14171,11 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
                 best_reason = "exact live install receipt source/id match".to_string();
                 best_files = receipt.files.iter().map(|file| file.relative_path.clone()).collect();
                 best_modified = receipt.installed_at_unix;
+                best_source_file_id = receipt.source_file_id.clone();
+                best_source_file_name = receipt.source_file_name.clone();
+                best_source_file_category = receipt.source_file_category.clone();
+                best_source_file_uploaded_at = receipt.source_file_uploaded_at.clone();
+                best_source_file_version = receipt.source_file_version.clone().or(receipt.version.clone());
                 best_enabled = detected_paths
                     .as_ref()
                     .map(|paths| receipt_enabled_internal(paths, receipt))
@@ -12512,6 +14356,11 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
             confidence: if installed { best_score.max(86) } else { best_score.min(85) },
             reason: best_reason,
             matched_files: if installed { best_files } else { Vec::new() },
+            source_file_id: if installed { best_source_file_id } else { None },
+            source_file_name: if installed { best_source_file_name } else { None },
+            source_file_category: if installed { best_source_file_category } else { None },
+            source_file_uploaded_at: if installed { best_source_file_uploaded_at } else { None },
+            source_file_version: if installed { best_source_file_version } else { None },
             installed_modified_unix: best_modified,
             source_updated_at: source_mod.updated_at.clone(),
             source_updated_unix: source_update_unix,
@@ -12654,7 +14503,37 @@ fn is_clean_nexus_summary_for_browser(summary: &SourceModSummary) -> bool {
         && summary.source_id != "unknown"
 }
 
+fn source_summary_is_external_mod_manager(summary: &SourceModSummary) -> bool {
+    let text = format!(
+        "{} {} {} {} {}",
+        summary.name,
+        summary.short_description.as_deref().unwrap_or(""),
+        summary.page_url.as_deref().unwrap_or(""),
+        summary.tags.join(" "),
+        summary.author.as_deref().unwrap_or("")
+    )
+    .to_lowercase();
+
+    let markers = [
+        "tsuki mod manager",
+        "tsukimodmanager",
+        "modrex mod manager",
+        "moolah mod manager",
+        "mod organizer",
+        "vortex",
+        "external mod manager",
+        "mod manager",
+        "modmanager",
+        "manager setup",
+    ];
+
+    markers.iter().any(|marker| text.contains(marker))
+}
+
 fn source_summary_is_payday3_safe(summary: &SourceModSummary) -> bool {
+    if source_summary_is_external_mod_manager(summary) {
+        return false;
+    }
     let text = format!(
         "{} {} {} {} {}",
         summary.name,
@@ -12739,6 +14618,20 @@ fn modworkshop_sort_browser_summaries(mut summaries: Vec<SourceModSummary>, sort
     }
 
     summaries
+}
+
+fn dedupe_modworkshop_summaries_preserve_order(summaries: Vec<SourceModSummary>) -> Vec<SourceModSummary> {
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    let mut deduped = Vec::<SourceModSummary>::new();
+
+    for summary in summaries {
+        let key = summary.source_id.clone();
+        if seen.insert(key) {
+            deduped.push(summary);
+        }
+    }
+
+    deduped
 }
 
 fn nexus_file_names_for_mod(mod_id: &str, api_key: &str) -> Vec<String> {
@@ -12841,60 +14734,6 @@ async fn build_nexus_payday3_index(max_id: u32) -> Result<Vec<SourceModSummary>,
         .await
         .map_err(|err| format!("Nexus index task failed: {:?}", err))?
 }
-
-fn fetch_nexus_deep_index_page(page: u32, api_key: &str, sort: &str) -> Result<Vec<SourceModSummary>, String> {
-    const IDS_PER_PAGE: u32 = 120;
-    const MAX_EMPTY_RANGES: u32 = 8;
-    const CONCURRENT_REQUESTS: usize = 6;
-
-    // Pages 1-5 are the normal website/API buckets. Deep index starts after that.
-    let deep_page = page.saturating_sub(2);
-    let mut start_id = (deep_page * IDS_PER_PAGE) + 1;
-    let mut summaries = Vec::new();
-    let mut empty_ranges = 0;
-
-    while summaries.is_empty() && empty_ranges < MAX_EMPTY_RANGES {
-        let end_id = start_id + IDS_PER_PAGE - 1;
-        let ids: Vec<u32> = (start_id..=end_id).collect();
-
-        for chunk in ids.chunks(CONCURRENT_REQUESTS) {
-            let mut handles = Vec::new();
-
-            for &id in chunk {
-                let api_key_owned = api_key.to_string();
-
-                handles.push(std::thread::spawn(move || -> Option<SourceModSummary> {
-                    let url = format!("https://api.nexusmods.com/v1/games/payday3/mods/{}.json", id);
-                    let value = http_get_json(&url, Some(&api_key_owned)).ok()?;
-
-                    // Detail endpoint already has the best available name/metadata.
-                    // Avoid an extra enrichment request here so deep scan stays fast.
-                    let summary = nexus_summary_from_value(&value);
-
-                    if is_clean_nexus_summary_for_browser(&summary) {
-                        Some(summary)
-                    } else {
-                        None
-                    }
-                }));
-            }
-
-            for handle in handles {
-                if let Ok(Some(summary)) = handle.join() {
-                    summaries.push(summary);
-                }
-            }
-        }
-
-        if summaries.is_empty() {
-            empty_ranges += 1;
-            start_id += IDS_PER_PAGE;
-        }
-    }
-
-    Ok(nexus_sort_browser_summaries(summaries, sort))
-}
-
 
 fn nexus_dedupe_summaries(summaries: Vec<SourceModSummary>) -> Vec<SourceModSummary> {
     let mut map = std::collections::BTreeMap::<String, SourceModSummary>::new();
@@ -13349,81 +15188,94 @@ fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<Source
     })
 }
 
-fn enrich_modworkshop_summary_from_detail(summary: SourceModSummary) -> SourceModSummary {
-    if summary.thumbnail_url.is_some()
-        && summary.banner_url.is_some()
-        && !summary.short_description.as_deref().unwrap_or("").contains("Loaded from the PAYDAY 3 ModWorkshop page")
-        && summary.tags.len() > 2
-    {
-        return summary;
+fn force_payday3_modworkshop_summary(mut summary: SourceModSummary) -> SourceModSummary {
+    if summary.source.eq_ignore_ascii_case("modworkshop") {
+        summary.game_id = summary.game_id.or_else(|| Some(MODWORKSHOP_PAYDAY3_GAME_ID.to_string()));
+        if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case("PAYDAY 3")) {
+            summary.tags.push("PAYDAY 3".to_string());
+        }
     }
 
-    let Ok(detail_html) = http_get_text(&format!("https://modworkshop.net/mod/{}", summary.source_id)) else {
-        return summary;
-    };
-
-    let detail = scrape_modworkshop_detail_from_html(&summary.source_id, &detail_html);
-    let thumbnail = detail.thumbnail_url.or(summary.thumbnail_url.clone());
-    let banner = detail.banner_url.or(summary.banner_url.clone()).or_else(|| thumbnail.clone());
-
-    SourceModSummary {
-        source: summary.source,
-        source_id: summary.source_id,
-        uid: None,
-        game_id: None,
-        name: if is_bad_modworkshop_listing_name(&summary.name) {
-            clean_mod_name(&detail.name)
-        } else {
-            summary.name
-        },
-        author: detail.author.or(summary.author),
-        version: detail.version.or(summary.version),
-        thumbnail_url: thumbnail,
-        banner_url: banner,
-        page_url: summary.page_url,
-        updated_at: detail.updated_at.or(summary.updated_at),
-        downloads: detail.downloads.or(summary.downloads),
-        likes: detail.likes.or(summary.likes),
-        short_description: detail.short_description.or(summary.short_description),
-        tags: if detail.tags.len() > 2 { detail.tags } else { summary.tags },
-    }
+    summary
 }
 
+fn source_summary_search_text(summary: &SourceModSummary) -> String {
+    let mut parts = vec![
+        summary.name.clone(),
+        summary.author.clone().unwrap_or_default(),
+        summary.short_description.clone().unwrap_or_default(),
+        summary.page_url.clone().unwrap_or_default(),
+    ];
+
+    parts.extend(summary.tags.clone());
+    parts.join(" ")
+}
 
 fn score_search_result_for_query(summary: &SourceModSummary, query: &str) -> u32 {
-    let source = normalize_mod_match_text(&summary.name);
+    let title = normalize_mod_match_text(&summary.name);
+    let author = normalize_mod_match_text(summary.author.as_deref().unwrap_or(""));
+    let tags = normalize_mod_match_text(&summary.tags.join(" "));
+    let description = normalize_mod_match_text(summary.short_description.as_deref().unwrap_or(""));
+    let source = normalize_mod_match_text(&source_summary_search_text(summary));
     let query_norm = normalize_mod_match_text(query);
 
     if source.is_empty() || query_norm.is_empty() {
         return 0;
     }
 
+    let title_compact = compact_match_text(&title);
+    let author_compact = compact_match_text(&author);
+    let tags_compact = compact_match_text(&tags);
+    let description_compact = compact_match_text(&description);
     let source_compact = compact_match_text(&source);
     let query_compact = compact_match_text(&query_norm);
 
-    if source_compact == query_compact {
-        return 100;
+    if title_compact == query_compact {
+        return 1000;
     }
 
-    if source_compact.len() > 4 && query_compact.len() > 4
+    if query_compact.len() > 1 && title_compact.contains(&query_compact) {
+        return 920;
+    }
+
+    if query_compact.len() > 1 && author_compact.contains(&query_compact) {
+        return 760;
+    }
+
+    if query_compact.len() > 1 && tags_compact.contains(&query_compact) {
+        return 680;
+    }
+
+    if query_compact.len() > 1 && description_compact.contains(&query_compact) {
+        return 560;
+    }
+
+    if source_compact.len() > 3 && query_compact.len() > 3
         && (source_compact.contains(&query_compact) || query_compact.contains(&source_compact))
     {
-        return 92;
+        return 520;
     }
 
     let source_tokens = token_list(&source);
+    let title_tokens = token_list(&title);
     let query_tokens = token_list(&query_norm);
 
     if source_tokens.is_empty() || query_tokens.is_empty() {
         return 0;
     }
 
-    let common = query_tokens
+    let common_source = query_tokens
         .iter()
         .filter(|token| source_tokens.contains(token))
         .count();
+    let common_title = query_tokens
+        .iter()
+        .filter(|token| title_tokens.contains(token))
+        .count();
 
-    ((common as f32 / query_tokens.len() as f32) * 100.0).round() as u32
+    let source_score = ((common_source as f32 / query_tokens.len() as f32) * 360.0).round() as u32;
+    let title_bonus = ((common_title as f32 / query_tokens.len() as f32) * 260.0).round() as u32;
+    source_score.saturating_add(title_bonus)
 }
 
 
@@ -13480,112 +15332,395 @@ fn modworkshop_summary_with_file_aliases(mut summary: SourceModSummary) -> Sourc
     }
 
     summary.tags = tags;
-    summary
+    force_payday3_modworkshop_summary(summary)
+}
+
+fn modworkshop_search_haystack(summary: &SourceModSummary) -> String {
+    [
+        summary.name.clone(),
+        summary.author.clone().unwrap_or_default(),
+        summary.short_description.clone().unwrap_or_default(),
+        summary.page_url.clone().unwrap_or_default(),
+        summary.tags.join(" "),
+    ]
+    .join(" ")
+    .to_lowercase()
+}
+
+fn modworkshop_search_matches(summary: &SourceModSummary, query: &str) -> bool {
+    let haystack = modworkshop_search_haystack(summary);
+    let query = query.to_lowercase();
+    let tokens = query
+        .split_whitespace()
+        .map(|token| token.trim())
+        .filter(|token| token.len() >= 2)
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return false;
+    }
+
+    haystack.contains(&query)
+        || tokens.iter().all(|token| haystack.contains(*token))
+        || tokens.iter().filter(|token| haystack.contains(*token)).count() >= tokens.len().saturating_sub(1).max(1)
+        || score_search_result_for_query(summary, query.as_str()) >= 5
+}
+
+fn push_unique_modworkshop_result(results: &mut Vec<SourceModSummary>, summary: SourceModSummary) {
+    if summary.source.eq_ignore_ascii_case("modworkshop")
+        && source_summary_is_payday3_safe(&summary)
+        && !results.iter().any(|existing| existing.source_id == summary.source_id)
+    {
+        results.push(force_payday3_modworkshop_summary(summary));
+    }
 }
 
 fn search_modworkshop_mods_for_query_sync(query: String, page: Option<u32>) -> Result<Vec<SourceModSummary>, String> {
     let query = query.trim().to_string();
 
-    if query.len() < 3 {
+    if query.len() < 2 {
         return Ok(Vec::new());
     }
 
     let page = page.unwrap_or(1).max(1);
-    let per_page = 12usize;
+    let per_page = 24usize;
     let encoded = percent_encode_query(&query);
     let mut results = Vec::<SourceModSummary>::new();
+    let mut route_notes = Vec::<String>::new();
+
+    // Cache/index can contribute aliases, but live routes still decide the result set.
+    let database = read_source_index_database();
+    let mut indexed_results = Vec::<SourceModSummary>::new();
+    for record in database.records.values() {
+        if !record.source.eq_ignore_ascii_case("modworkshop") {
+            continue;
+        }
+
+        let mut summary = record.summary.clone();
+        if !record.file_names.is_empty() {
+            let alias_text = record.file_names.join(" ");
+            summary.short_description = Some(format!("{} {}", summary.short_description.clone().unwrap_or_default(), alias_text));
+            for file_name in &record.file_names {
+                if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case(file_name)) {
+                    summary.tags.push(file_name.clone());
+                }
+            }
+        }
+
+        if modworkshop_search_matches(&summary, &query) {
+            push_unique_modworkshop_result(&mut indexed_results, summary);
+        }
+    }
+
+    for summary in indexed_results {
+        push_unique_modworkshop_result(&mut results, summary);
+    }
+
+    // 1) Current public/API search probes. These are kept, but they are no longer trusted as the only path.
+    let post_body_variants = [
+        serde_json::json!({ "query": query.clone(), "limit": 80, "game": "payday-3" }),
+        serde_json::json!({ "search": query.clone(), "limit": 80, "game": "payday-3" }),
+        serde_json::json!({ "query": query.clone(), "limit": 80, "ids": ["payday-3", "PAYDAY 3", "pd3"] }),
+    ];
+
+    for endpoint in [
+        "https://api.modworkshop.net/mods/search",
+        "https://api.modworkshop.net/search/mods",
+        "https://api.modworkshop.net/search",
+    ] {
+        for body in &post_body_variants {
+            match http_post_json(endpoint, body.clone(), 8) {
+                Ok(value) => {
+                    let data = unwrap_data(value);
+                    let mut added = 0usize;
+                    let arrays = [
+                        json_array(&data, &["data", "mods", "results", "items"]),
+                        data.as_array().map(|items| items.iter().collect()).unwrap_or_default(),
+                    ];
+
+                    for array in arrays {
+                        for item in array {
+                            if let Some(summary) = modworkshop_summary_from_api_value(item) {
+                                if modworkshop_search_matches(&summary, &query) {
+                                    push_unique_modworkshop_result(&mut results, summary);
+                                    added += 1;
+                                }
+                            }
+                        }
+                    }
+                    route_notes.push(format!("{} POST added {}", endpoint, added));
+                }
+                Err(error) => route_notes.push(format!("{} POST failed: {}", endpoint, error)),
+            }
+        }
+    }
 
     let api_urls = [
+        // Current public API shape from api.modworkshop.net docs: /games/{game_id}/mods.
+        format!("https://api.modworkshop.net/games/payday-3/mods?query={}&page={}", encoded, page),
+        format!("https://api.modworkshop.net/games/payday-3/mods?search={}&page={}", encoded, page),
+        format!("https://api.modworkshop.net/games/payday-3/mods?name={}&page={}", encoded, page),
+        // Generic endpoint fallbacks retained for older/API-proxy behavior.
         format!("https://api.modworkshop.net/mods?query={}&game=payday-3&page={}", encoded, page),
         format!("https://api.modworkshop.net/mods?search={}&game=payday-3&page={}", encoded, page),
         format!("https://api.modworkshop.net/mods?name={}&game=payday-3&page={}", encoded, page),
-        format!("https://api.modworkshop.net/mods?query={}&game=payday-3", encoded),
+        format!("https://api.modworkshop.net/mods?query={}&game_id=payday-3&page={}", encoded, page),
+        // Legacy PHP API fallback used by older ModWorkshop tooling.
+        format!("https://api.modworkshop.net/api.php?command=Search&query={}&game=payday-3&page={}", encoded, page),
+        format!("https://api.modworkshop.net/api.php?command=SearchMods&query={}&game=payday-3&page={}", encoded, page),
     ];
 
     for url in api_urls {
-        if let Ok(value) = http_get_json(&url, None) {
-            let data = unwrap_data(value);
-            let arrays = [
-                json_array(&data, &["data", "mods", "results", "items"]),
-                data.as_array().map(|items| items.iter().collect()).unwrap_or_default(),
-            ];
-
-            for array in arrays {
-                for item in array {
-                    if let Some(summary) = modworkshop_summary_from_api_value(item) {
-                        if !results.iter().any(|existing| existing.source_id == summary.source_id) {
-                            results.push(summary);
-                        }
+        match http_get_json_fast(&url, 8) {
+            Ok(value) => {
+                let mut added = 0usize;
+                for summary in parse_modworkshop_list(value) {
+                    if modworkshop_search_matches(&summary, &query) {
+                        push_unique_modworkshop_result(&mut results, summary);
+                        added += 1;
                     }
                 }
+                route_notes.push(format!("{} GET added {}", url, added));
             }
+            Err(error) => route_notes.push(format!("{} GET failed: {}", url, error)),
         }
     }
 
+    // 2) Public HTML search/game routes.
     let html_urls = [
-        format!("https://modworkshop.net/search/mods?query={}&game=payday-3&page={}", encoded, page),
-        format!("https://modworkshop.net/search/mods?search={}&game=payday-3&page={}", encoded, page),
+        format!("https://modworkshop.net/g/payday-3?query={}&page={}", encoded, page),
+        format!("https://modworkshop.net/g/payday-3?search={}&page={}", encoded, page),
         format!("https://modworkshop.net/g/payday-3/mods?query={}&page={}", encoded, page),
         format!("https://modworkshop.net/g/payday-3/mods?search={}&page={}", encoded, page),
+        format!("https://modworkshop.net/mods?query={}&game=payday-3&page={}", encoded, page),
+        format!("https://modworkshop.net/mods?search={}&game=payday-3&page={}", encoded, page),
+        format!("https://modworkshop.net/search/mods?query={}&game=payday-3&page={}", encoded, page),
+        format!("https://modworkshop.net/search?query={}&game=payday-3&page={}", encoded, page),
     ];
 
     for url in html_urls {
-        if let Ok(html) = http_get_text(&url) {
-            for id in extract_modworkshop_ids_from_html(&html).into_iter().take(24) {
-                if results.iter().any(|existing| existing.source_id == id) {
-                    continue;
-                }
-
-                let mut summary = scrape_modworkshop_summary_from_listing(&html, &id);
-
-                if is_bad_modworkshop_listing_name(&summary.name) {
-                    if let Ok(detail_html) = http_get_text(&format!("https://modworkshop.net/mod/{}", id)) {
-                        let detail = scrape_modworkshop_detail_from_html(&id, &detail_html);
-                        summary.name = clean_mod_name(&detail.name);
-                        summary.thumbnail_url = detail.thumbnail_url.or(summary.thumbnail_url);
-                        summary.banner_url = detail.banner_url.or(summary.banner_url);
-                        summary.author = detail.author.or(summary.author);
-                        summary.short_description = detail.short_description.or(summary.short_description);
-                        summary.tags = detail.tags;
+        match http_get_text_fast(&url, 10) {
+            Ok(html) => {
+                let mut added = 0usize;
+                for summary in parse_modworkshop_public_page_cards(&html, 80)
+                    .into_iter()
+                    .chain(scrape_modworkshop_public_page_cards_by_block(&html, 80).into_iter())
+                {
+                    if modworkshop_search_matches(&summary, &query) {
+                        push_unique_modworkshop_result(&mut results, summary);
+                        added += 1;
                     }
                 }
-
-                let score = score_search_result_for_query(&summary, &query);
-
-                if score >= 30 && !is_bad_modworkshop_listing_name(&summary.name) {
-                    results.push(summary);
-                }
+                route_notes.push(format!("{} HTML added {}", url, added));
             }
+            Err(error) => route_notes.push(format!("{} HTML failed: {}", url, error)),
         }
     }
 
-    results = results
-        .into_iter()
-        .take(36)
-        .map(|summary| summary)
-        .collect::<Vec<_>>();
+    // 3) Source index. This is instant and catches previously-seen cards/files.
+    let database = read_source_index_database();
+    let mut index_added = 0usize;
+    for record in database.records.values() {
+        if !record.source.eq_ignore_ascii_case("modworkshop") {
+            continue;
+        }
 
-    results.sort_by(|a, b| {
-        score_search_result_for_query(b, &query).cmp(&score_search_result_for_query(a, &query))
+        let mut summary = record.summary.clone();
+        if !record.file_names.is_empty() {
+            let alias_text = record.file_names.join(" ");
+            summary.short_description = Some(format!("{} {}", summary.short_description.clone().unwrap_or_default(), alias_text));
+            for file_name in &record.file_names {
+                if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case(file_name)) {
+                    summary.tags.push(file_name.clone());
+                }
+            }
+        }
+
+        if modworkshop_search_matches(&summary, &query) {
+            push_unique_modworkshop_result(&mut results, summary);
+            index_added += 1;
+        }
+    }
+    route_notes.push(format!("source-index added {}", index_added));
+
+    // 4) Deterministic PAYDAY 3 page crawl. This is the reliable rebuild path when the API search returns zero.
+    // Keep it capped so it does not freeze the app, but wide enough to make normal searches useful.
+    if results.len() < 12 {
+        let mut crawled_pages = 0usize;
+        let start_page = ((page - 1) * 10 + 1).max(1);
+        let end_page = start_page.saturating_add(14);
+
+        for browse_page in start_page..=end_page {
+            if results.len() >= 48 {
+                break;
+            }
+
+            match fetch_modworkshop_mods_page(browse_page, "updated") {
+                Ok(page_mods) => {
+                    crawled_pages += 1;
+                    for summary in page_mods {
+                        if modworkshop_search_matches(&summary, &query) {
+                            push_unique_modworkshop_result(&mut results, summary);
+                        }
+                    }
+                }
+                Err(error) => route_notes.push(format!("crawl page {} failed: {}", browse_page, error)),
+            }
+        }
+        route_notes.push(format!("crawled {} PAYDAY 3 page(s)", crawled_pages));
+    }
+
+    // Enrich only a small front slice so names/file aliases improve without turning search into tar.
+    let mut enriched = Vec::<SourceModSummary>::new();
+    for summary in results.into_iter() {
+        if enriched.len() < 16 {
+            enriched.push(modworkshop_summary_with_file_aliases(summary));
+        } else {
+            enriched.push(summary);
+        }
+    }
+
+    enriched.sort_by(|a, b| {
+        score_search_result_for_query(b, &query)
+            .cmp(&score_search_result_for_query(a, &query))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    results.retain(source_summary_is_payday3_safe);
-    results.dedup_by(|a, b| a.source_id == b.source_id);
+    enriched.retain(source_summary_is_payday3_safe);
+    enriched.dedup_by(|a, b| a.source_id == b.source_id);
 
     let start = ((page - 1) as usize).saturating_mul(per_page);
-    let should_slice_locally = results.len() > start + per_page;
+    let page_results = enriched.into_iter().skip(start).take(per_page).collect::<Vec<_>>();
 
-    let page_results = if should_slice_locally {
-        results.into_iter().skip(start).take(per_page).collect::<Vec<_>>()
-    } else {
-        results.into_iter().take(per_page).collect::<Vec<_>>()
+    if page_results.is_empty() {
+        eprintln!("ModWorkshop search for '{}' returned zero. Routes: {}", query, route_notes.join(" | "));
     }
-    .into_iter()
-    .collect::<Vec<_>>();
 
     upsert_source_index_summaries(&page_results);
     Ok(page_results)
 }
 
+fn modworkshop_sort_query_value(sort: &str) -> &'static str {
+    match sort {
+        "downloads" => "downloads",
+        "liked" | "popular" => "popular",
+        "added" => "published",
+        "updated" | "recent" | _ => "updated",
+    }
+}
+
+fn modworkshop_filter_href_from_html(html: &str, filter: &str) -> Option<String> {
+    let wanted = clean_html_text(filter).to_lowercase();
+    let mut search_start = 0usize;
+
+    while let Some(pos) = html[search_start..].find("<a") {
+        let abs = search_start + pos;
+        let Some(tag_end_rel) = html[abs..].find('>') else { break; };
+        let tag_end = abs + tag_end_rel;
+        let tag = &html[abs..=tag_end];
+        let Some(href) = html_attr(tag, "href") else {
+            search_start = tag_end + 1;
+            continue;
+        };
+        let close = html[tag_end + 1..].find("</a>").map(|value| tag_end + 1 + value).unwrap_or(tag_end + 1);
+        let label = clean_html_text(&html[tag_end + 1..close]).to_lowercase();
+
+        if !label.is_empty() && (label == wanted || label.contains(&wanted) || wanted.contains(&label)) {
+            let absolute = absolutize_source_url("modworkshop", Some(href.clone())).unwrap_or(href);
+            if absolute.contains("category=") || absolute.contains("tag") || absolute.contains("/g/payday-3") {
+                return Some(absolute);
+            }
+        }
+
+        search_start = close.saturating_add(4);
+    }
+
+    None
+}
+
+fn modworkshop_filter_urls(filter: &str, page: u32, sort: &str) -> Vec<String> {
+    let encoded = percent_encode_query(filter);
+    let sort_value = modworkshop_sort_query_value(sort);
+    let page = page.max(1);
+    let mut urls = Vec::new();
+
+    if let Ok(html) = http_get_text_fast("https://modworkshop.net/g/payday-3/mods?page=1", 8) {
+        if let Some(href) = modworkshop_filter_href_from_html(&html, filter) {
+            let sep = if href.contains('?') { "&" } else { "?" };
+            urls.push(format!("{}{}page={}&sort={}", href, sep, page, sort_value));
+            urls.push(format!("{}{}sort={}&page={}", href, sep, sort_value, page));
+        }
+    }
+
+    urls.extend([
+        format!("https://modworkshop.net/g/payday-3/mods?category={}&page={}&sort={}", encoded, page, sort_value),
+        format!("https://modworkshop.net/g/payday-3/mods?tags={}&page={}&sort={}", encoded, page, sort_value),
+        format!("https://modworkshop.net/g/payday-3/mods?tag={}&page={}&sort={}", encoded, page, sort_value),
+        format!("https://modworkshop.net/g/payday-3/mods?search={}&page={}&sort={}", encoded, page, sort_value),
+        format!("https://modworkshop.net/g/payday-3/mods?query={}&page={}&sort={}", encoded, page, sort_value),
+    ]);
+
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn fetch_modworkshop_filter_page_sync(filter: String, page: Option<u32>, sort: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+    let filter = filter.trim().to_string();
+    if filter.is_empty() || filter.eq_ignore_ascii_case("all") {
+        return fetch_modworkshop_mods_page(page.unwrap_or(1), &sort.unwrap_or_else(|| "recent".to_string()));
+    }
+
+    let page = page.unwrap_or(1).max(1);
+    let sort = sort.unwrap_or_else(|| "recent".to_string());
+    let mut results = Vec::<SourceModSummary>::new();
+    let mut notes = Vec::<String>::new();
+
+    for url in modworkshop_filter_urls(&filter, page, &sort) {
+        match http_get_text_fast(&url, 10) {
+            Ok(html) => {
+                let before = results.len();
+                for summary in parse_modworkshop_public_page_cards(&html, 90)
+                    .into_iter()
+                    .chain(scrape_modworkshop_public_page_cards_by_block(&html, 90).into_iter())
+                {
+                    if modworkshop_search_matches(&summary, &filter) || summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&filter)) {
+                        push_unique_modworkshop_result(&mut results, summary);
+                    }
+                }
+                notes.push(format!("{} added {}", url, results.len().saturating_sub(before)));
+            }
+            Err(error) => notes.push(format!("{} failed: {}", url, error)),
+        }
+
+        if results.len() >= 36 {
+            break;
+        }
+    }
+
+    if results.len() < 12 {
+        for summary in search_modworkshop_mods_for_query_sync(filter.clone(), Some(page))? {
+            push_unique_modworkshop_result(&mut results, summary);
+        }
+    }
+
+    results = modworkshop_sort_browser_summaries(results, &sort);
+    results.retain(|summary| source_summary_is_payday3_safe(summary));
+    results.dedup_by(|a, b| a.source_id == b.source_id);
+    upsert_source_index_summaries(&results);
+
+    if results.is_empty() {
+        eprintln!("ModWorkshop filter '{}' returned zero. Routes: {}", filter, notes.join(" | "));
+    }
+
+    Ok(results.into_iter().take(72).collect())
+}
+
+#[tauri::command]
+async fn fetch_modworkshop_filter_page(filter: String, page: Option<u32>, sort: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_modworkshop_filter_page_sync(filter, page, sort))
+        .await
+        .map_err(|err| format!("ModWorkshop filter task failed: {:?}", err))?
+}
 
 #[tauri::command]
 async fn search_modworkshop_mods_for_query(query: String, page: Option<u32>) -> Result<Vec<SourceModSummary>, String> {
@@ -13596,17 +15731,26 @@ async fn search_modworkshop_mods_for_query(query: String, page: Option<u32>) -> 
 
 
 
-fn http_get_json_fast(url: &str, timeout_secs: u64) -> Result<serde_json::Value, String> {
+fn http_get_json_fast_with_api_key(url: &str, timeout_secs: u64, api_key: Option<&str>) -> Result<serde_json::Value, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("TsukiModManager/0.20")
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|err| format!("Failed to create HTTP client: {}", err))?;
 
-    let response = client
+    let mut request = client
         .get(url)
         .header("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
-        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Accept-Language", "en-US,en;q=0.9");
+
+    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        request = request
+            .header("apikey", key)
+            .header("X-API-Key", key)
+            .header("Authorization", format!("Bearer {}", key));
+    }
+
+    let response = request
         .send()
         .map_err(|err| format!("Request failed for {}: {}", url, err))?;
 
@@ -13621,6 +15765,10 @@ fn http_get_json_fast(url: &str, timeout_secs: u64) -> Result<serde_json::Value,
 
     serde_json::from_str(&text)
         .map_err(|err| format!("Failed to parse JSON from {}: {}", url, err))
+}
+
+fn http_get_json_fast(url: &str, timeout_secs: u64) -> Result<serde_json::Value, String> {
+    http_get_json_fast_with_api_key(url, timeout_secs, None)
 }
 
 fn http_get_text_fast(url: &str, timeout_secs: u64) -> Result<String, String> {
@@ -13649,83 +15797,6 @@ fn http_get_text_fast(url: &str, timeout_secs: u64) -> Result<String, String> {
     Ok(text)
 }
 
-fn modworkshop_api_sort_name(sort: &str) -> &'static str {
-    match sort {
-        "downloads" => "downloads",
-        "liked" | "popular" => "likes",
-        "added" => "new",
-        "updated" | "recent" | _ => "updated",
-    }
-}
-
-fn modworkshop_fast_api_urls(page: u32, sort: &str) -> Vec<String> {
-    let page = page.max(1);
-    let sort_name = modworkshop_api_sort_name(sort);
-
-    vec![
-        format!("https://api.modworkshop.net/mods?game=payday-3&page={}&sort={}", page, sort_name),
-        format!("https://api.modworkshop.net/mods?game_id=payday-3&page={}&sort={}", page, sort_name),
-        format!("https://api.modworkshop.net/mods?game=payday-3&page={}", page),
-    ]
-}
-
-fn modworkshop_public_page_url(page: u32) -> String {
-    format!("https://modworkshop.net/g/payday-3/mods?page={}", page.max(1))
-}
-
-fn parse_modworkshop_listing_page(html: &str, page_size: usize) -> Vec<SourceModSummary> {
-    let ids = extract_modworkshop_ids_from_html(html);
-    let mut mods = Vec::new();
-
-    for id in ids.into_iter().take(page_size) {
-        let mut summary = scrape_modworkshop_summary_from_listing(html, &id);
-
-        if is_bad_modworkshop_listing_name(&summary.name) {
-            summary.name = format!("ModWorkshop Mod {}", id);
-        }
-
-        if !summary.tags.iter().any(|tag| tag.to_lowercase().contains("payday")) {
-            summary.tags.push("PAYDAY 3".to_string());
-        }
-
-        mods.push(summary);
-    }
-
-    mods
-}
-
-
-fn modworkshop_live_api_probe_urls(page: u32, sort: &str) -> Vec<String> {
-    let page = page.max(1);
-    let sort_name = match sort {
-        "downloads" => "downloads",
-        "liked" | "popular" => "likes",
-        "added" => "new",
-        "updated" | "recent" | _ => "updated",
-    };
-
-    vec![
-        format!("https://api.modworkshop.net/mods?game=payday-3&page={}&sort={}", page, sort_name),
-        format!("https://api.modworkshop.net/mods?game_id=payday-3&page={}&sort={}", page, sort_name),
-    ]
-}
-
-fn modworkshop_live_page_urls(page: u32, sort: &str) -> Vec<String> {
-    let page = page.max(1);
-    let sort_name = match sort {
-        "downloads" => "downloads",
-        "liked" | "popular" => "popular",
-        "added" => "added",
-        "updated" | "recent" | _ => "updated",
-    };
-
-    vec![
-        format!("https://modworkshop.net/g/payday-3/mods?sort={}&page={}", sort_name, page),
-        format!("https://modworkshop.net/g/payday-3/mods?page={}&sort={}", page, sort_name),
-        format!("https://modworkshop.net/g/payday-3/mods?page={}", page),
-    ]
-}
-
 fn parse_modworkshop_public_page_cards(html: &str, page_size: usize) -> Vec<SourceModSummary> {
     let ids = extract_modworkshop_ids_from_html(html);
     let mut mods = Vec::new();
@@ -13748,60 +15819,27 @@ fn parse_modworkshop_public_page_cards(html: &str, page_size: usize) -> Vec<Sour
 }
 
 
-fn modworkshop_public_browse_urls(page: u32, sort: &str) -> Vec<String> {
-    let page = page.max(1);
-    let stable = format!("https://modworkshop.net/g/payday-3/mods?page={}", page);
-
-    match sort {
-        "downloads" | "liked" | "popular" => vec![
-            format!("https://modworkshop.net/g/payday-3/mods?sort=popular&page={}", page),
-            format!("https://modworkshop.net/g/payday-3/mods?page={}&sort=popular", page),
-            stable,
-        ],
-        "added" => vec![
-            format!("https://modworkshop.net/g/payday-3/mods?sort=published&page={}", page),
-            format!("https://modworkshop.net/g/payday-3/mods?page={}&sort=published", page),
-            stable,
-        ],
-        "updated" | "recent" | _ => vec![stable],
-    }
-}
-
 fn modworkshop_api_browse_probe_urls(page: u32, sort: &str) -> Vec<String> {
     let page = page.max(1);
     let sort_name = match sort {
         "downloads" => "downloads",
-        "liked" | "popular" => "likes",
-        "added" => "new",
-        "updated" | "recent" | _ => "updated",
+        "liked" => "likes",
+        "popular" => "score",
+        "added" | "updated" | "recent" | _ => "published_at",
     };
 
     vec![
-        format!("https://api.modworkshop.net/mods?game=payday-3&page={}&sort={}", page, sort_name),
-        format!("https://api.modworkshop.net/mods?game_id=payday-3&page={}&sort={}", page, sort_name),
+        format!("https://api.modworkshop.net/games/{}/mods?page={}&sort={}", MODWORKSHOP_PAYDAY3_GAME_ID, page, sort_name),
+        format!("https://api.modworkshop.net/games/{}/mods?page={}&sort={}", MODWORKSHOP_PAYDAY3_NUMERIC_GAME_ID, page, sort_name),
+        format!("https://api.modworkshop.net/games/{}/mods?page={}", MODWORKSHOP_PAYDAY3_GAME_ID, page),
     ]
-}
-
-
-fn modworkshop_apply_public_live_rank(mut mods: Vec<SourceModSummary>, page: u32) -> Vec<SourceModSummary> {
-    // Public ModWorkshop pages are already sorted by the selected tab.
-    // The listing HTML often lacks machine-readable timestamps, so preserve
-    // public-page order by assigning a synthetic descending rank timestamp.
-    let base = 9_000_000_000_i64.saturating_sub((page.max(1) as i64).saturating_mul(1000));
-
-    for (index, summary) in mods.iter_mut().enumerate() {
-        if summary.updated_at.is_none() {
-            summary.updated_at = Some(base.saturating_sub(index as i64).to_string());
-        }
-    }
-
-    mods
 }
 
 
 fn modworkshop_game_page_public_urls(page: u32, sort: &str) -> Vec<String> {
     let page = page.max(1);
-    let root = "https://modworkshop.net/g/payday-3";
+    let root = "https://modworkshop.net/g/payday-3/mods";
+    let legacy_root = "https://modworkshop.net/g/payday-3";
 
     let sort_candidates = match sort {
         "downloads" => vec!["downloads", "popular"],
@@ -13812,7 +15850,8 @@ fn modworkshop_game_page_public_urls(page: u32, sort: &str) -> Vec<String> {
 
     let mut urls = Vec::new();
 
-    // The plain game page is the stable route and returns PAYDAY 3-only cards.
+    // The /mods listing is the paginated PAYDAY 3 browser. The game landing page
+    // is kept as a last-ditch compatibility route for older markup.
     urls.push(format!("{}?page={}", root, page));
 
     for sort_name in sort_candidates {
@@ -13820,22 +15859,16 @@ fn modworkshop_game_page_public_urls(page: u32, sort: &str) -> Vec<String> {
         urls.push(format!("{}?page={}&sort={}", root, page, sort_name));
     }
 
+    urls.push(format!("{}?page={}", legacy_root, page));
+
     urls
 }
 
 fn modworkshop_rank_public_page_cards(mut mods: Vec<SourceModSummary>, page: u32) -> Vec<SourceModSummary> {
-    let fallback_base = 1_500_000_000_u64.saturating_sub((page.max(1) as u64).saturating_mul(10_000));
+    let _ = page;
 
-    for (index, summary) in mods.iter_mut().enumerate() {
+    for summary in mods.iter_mut() {
         summary.game_id = Some("payday-3".to_string());
-
-        // Prefer real relative date parsed from the visible card text.
-        // Subtract index so cards with the same "4 days ago" label keep website order.
-        let ranked_time = parse_source_timestamp_to_unix(summary.updated_at.as_deref())
-            .unwrap_or_else(|| fallback_base.saturating_sub(index as u64))
-            .saturating_sub(index as u64);
-
-        summary.updated_at = Some(ranked_time.to_string());
 
         if summary.short_description.as_deref().map(|value| value.contains("Loaded from the PAYDAY 3")).unwrap_or(true) {
             summary.short_description = Some("Live ModWorkshop PAYDAY 3 listing card.".to_string());
@@ -13849,36 +15882,6 @@ fn modworkshop_rank_public_page_cards(mut mods: Vec<SourceModSummary>, page: u32
     mods
 }
 
-
-fn extract_modworkshop_id_positions(html: &str) -> Vec<(String, usize)> {
-    let mut ids = Vec::<(String, usize)>::new();
-    let mut seen = std::collections::BTreeSet::<String>::new();
-    let mut search_start = 0;
-
-    while let Some(pos) = html[search_start..].find("/mod/") {
-        let abs = search_start + pos;
-        let id_start = abs + "/mod/".len();
-        let mut id = String::new();
-
-        for ch in html[id_start..].chars() {
-            if ch.is_ascii_digit() {
-                id.push(ch);
-            } else {
-                break;
-            }
-        }
-
-        let next_start = id_start + id.len();
-
-        if !id.is_empty() && seen.insert(id.clone()) {
-            ids.push((id, abs));
-        }
-
-        search_start = next_start.max(search_start + pos + 5);
-    }
-
-    ids
-}
 
 fn scrape_modworkshop_summary_from_segment(full_html: &str, segment: &str, id: &str, full_center: usize, order_index: usize, title_hint: Option<&str>) -> SourceModSummary {
     let segment_center = segment.find(&format!("/mod/{}", id)).unwrap_or(0);
@@ -13894,12 +15897,8 @@ fn scrape_modworkshop_summary_from_segment(full_html: &str, segment: &str, id: &
     let thumbnail = extract_first_img_near_for_source(segment, segment_center, "modworkshop")
         .or_else(|| extract_first_img_near_for_source(full_html, full_center, "modworkshop"));
 
-    let parsed_update = modworkshop_relative_updated_at(segment);
-
-    let updated_at = parsed_update.or_else(|| {
-        let fallback_base = 1_500_000_000_u64;
-        Some(fallback_base.saturating_sub(order_index as u64).to_string())
-    });
+    let _ = order_index;
+    let updated_at = modworkshop_relative_updated_at(segment);
 
     SourceModSummary {
         source: "modworkshop".to_string(),
@@ -14033,38 +16032,42 @@ fn fetch_modworkshop_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSum
     let page_size = 24usize;
     let mut notes = Vec::new();
 
-    for url in modworkshop_game_page_public_urls(page, sort) {
-        match http_get_text_fast(&url, 18) {
-            Ok(html) => {
-                let ids = extract_modworkshop_ids_from_html(&html);
-                let mut mods = scrape_modworkshop_public_page_cards_by_block(&html, page_size * 2);
+    let prefer_public_order = matches!(sort, "recent" | "updated" | "added");
 
-                mods = modworkshop_sort_browser_summaries(nexus_dedupe_summaries(mods), "updated");
-                mods = modworkshop_rank_public_page_cards(mods, page)
-                    .into_iter()
-                    .take(page_size)
-                    .collect::<Vec<_>>();
+    if prefer_public_order {
+        for url in modworkshop_game_page_public_urls(page, sort) {
+            match http_get_text_fast(&url, 18) {
+                Ok(html) => {
+                    let mods = dedupe_modworkshop_summaries_preserve_order(scrape_modworkshop_public_page_cards_by_block(&html, page_size * 2))
+                        .into_iter()
+                        .map(|summary| force_payday3_modworkshop_summary(summary))
+                        .filter(source_summary_is_payday3_safe)
+                        .take(page_size)
+                        .collect::<Vec<_>>();
 
-                if !mods.is_empty() {
-                    return Ok(mods);
+                    if !mods.is_empty() {
+                        return Ok(modworkshop_rank_public_page_cards(mods, page));
+                    }
+
+                    notes.push(format!("{} parsed zero PAYDAY 3 mod cards from {} byte HTML.", url, html.len()));
                 }
-
-                notes.push(format!("{} parsed zero PAYDAY 3 mod cards from {} byte HTML.", url, html.len()));
+                Err(error) => notes.push(format!("{} failed: {}", url, error)),
             }
-            Err(error) => notes.push(format!("{} failed: {}", url, error)),
         }
     }
 
-    // API remains available as fallback/diagnostic only.
+    // Public ModWorkshop browsing works without an API key. Attach a saved key
+    // when present, but never require one for public PAYDAY 3 browse pages.
+    let modworkshop_api_key = load_settings_internal().modworkshop_api_key;
     for url in modworkshop_api_browse_probe_urls(page, sort) {
-        match http_get_json_fast(&url, 5) {
+        match http_get_json_fast_with_api_key(&url, 8, modworkshop_api_key.as_deref()) {
             Ok(value) => {
                 let mods = parse_modworkshop_list(value)
                     .into_iter()
                     .filter(source_summary_is_payday3_safe)
                     .collect::<Vec<_>>();
 
-                let mods = modworkshop_sort_browser_summaries(nexus_dedupe_summaries(mods), sort)
+                let mods = modworkshop_sort_browser_summaries(dedupe_modworkshop_summaries_preserve_order(mods), sort)
                     .into_iter()
                     .take(page_size)
                     .collect::<Vec<_>>();
@@ -14076,6 +16079,29 @@ fn fetch_modworkshop_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSum
                 notes.push(format!("{} API parsed zero PAYDAY 3 cards.", url));
             }
             Err(error) => notes.push(format!("{} API failed: {}", url, error)),
+        }
+    }
+
+    if !prefer_public_order {
+        for url in modworkshop_game_page_public_urls(page, sort) {
+            match http_get_text_fast(&url, 18) {
+                Ok(html) => {
+                    let mods = modworkshop_sort_browser_summaries(
+                        dedupe_modworkshop_summaries_preserve_order(scrape_modworkshop_public_page_cards_by_block(&html, page_size * 2)),
+                        sort,
+                    )
+                    .into_iter()
+                    .take(page_size)
+                    .collect::<Vec<_>>();
+
+                    if !mods.is_empty() {
+                        return Ok(modworkshop_rank_public_page_cards(mods, page));
+                    }
+
+                    notes.push(format!("{} parsed zero PAYDAY 3 mod cards from {} byte HTML.", url, html.len()));
+                }
+                Err(error) => notes.push(format!("{} failed: {}", url, error)),
+            }
         }
     }
 
@@ -14183,9 +16209,11 @@ pub fn run() {
             check_app_update,
             download_and_launch_app_update,
             open_external_url,
+            open_installed_mod_file_location,
             launch_payday3_vanilla,
             launch_payday3_modded,
             restore_mods_after_vanilla,
+            payday3_runtime_lock_status,
             is_running_as_admin,
             relaunch_tsuki_as_admin,
             open_source_file_download,
@@ -14193,6 +16221,7 @@ pub fn run() {
             install_staged_file_to_game,
             fetch_source_mods_page,
             fetch_modworkshop_browse_live_page,
+            fetch_modworkshop_filter_page,
             diagnose_modworkshop_browse_live,
             match_installed_source_mods,
             diagnose_modworkshop_pairing,
@@ -14229,6 +16258,7 @@ pub fn run() {
             list_mod_profiles,
             save_current_mod_profile,
             apply_mod_profile,
+            delete_mod_profile,
             get_debug_report,
             get_last_install_diagnostic,
             record_runtime_process_diagnostic,
@@ -14239,6 +16269,15 @@ pub fn run() {
             uninstall_pak_mod_files,
             open_pak_mods_folder,
             open_backups_folder,
+            open_mod_profiles_folder,
+            open_app_data_folder,
+            open_cache_folder,
+            get_cache_stats,
+            clear_download_cache,
+            clear_extraction_cache,
+            clear_all_download_cache,
+            save_cache_settings,
+            save_uninstall_storage_settings,
             list_pak_backups,
             open_backup_file,
             inspect_pak_backup,

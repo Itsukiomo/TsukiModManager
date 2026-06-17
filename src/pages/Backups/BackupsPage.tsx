@@ -191,30 +191,6 @@ export function BackupsPage() {
     }
   }
 
-
-  async function restoreBackup(backup: PakBackupInfo) {
-    const confirmed = window.confirm(
-      `Restore backup "${backup.displayName}"?\n\nThis will copy the backup PAK files back into ~mods. If matching files already exist, Tsuki will move the current files into its uninstalled/conflict folder first.`,
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setStatus(`Restoring ${backup.displayName}...`);
-
-    try {
-      const result = await invoke<string>("restore_pak_backup", {
-        fileName: backup.fileName,
-      });
-      setStatus(result);
-      window.dispatchEvent(new CustomEvent("tsuki-data-refresh"));
-      await refreshBackups();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   async function deleteBackup(backup: PakBackupInfo) {
     const confirmed = window.confirm(
       `Delete backup "${backup.displayName}"?\n\nThis deletes the backup zip permanently.`,
@@ -288,62 +264,35 @@ export function BackupsPage() {
   }
 
   return (
-    <section className="page">
-      <div className="page-header">
+    <section className="page backups-clean-page-v2">
+      <div className="page-header backups-hero-v2">
         <div>
           <p className="eyebrow">Restore points</p>
-          <h1>Pak Backups</h1>
-          <p className="page-description">
-            Create named zip backups of Payday 3 pak files from the ~mods folder.
-            Open a backup to inspect its contents inside Tsuki before restore features arrive.
-          </p>
+          <h1>Backups</h1>
+          <p className="page-description">Create and manage local PAK restore points before testing mods.</p>
         </div>
 
         <div className="button-row">
-          <button className="ghost-button compact" type="button" onClick={openBackupsFolder}>
-            Open Backups
-          </button>
-          <button className="ghost-button compact" type="button" onClick={refreshBackups}>
-            Refresh
-          </button>
+          <button className="ghost-button compact" type="button" onClick={openBackupsFolder}>Open Folder</button>
+          <button className="ghost-button compact" type="button" onClick={refreshBackups}>Refresh</button>
         </div>
       </div>
 
-      <div className="card-grid">
-        <article className="card">
-          <h2>Backups</h2>
-          <p>Total named pak backups.</p>
-          <div className="stat-number">{backups.length}</div>
-        </article>
-
-        <article className="card">
-          <h2>Total Space</h2>
-          <p>Space used by all backup zips.</p>
-          <div className="stat-number">{formatBytes(totalBackupSize)}</div>
-        </article>
-
-        <article className="card">
-          <h2>Status</h2>
-          <p>{status}</p>
-        </article>
-      </div>
-
-      <article className="card">
-        <h2>Create Pak Backup</h2>
-        <p>
-          Give every backup a name so you can tell why you made it later. Tsuki adds a
-          timestamp to the file so names do not collide.
-        </p>
-
-        <div className="backup-create-row">
+      <article className="card backup-create-card-v2">
+        <div>
+          <p className="eyebrow">Create</p>
+          <h2>Create backup</h2>
+          <p>Name a restore point before changing a lot of mods.</p>
+        </div>
+        <div className="backup-create-row-v2">
           <input
             className="setting-input"
             value={backupName}
             onChange={(event) => setBackupName(event.target.value)}
-            placeholder="Example: Before installing HUD mods"
+            placeholder="Example: Before testing HUD mods"
             disabled={isBusy}
           />
-          <button className="ghost-button" type="button" onClick={createBackup} disabled={isBusy}>
+          <button className="ghost-button install-button" type="button" onClick={createBackup} disabled={isBusy}>
             {isBusy ? "Creating..." : "Create Backup"}
           </button>
         </div>
@@ -359,63 +308,44 @@ export function BackupsPage() {
               </span>
             </div>
             <div className="backup-progress-track">
-              <div
-                className="backup-progress-fill"
-                style={{ width: `${progressPercent}%` }}
-              />
+              <div className="backup-progress-fill" style={{ width: `${progressPercent}%` }} />
             </div>
           </div>
         )}
       </article>
 
-      <article className="card">
-        <h2>Saved Backups</h2>
+      <article className="card backup-list-card-v2">
+        <div className="backup-list-header-v2">
+          <div>
+            <p className="eyebrow">Saved</p>
+            <h2>Saved backups</h2>
+            <p>{backups.length} backup{backups.length === 1 ? "" : "s"} · {formatBytes(totalBackupSize)} stored · {status}</p>
+          </div>
+        </div>
 
         {backups.length === 0 ? (
-          <p>No backups yet.</p>
+          <div className="backup-empty-state-v2">
+            <strong>No backups yet.</strong>
+            <p>Create one before testing a large mod batch.</p>
+          </div>
         ) : (
-          <div className="backup-list">
+          <div className="backup-list backup-list-v2">
             {backups.map((backup) => (
-              <div className="backup-row" key={backup.fullPath}>
-                <div>
+              <div className="backup-row backup-row-v2" key={backup.fullPath}>
+                <div className="backup-row-main-v2">
                   <strong>{backup.displayName}</strong>
-                  <p>{backup.fileName}</p>
+                  <p title={backup.fileName}>{backup.fileName}</p>
                 </div>
 
-                <span>{formatBytes(backup.sizeBytes)}</span>
-                <span>{formatDateFromUnix(backup.createdUnix)}</span>
+                <div className="backup-meta-v2">
+                  <span>{formatBytes(backup.sizeBytes)}</span>
+                  <span>{formatDateFromUnix(backup.createdUnix)}</span>
+                </div>
 
                 <div className="backup-row-actions">
-                  <button
-                    className="ghost-button compact"
-                    type="button"
-                    onClick={() => inspectBackup(backup)}
-                  >
-                    Open
-                  </button>
-                  <button
-                    className="ghost-button compact"
-                    type="button"
-                    onClick={() => openBackupFile(backup)}
-                  >
-                    Explorer
-                  </button>
-                  <button
-                    className="ghost-button compact"
-                    type="button"
-                    onClick={() => restoreBackup(backup)}
-                    disabled={isBusy}
-                  >
-                    Restore
-                  </button>
-                  <button
-                    className="ghost-button compact danger"
-                    type="button"
-                    onClick={() => deleteBackup(backup)}
-                    disabled={isBusy}
-                  >
-                    Delete
-                  </button>
+                  <button className="ghost-button compact" type="button" onClick={() => inspectBackup(backup)}>Inspect</button>
+                  <button className="ghost-button compact" type="button" onClick={() => openBackupFile(backup)}>Explorer</button>
+                  <button className="ghost-button compact danger" type="button" onClick={() => deleteBackup(backup)} disabled={isBusy}>Delete</button>
                 </div>
               </div>
             ))}
@@ -467,9 +397,7 @@ function BackupInspector({
           <p className="eyebrow backup-inspector-eyebrow">Backup inspector</p>
           <h1>{backup.backup.displayName}</h1>
           <p className="page-description">
-            Inspecting the files inside this backup. Friendly mod names, thumbnails,
-            and mod pages will appear here later after ModWorkshop/Nexus metadata and
-            Tsuki install receipts exist.
+            Inspect the files inside this backup before restoring or deleting it.
           </p>
         </div>
 
@@ -527,7 +455,7 @@ function BackupInspector({
                 onChange={(event) => onSort(event.target.value as BackupSortMode)}
               >
                 <option value="name">Sort: Name</option>
-                <option value="priority">Sort: Priority</option>
+                <option value="priority">Sort: Load Priority</option>
                 <option value="size">Sort: Size</option>
               </select>
             </div>
@@ -565,11 +493,7 @@ function BackupInspector({
             <>
               <div className="backup-detail-icon">📦</div>
               <h3>{selectedFile.fileName}</h3>
-              <p>
-                This is currently a raw backup file entry. Later, this panel will show
-                the connected mod page, thumbnail, author, source, version, and restore
-                comparison when metadata exists.
-              </p>
+              <p>Raw file entry from this backup zip.</p>
 
               <div className="backup-detail-list">
                 <span>Type</span>
