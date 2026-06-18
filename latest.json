@@ -1,7 +1,7 @@
 ﻿{
   "version": "1.8.2",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.8.2/TsukiModManager-v1.8.2.zip",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.8.2/Tsuki%20Mod%20Manager_1.8.2_x64-setup.exe",
   "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v1.8.2",
-  "sha256": "1273D96FA82884221B4BA69BD9158D1517841FDEA78E9C49518D8861D4065C26",
-  "notes": "Release blocker fixes for ModWorkshop browsing, live file downloads, cache safety, update logic, file-level installs, startup performance, and progress handling."
+  "sha256": "49A262F06E6DE72AB0B254983E8C216DC227C3087E67C9CBD43509F3C0505CBA",
+  "notes": "Release blocker fixes for ModWorkshop browsing, live file downloads, cache safety, update logic, file-level installs, startup performance, progress handling, and updater compatibility."
 }
