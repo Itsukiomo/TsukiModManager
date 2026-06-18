@@ -2,6 +2,6 @@
   "version": "1.8.3",
   "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.8.3/Tsuki.Mod.Manager_1.8.3_x64-setup.exe",
   "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v1.8.3",
-  "sha256": "PASTE_HASH_HERE",
+  "sha256": "40F6BFF68FA6EFE627BB40954FC4B11F5D0977EB87F73F7C100BB1E10DA4C180",
   "notes": "Fixed Installed tab rescanning, performance issues, terminal popup windows, ModWorkshop date sorting, stale Home cards, version display issues, and general stability improvements."
 }
