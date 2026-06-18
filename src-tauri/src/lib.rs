@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use zip::write::SimpleFileOptions;
@@ -22,7 +24,7 @@ mod source_http;
 mod nexus;
 mod modworkshop;
 
-const APP_VERSION: &str = "1.8.2";
+const APP_VERSION: &str = "1.8.3";
 const APP_DIR_NAME: &str = "Tsuki Mod Manager";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const DEFAULT_THEME_ID: &str = "moonveil";
@@ -32,6 +34,18 @@ const DEFAULT_THEME_ID: &str = "moonveil";
 const DEFAULT_APP_UPDATE_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Itsukiomo/TsukiModManager/main/latest.json";
 
 static LAUNCH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static PAYDAY_PROCESS_CACHE: Mutex<Option<(u128, bool)>> = Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(target_os = "windows")]
+fn hide_command_window(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_command_window(_command: &mut Command) {}
 
 struct LaunchProgressGuard;
 
@@ -47,6 +61,13 @@ fn acquire_launch_guard() -> Result<LaunchProgressGuard, String> {
     }
 
     Ok(LaunchProgressGuard)
+}
+
+fn now_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 
@@ -3666,8 +3687,7 @@ fn check_update_for_record(record: InstalledStateRecord) -> SourceUpdateStatus {
     status
 }
 
-#[tauri::command]
-fn check_installed_source_updates() -> Result<Vec<SourceUpdateStatus>, String> {
+fn check_installed_source_updates_internal() -> Result<Vec<SourceUpdateStatus>, String> {
     // Receipt-only by design:
     // this checks mods installed/downloaded through Tsuki where source file IDs
     // were saved in receipts/installed-state. Filename-only/manual pairs are
@@ -3690,10 +3710,23 @@ fn check_installed_source_updates() -> Result<Vec<SourceUpdateStatus>, String> {
     Ok(results)
 }
 
+#[tauri::command]
+async fn check_installed_source_updates() -> Result<Vec<SourceUpdateStatus>, String> {
+    tauri::async_runtime::spawn_blocking(check_installed_source_updates_internal)
+        .await
+        .map_err(|err| format!("Update check task failed: {}", err))?
+}
+
+
+fn list_installed_state_records_internal() -> Result<Vec<InstalledStateRecord>, String> {
+    sync_installed_state_database()
+}
 
 #[tauri::command]
-fn list_installed_state_records() -> Result<Vec<InstalledStateRecord>, String> {
-    sync_installed_state_database()
+async fn list_installed_state_records() -> Result<Vec<InstalledStateRecord>, String> {
+    tauri::async_runtime::spawn_blocking(list_installed_state_records_internal)
+        .await
+        .map_err(|err| format!("Installed-state task failed: {}", err))?
 }
 
 
@@ -4007,8 +4040,7 @@ fn set_source_install_enabled(source: String, source_id: String, enabled: bool) 
     set_receipt_mod_enabled_internal(&receipt.id, enabled)
 }
 
-#[tauri::command]
-fn list_managed_installs() -> Result<Vec<ManagedInstallInfo>, String> {
+fn list_managed_installs_internal() -> Result<Vec<ManagedInstallInfo>, String> {
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
@@ -4038,6 +4070,13 @@ fn list_managed_installs() -> Result<Vec<ManagedInstallInfo>, String> {
 
     installs.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
     Ok(installs)
+}
+
+#[tauri::command]
+async fn list_managed_installs() -> Result<Vec<ManagedInstallInfo>, String> {
+    tauri::async_runtime::spawn_blocking(list_managed_installs_internal)
+        .await
+        .map_err(|err| format!("Managed install task failed: {}", err))?
 }
 
 #[tauri::command]
@@ -4656,13 +4695,25 @@ fn launch_payday3_vanilla_direct(paths: &PaydayPaths) -> Result<String, String> 
 
 #[cfg(target_os = "windows")]
 fn payday_process_running() -> bool {
-    let output = match Command::new("tasklist").output() {
+    let now = now_unix_millis();
+    if let Ok(cache) = PAYDAY_PROCESS_CACHE.lock() {
+        if let Some((checked_at, running)) = *cache {
+            if now.saturating_sub(checked_at) < 1_500 {
+                return running;
+            }
+        }
+    }
+
+    let mut command = Command::new("tasklist");
+    hide_command_window(&mut command);
+
+    let output = match command.output() {
         Ok(output) => output,
         Err(_) => return false,
     };
 
     let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    [
+    let running = [
         "payday3client-win64-shipping.exe",
         "payday3-win64-shipping.exe",
         "payday3_win64_shipping.exe",
@@ -4670,7 +4721,13 @@ fn payday_process_running() -> bool {
         "payday3.exe",
     ]
     .iter()
-    .any(|name| text.contains(name))
+    .any(|name| text.contains(name));
+
+    if let Ok(mut cache) = PAYDAY_PROCESS_CACHE.lock() {
+        *cache = Some((now, running));
+    }
+
+    running
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5041,6 +5098,162 @@ fn verify_update_sha256(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn app_update_extract_dir(version: &str) -> Result<PathBuf, String> {
+    let version = semver_string(version).replace('.', "_");
+    let dir = app_update_download_dir()?.join(format!("extracted_{}", version));
+
+    if dir.exists() {
+        fs::remove_dir_all(&dir)
+            .map_err(|err| format!("Failed to clear old extracted update folder {}: {}", dir.display(), err))?;
+    }
+
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create extracted update folder {}: {}", dir.display(), err))?;
+    Ok(dir)
+}
+
+fn extract_update_zip(zip_path: &Path, version: &str) -> Result<PathBuf, String> {
+    let file = File::open(zip_path)
+        .map_err(|err| format!("Failed to open downloaded update ZIP {}: {}", zip_path.display(), err))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|err| format!("Downloaded update is not a readable ZIP: {}", err))?;
+    let extract_dir = app_update_extract_dir(version)?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| format!("Failed to read update ZIP entry {}: {}", index, err))?;
+
+        let Some(enclosed) = entry.enclosed_name().map(|path| path.to_owned()) else {
+            continue;
+        };
+
+        let destination = extract_dir.join(enclosed);
+
+        if entry.is_dir() {
+            fs::create_dir_all(&destination)
+                .map_err(|err| format!("Failed to create update folder {}: {}", destination.display(), err))?;
+            continue;
+        }
+
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Failed to create update folder {}: {}", parent.display(), err))?;
+        }
+
+        let mut output = File::create(&destination)
+            .map_err(|err| format!("Failed to extract update file {}: {}", destination.display(), err))?;
+        io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("Failed to write update file {}: {}", destination.display(), err))?;
+    }
+
+    Ok(extract_dir)
+}
+
+fn collect_update_installer_candidates(root: &Path, candidates: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(root)
+        .map_err(|err| format!("Failed to read update folder {}: {}", root.display(), err))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to read update folder entry: {}", err))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            collect_update_installer_candidates(&path, candidates)?;
+            continue;
+        }
+
+        let lower = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+
+        if lower.ends_with(".exe") || lower.ends_with(".msi") {
+            candidates.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn update_installer_score(path: &Path) -> i32 {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let full = path.display().to_string().to_lowercase();
+    let mut score = 0;
+
+    if name.ends_with(".exe") {
+        score += 100;
+    } else if name.ends_with(".msi") {
+        score += 60;
+    }
+
+    if name.contains("setup") || name.contains("installer") || name.contains("install") {
+        score += 40;
+    }
+
+    if full.contains("\\nsis\\") || full.contains("/nsis/") {
+        score += 25;
+    }
+
+    if full.contains("\\msi\\") || full.contains("/msi/") {
+        score += 10;
+    }
+
+    if name.contains("uninstall") {
+        score -= 200;
+    }
+
+    score
+}
+
+fn find_update_installer(root: &Path) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    collect_update_installer_candidates(root, &mut candidates)?;
+
+    candidates
+        .into_iter()
+        .max_by_key(|path| update_installer_score(path))
+        .ok_or_else(|| format!("Downloaded update package did not contain an EXE or MSI installer in {}.", root.display()))
+}
+
+fn prepare_update_installer(downloaded: &Path, version: &str) -> Result<PathBuf, String> {
+    let lower = downloaded
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    if lower.ends_with(".zip") {
+        let extract_dir = extract_update_zip(downloaded, version)?;
+        return find_update_installer(&extract_dir);
+    }
+
+    if lower.ends_with(".exe") || lower.ends_with(".msi") || lower.ends_with(".appinstaller") || lower.ends_with(".msix") {
+        return Ok(downloaded.to_path_buf());
+    }
+
+    Err(format!(
+        "Downloaded update file {} is not a supported installer or ZIP package.",
+        downloaded.display()
+    ))
+}
+
+fn launch_update_installer(installer: &Path) -> Result<(), String> {
+    let installer_string = installer.display().to_string();
+    let mut command = Command::new("cmd");
+    hide_command_window(&mut command);
+    command
+        .args(["/C", "start", ""])
+        .arg(&installer_string)
+        .spawn()
+        .map_err(|err| format!("Downloaded update but failed to launch installer {}: {}", installer.display(), err))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn download_and_launch_app_update(manifest_url: Option<String>) -> Result<String, String> {
     let status = check_app_update_internal(manifest_url)?;
@@ -5069,17 +5282,14 @@ fn download_and_launch_app_update(manifest_url: Option<String>) -> Result<String
         verify_update_sha256(&destination, hash)?;
     }
 
-    let destination_string = destination.display().to_string();
-    Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(&destination_string)
-        .spawn()
-        .map_err(|err| format!("Downloaded update but failed to launch installer: {}", err))?;
+    let installer = prepare_update_installer(&destination, &latest)?;
+    launch_update_installer(&installer)?;
 
     Ok(format!(
-        "Downloaded Tsuki {} to {} and launched the installer. Close Tsuki when the installer asks.",
+        "Downloaded Tsuki {} to {} and launched installer {}. Close Tsuki when the installer asks.",
         latest,
-        destination.display()
+        destination.display(),
+        installer.display()
     ))
 }
 
@@ -5301,7 +5511,9 @@ fn open_installed_mod_file_location(
 
 #[tauri::command]
 fn open_nexus_login_page() -> Result<String, String> {
-    Command::new("cmd")
+    let mut command = Command::new("cmd");
+    hide_command_window(&mut command);
+    command
         .args(["/C", "start", "", "https://www.nexusmods.com/users/myaccount?tab=api"])
         .spawn()
         .map_err(|err| format!("Failed to open Nexus account page: {}", err))?;
@@ -5440,8 +5652,10 @@ fn detect_payday3_path() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn scan_pak_mods() -> Result<PakScanResult, String> {
-    scan_pak_mods_internal()
+async fn scan_pak_mods() -> Result<PakScanResult, String> {
+    tauri::async_runtime::spawn_blocking(scan_pak_mods_internal)
+        .await
+        .map_err(|err| format!("PAK scan task failed: {}", err))?
 }
 
 fn resolve_installed_file_path(paths: &PaydayPaths, file_name: &str) -> Option<PathBuf> {
@@ -9237,7 +9451,9 @@ fn open_http_url(url: &str) -> Result<String, String> {
         return Err("Only http/https URLs can be opened.".to_string());
     }
 
-    Command::new("cmd")
+    let mut command = Command::new("cmd");
+    hide_command_window(&mut command);
+    command
         .args(["/C", "start", "", trimmed])
         .spawn()
         .map_err(|err| format!("Failed to open URL: {}", err))?;
@@ -10490,7 +10706,9 @@ fn extract_native_windows_archive(archive_path: &Path, label: &str) -> Result<Pa
         return Err("Windows native tar.exe was not found.".to_string());
     }
 
-    let status = Command::new(&tar)
+    let mut command = Command::new(&tar);
+    hide_command_window(&mut command);
+    let status = command
         .arg("-xf")
         .arg(archive_path)
         .arg("-C")
@@ -11377,7 +11595,9 @@ fn extract_external_archive(archive_path: &Path, label: &str) -> Result<PathBuf,
         .to_lowercase();
 
     let status = if tool_name.contains("winrar") {
-        Command::new(&tool)
+        let mut command = Command::new(&tool);
+        hide_command_window(&mut command);
+        command
             .arg("x")
             .arg("-ibck")
             .arg("-y")
@@ -11386,7 +11606,9 @@ fn extract_external_archive(archive_path: &Path, label: &str) -> Result<PathBuf,
             .status()
             .map_err(|err| format!("Failed to run {}: {}", tool.display(), err))?
     } else {
-        Command::new(&tool)
+        let mut command = Command::new(&tool);
+        hide_command_window(&mut command);
+        command
             .arg("x")
             .arg("-y")
             .arg(format!("-o{}", output_dir.display()))

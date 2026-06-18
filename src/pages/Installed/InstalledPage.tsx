@@ -269,6 +269,48 @@ interface CachedPairState {
   matches: Record<string, InstalledSourceMatch>;
 }
 
+interface InstalledSessionCache {
+  savedAt: number;
+  invalidatedAt: number;
+  scanResult: PakScanResult | null;
+  sourceMods: SourceModSummary[];
+  matches: Record<string, InstalledSourceMatch>;
+  status: string;
+  pairingStatus: string;
+  sourceCacheAge: string;
+  sourceCacheBuckets: number;
+  runtimeLock: RuntimeLockStatus | null;
+}
+
+const INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY = "tsuki-installed-session-cache-invalidated-at";
+const INSTALLED_SESSION_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+let installedSessionCache: InstalledSessionCache | null = null;
+
+function installedSessionInvalidatedAt() {
+  const raw = Number(window.sessionStorage.getItem(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY) ?? "0");
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+function readInstalledSessionCache(): InstalledSessionCache | null {
+  if (!installedSessionCache) return null;
+  if (Date.now() - installedSessionCache.savedAt > INSTALLED_SESSION_CACHE_MAX_AGE_MS) return null;
+  if (installedSessionCache.invalidatedAt < installedSessionInvalidatedAt()) return null;
+  if (!installedSessionCache.scanResult) return null;
+  return installedSessionCache;
+}
+
+function writeInstalledSessionCache(cache: Omit<InstalledSessionCache, "savedAt" | "invalidatedAt">) {
+  installedSessionCache = {
+    ...cache,
+    savedAt: Date.now(),
+    invalidatedAt: installedSessionInvalidatedAt(),
+  };
+}
+
+function clearInstalledSessionCache() {
+  installedSessionCache = null;
+}
+
 function installedFileSignature(files: PakModFile[]) {
   return files
     .map((file) => `${enabledFileName(file.fileName).toLowerCase()}|${file.sizeBytes}`)
@@ -1494,14 +1536,15 @@ function sortPaired(items: PairedInstalledMod[], sortMode: SortMode) {
 
 
 export function InstalledPage() {
-  const [scanResult, setScanResult] = useState<PakScanResult | null>(null);
-  const [sourceMods, setSourceMods] = useState<SourceModSummary[]>([]);
-  const [matches, setMatches] = useState<Record<string, InstalledSourceMatch>>({});
-  const [status, setStatus] = useState("Ready to scan installed mods.");
-  const [runtimeLock, setRuntimeLock] = useState<RuntimeLockStatus | null>(null);
-  const [pairingStatus, setPairingStatus] = useState("Open Browse first so Tsuki has source cards to pair.");
-  const [sourceCacheAge, setSourceCacheAge] = useState("unknown");
-  const [sourceCacheBuckets, setSourceCacheBuckets] = useState(0);
+  const sessionCache = useMemo(() => readInstalledSessionCache(), []);
+  const [scanResult, setScanResult] = useState<PakScanResult | null>(() => sessionCache?.scanResult ?? null);
+  const [sourceMods, setSourceMods] = useState<SourceModSummary[]>(() => sessionCache?.sourceMods ?? []);
+  const [matches, setMatches] = useState<Record<string, InstalledSourceMatch>>(() => sessionCache?.matches ?? {});
+  const [status, setStatus] = useState(() => sessionCache?.status ?? "Ready to scan installed mods.");
+  const [runtimeLock, setRuntimeLock] = useState<RuntimeLockStatus | null>(() => sessionCache?.runtimeLock ?? null);
+  const [pairingStatus, setPairingStatus] = useState(() => sessionCache?.pairingStatus ?? "Open Browse first so Tsuki has source cards to pair.");
+  const [sourceCacheAge, setSourceCacheAge] = useState(() => sessionCache?.sourceCacheAge ?? "unknown");
+  const [sourceCacheBuckets, setSourceCacheBuckets] = useState(() => sessionCache?.sourceCacheBuckets ?? 0);
   const [searchQuery, setSearchQuery] = useState("");
   const [view] = useState<InstalledView>("all");
   const [sortMode, setSortMode] = useState<SortMode>("name");
@@ -1534,6 +1577,20 @@ export function InstalledPage() {
 
   const rawFiles = scanResult?.pakMods ?? [];
   const groups = useMemo(() => groupInstalledFiles(rawFiles), [rawFiles]);
+
+  useEffect(() => {
+    if (!scanResult) return;
+    writeInstalledSessionCache({
+      scanResult,
+      sourceMods,
+      matches,
+      status,
+      pairingStatus,
+      sourceCacheAge,
+      sourceCacheBuckets,
+      runtimeLock,
+    });
+  }, [matches, pairingStatus, runtimeLock, scanResult, sourceCacheAge, sourceCacheBuckets, sourceMods, status]);
 
   useEffect(() => {
     const pruned = pruneMissingSkippedGroups(unpairableGroups, groups);
@@ -1909,6 +1966,7 @@ export function InstalledPage() {
     }
 
     installedRefreshBusyRef.current = true;
+    clearInstalledSessionCache();
     void refreshRuntimeLock();
     setStatus("Scanning installed pak files...");
     reportTaskProgress("Scan Installed", 12, "Scanning installed files...");
@@ -1918,7 +1976,6 @@ export function InstalledPage() {
       const prunePromise = invoke<string>("prune_stale_install_receipts").catch(() => "");
       const scan = await invoke<PakScanResult>("scan_pak_mods");
       reportTaskProgress("Scan Installed", 45, `Found ${scan.pakFileCount} PAK-family file(s).`);
-      setScanResult(scan);
 
       const pairState = loadPairState(scan.pakMods);
       const cache = loadSourceModsFromCache();
@@ -1964,18 +2021,21 @@ export function InstalledPage() {
           : filterPayday3SourceMods(pairState.sourceMods);
 
         const mergedReceiptFirst = { ...pairState.matches, ...receiptMatches };
+        setScanResult(scan);
         setSourceMods(hydratedSources);
         setMatches(mergedReceiptFirst);
         setSourceCacheAge(cacheAge(pairState.savedAt));
         setSourceCacheBuckets(cache.cacheBuckets + 1);
         setPairingStatus(`Loaded cached pair state from ${cacheAge(pairState.savedAt)} ago and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). No background re-pairing was started.`);
       } else if (indexedSources.length > 0) {
+        setScanResult(scan);
         setSourceMods(filterPayday3SourceMods(indexedSources));
         setMatches(receiptMatches);
         setSourceCacheAge(cacheAge(cache.newestCache));
         setSourceCacheBuckets(cache.cacheBuckets + (backendIndex.length > 0 ? 1 : 0));
         setPairingStatus(`Loaded ${indexedSources.length} source/state records and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). Press Re-pair/Search Pair only when you want manual matching work.`);
       } else {
+        setScanResult(scan);
         setPairingStatus("No source cache found yet. Browse mods first, or use Auto Pair manually.");
       }
 
@@ -3459,13 +3519,19 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   void pairAllSources;
 
   useEffect(() => {
-    initialRefreshTimerRef.current = window.setTimeout(() => {
-      initialRefreshTimerRef.current = null;
-      void refreshInstalled();
-    }, 900);
+    if (sessionCache) {
+      setStatus("Loaded installed library from session cache.");
+      void refreshRuntimeLock();
+    } else {
+      initialRefreshTimerRef.current = window.setTimeout(() => {
+        initialRefreshTimerRef.current = null;
+        void refreshInstalled();
+      }, 900);
+    }
+
     const timer = window.setInterval(() => {
       void refreshRuntimeLock();
-    }, 2500);
+    }, 5000);
     return () => {
       if (initialRefreshTimerRef.current !== null) {
         window.clearTimeout(initialRefreshTimerRef.current);

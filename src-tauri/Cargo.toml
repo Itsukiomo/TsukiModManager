@@ -1,6 +1,6 @@
 [package]
 name = "tsukimodmanagerapp"
-version = "1.8.2"
+version = "1.8.3"
 description = "Tsuki Mod Manager"
 authors = ["you"]
 edition = "2021"

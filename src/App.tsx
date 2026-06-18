@@ -84,6 +84,7 @@ class PageCrashGuard extends Component<{ pageName: string; children: ReactNode }
 
 const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v1";
 const TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS = 30 * 60 * 1000;
+const INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY = "tsuki-installed-session-cache-invalidated-at";
 
 interface ReceiptUpdateCheckCache {
   savedAt: number;
@@ -1301,6 +1302,15 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("tsuki-active-page", activePage);
   }, [activePage]);
+
+  useEffect(() => {
+    const invalidateInstalledCache = () => {
+      window.sessionStorage.setItem(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, String(Date.now()));
+    };
+
+    window.addEventListener("tsuki-data-refresh", invalidateInstalledCache);
+    return () => window.removeEventListener("tsuki-data-refresh", invalidateInstalledCache);
+  }, []);
 
   useEffect(() => {
     const clearProgressTimer = () => {

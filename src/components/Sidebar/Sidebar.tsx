@@ -63,9 +63,9 @@ export function Sidebar({ activePage, onChangePage, taskProgress, onOpenDebug }:
       )}
 
       <div className="sidebar-footer" onDoubleClick={onOpenDebug} title="Double-click to open debug panel">
-        <strong>v1.8.2</strong>
+        <strong>v1.8.3</strong>
         <br />
-        Setup + debug polish.
+        Release polish.
       </div>
     </aside>
   );

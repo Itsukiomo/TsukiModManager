@@ -79,7 +79,10 @@ interface HomePageProps {
   refreshTick: number;
 }
 
-const HOME_LIVE_CACHE_KEY = "tsuki-home-live-state:v1.8.2";
+const HOME_LIVE_CACHE_KEY = "tsuki-home-live-state:v1.8.3";
+const HOME_LEGACY_CACHE_KEYS = ["tsuki-home-live-state:v1.8.2"];
+const HOME_CACHE_MAX_AGE_MS = 20 * 60 * 1000;
+const HOME_MODWORKSHOP_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 const HOME_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const HOME_FOCUS_REFRESH_MS = 2 * 60 * 1000;
 const HOME_DETAIL_ENRICH_LIMIT = 3;
@@ -110,9 +113,14 @@ function readHomeLiveCache(): HomeLiveCache | null {
 function writeHomeLiveCache(cache: HomeLiveCache) {
   try {
     window.localStorage.setItem(HOME_LIVE_CACHE_KEY, JSON.stringify(cache));
+    for (const key of HOME_LEGACY_CACHE_KEYS) window.localStorage.removeItem(key);
   } catch {
     // Optional dashboard cache.
   }
+}
+
+function cacheIsFresh(cache: HomeLiveCache | null, maxAge = HOME_CACHE_MAX_AGE_MS) {
+  return Boolean(cache?.savedAt && Date.now() - cache.savedAt < maxAge);
 }
 
 function pakDisplayName(fileName: string) {
@@ -166,7 +174,43 @@ function sourceSummaryFromInstalledRecord(record: InstalledStateRecord): SourceM
   };
 }
 
-function homeTimeValue(mod: SourceModSummary) {
+function relativeHomeDateMs(raw: string) {
+  const lower = raw.toLowerCase().trim();
+  const now = Date.now();
+
+  if (lower === "just now" || lower.includes("moments ago")) return now;
+
+  const compactMatch = lower.match(/^(\d+)\s*([mhdw])\s*(?:ago)?$/);
+  if (compactMatch) {
+    const amount = Number(compactMatch[1]);
+    const unit = compactMatch[2];
+    const multiplier =
+      unit === "m" ? 60 * 1000
+        : unit === "h" ? 60 * 60 * 1000
+          : unit === "d" ? 24 * 60 * 60 * 1000
+            : 7 * 24 * 60 * 60 * 1000;
+    return now - amount * multiplier;
+  }
+
+  const wordMatch = lower.match(/\b(a|an|\d+)\s+(minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks|month|months|year|years)\s+ago\b/);
+  if (!wordMatch) return 0;
+
+  const amount = wordMatch[1] === "a" || wordMatch[1] === "an" ? 1 : Number(wordMatch[1]);
+  if (!Number.isFinite(amount)) return 0;
+
+  const unit = wordMatch[2];
+  const multiplier =
+    unit.startsWith("min") ? 60 * 1000
+      : unit.startsWith("hour") || unit.startsWith("hr") ? 60 * 60 * 1000
+        : unit.startsWith("day") ? 24 * 60 * 60 * 1000
+          : unit.startsWith("week") ? 7 * 24 * 60 * 60 * 1000
+            : unit.startsWith("month") ? 30 * 24 * 60 * 60 * 1000
+              : 365 * 24 * 60 * 60 * 1000;
+
+  return now - amount * multiplier;
+}
+
+function homeUpdatedAtMs(mod: SourceModSummary) {
   const raw = String(mod.updatedAt ?? "").trim();
   if (!raw) return 0;
 
@@ -176,15 +220,17 @@ function homeTimeValue(mod: SourceModSummary) {
   }
 
   const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? parsed : 0;
+  if (Number.isFinite(parsed)) return parsed;
+
+  return relativeHomeDateMs(raw);
 }
 
 function sortHomeSourceMods(mods: SourceModSummary[]) {
-  return [...mods].sort((a, b) => homeTimeValue(b) - homeTimeValue(a));
+  return [...mods].sort((a, b) => homeUpdatedAtMs(b) - homeUpdatedAtMs(a));
 }
 
 function homeUpdatedLabel(mod: SourceModSummary) {
-  const timestamp = homeTimeValue(mod);
+  const timestamp = homeUpdatedAtMs(mod);
   if (!timestamp) return null;
 
   const diff = Math.max(0, Date.now() - timestamp);
@@ -239,6 +285,15 @@ function mergeHomeMods(source: "nexus" | "modworkshop", ...groups: SourceModSumm
   }
 
   return sortHomeSourceMods(result).slice(0, 8);
+}
+
+function cleanLiveHomeMods(source: "nexus" | "modworkshop", mods: SourceModSummary[]) {
+  return mergeHomeMods(source, mods.filter((mod) => {
+    if (!mod || mod.source !== source || !mod.sourceId || !mod.name?.trim()) return false;
+    if (mod.sourceId === "unknown") return false;
+    if (mod.pageUrl && source === "modworkshop" && !mod.pageUrl.includes("modworkshop.net")) return false;
+    return true;
+  }));
 }
 
 function cleanHomeDescription(text?: string | null) {
@@ -332,7 +387,9 @@ function loadCachedHomeModsBySource(): CachedSourceMods {
 
   return {
     nexus: mergeHomeMods("nexus", mods.nexus),
-    modworkshop: mergeHomeMods("modworkshop", mods.modworkshop),
+    // ModWorkshop Home membership must come from the live public listing.
+    // Old source-index records can include deleted or unavailable cards.
+    modworkshop: [],
   };
 }
 
@@ -446,16 +503,18 @@ function HomeModSection({
 
 export function HomePage({ onOpenPage, onOpenModInApp, refreshTick }: HomePageProps) {
   const cachedHome = useMemo(() => readHomeLiveCache(), []);
-  const cachedSourceMods = useMemo(() => cachedHome ? { nexus: [], modworkshop: [] } : loadCachedHomeModsBySource(), [cachedHome]);
-  const [nexusMods, setNexusMods] = useState<SourceModSummary[]>(() => cachedHome?.nexusMods?.length ? cachedHome.nexusMods : cachedSourceMods.nexus);
-  const [modworkshopMods, setModworkshopMods] = useState<SourceModSummary[]>(() => cachedHome?.modworkshopMods?.length ? cachedHome.modworkshopMods : cachedSourceMods.modworkshop);
-  const [installedMods, setInstalledMods] = useState<SourceModSummary[]>(() => cachedHome?.installedMods ?? []);
-  const [localPakMods, setLocalPakMods] = useState<PakModFile[]>(() => cachedHome?.localPakMods ?? []);
-  const [cachedInstalledSourceKeys, setCachedInstalledSourceKeys] = useState<string[]>(() => cachedHome?.installedSourceKeys ?? []);
-  const [cachedInstalledNames, setCachedInstalledNames] = useState<string[]>(() => cachedHome?.installedNames ?? []);
+  const freshHomeCache = cacheIsFresh(cachedHome) ? cachedHome : null;
+  const freshModWorkshopHomeCache = cacheIsFresh(cachedHome, HOME_MODWORKSHOP_CACHE_MAX_AGE_MS) ? cachedHome : null;
+  const cachedSourceMods = useMemo(() => freshHomeCache ? { nexus: [], modworkshop: [] } : loadCachedHomeModsBySource(), [freshHomeCache]);
+  const [nexusMods, setNexusMods] = useState<SourceModSummary[]>(() => freshHomeCache?.nexusMods?.length ? cleanLiveHomeMods("nexus", freshHomeCache.nexusMods) : cachedSourceMods.nexus);
+  const [modworkshopMods, setModworkshopMods] = useState<SourceModSummary[]>(() => freshModWorkshopHomeCache?.modworkshopMods?.length ? cleanLiveHomeMods("modworkshop", freshModWorkshopHomeCache.modworkshopMods) : []);
+  const [installedMods, setInstalledMods] = useState<SourceModSummary[]>(() => freshHomeCache?.installedMods ?? []);
+  const [localPakMods, setLocalPakMods] = useState<PakModFile[]>(() => freshHomeCache?.localPakMods ?? []);
+  const [cachedInstalledSourceKeys, setCachedInstalledSourceKeys] = useState<string[]>(() => freshHomeCache?.installedSourceKeys ?? []);
+  const [cachedInstalledNames, setCachedInstalledNames] = useState<string[]>(() => freshHomeCache?.installedNames ?? []);
   const [managed, setManaged] = useState<ManagedInstallInfo[]>([]);
   const [installedState, setInstalledState] = useState<InstalledStateRecord[]>([]);
-  const [status, setStatus] = useState(cachedHome ? "Ready." : "Loading library...");
+  const [status, setStatus] = useState(freshHomeCache ? "Ready." : "Loading library...");
   const [feedBusy, setFeedBusy] = useState(false);
   const feedBusyRef = useRef(false);
   const lastHomeRefreshRef = useRef(0);
@@ -583,15 +642,13 @@ export function HomePage({ onOpenPage, onOpenModInApp, refreshTick }: HomePagePr
       const liveNexus = nexus.status === "fulfilled" ? nexus.value : [];
       const liveModworkshop = modworkshop.status === "fulfilled" ? modworkshop.value : [];
       const indexedNexus = indexed.filter((mod) => mod.source === "nexus");
-      const indexedModworkshop = indexed.filter((mod) => mod.source === "modworkshop");
-
       const nextNexus = liveNexus.length > 0
-        ? mergeHomeMods("nexus", liveNexus)
+        ? cleanLiveHomeMods("nexus", liveNexus)
         : mergeHomeMods("nexus", indexedNexus, cachedSourceMods.nexus);
 
       const nextModworkshop = liveModworkshop.length > 0
-        ? mergeHomeMods("modworkshop", liveModworkshop)
-        : mergeHomeMods("modworkshop", indexedModworkshop, cachedSourceMods.modworkshop);
+        ? cleanLiveHomeMods("modworkshop", liveModworkshop)
+        : [];
 
       const nextManaged = installs.status === "fulfilled" ? installs.value : managed;
       const sourceKeySet = new Set<string>();

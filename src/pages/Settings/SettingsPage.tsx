@@ -131,6 +131,7 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
     try {
       const result = await invoke<string>("save_game_path", { gamePath: manualPath });
       setSaveStatus(result);
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
       await detectPayday3();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));
@@ -142,6 +143,7 @@ export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps
       const result = await invoke<string>("clear_game_path");
       setManualPath("");
       setSaveStatus(result);
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
       await detectPayday3();
     } catch (error) {
       setSaveStatus(error instanceof Error ? error.message : String(error));

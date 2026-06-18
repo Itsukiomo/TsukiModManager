@@ -62,6 +62,7 @@ export function ProfilesPage() {
     try {
       const result = await invoke<string>("apply_mod_profile", { profileId: profile.id });
       setStatus(result);
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
       await refreshProfiles();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
