@@ -4,6 +4,8 @@
 
 The owner explicitly authorized public release of Tsuki 2.0.3 and signed Outlast loader 1.0.2 on 2026-10-10, lifting the earlier publication hold. Earlier hold statements below are historical qualification checkpoints, not the current authorization state.
 
+Both releases are now public: [Tsuki 2.0.3](https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.3) and [Outlast loader 1.0.2](https://github.com/Itsukiomo/OutlastTrialsNativePakLoader/releases/tag/v1.0.2). All seven uploaded app assets and all three signed loader assets matched their local SHA-256 hashes and sizes. The installer-only ZIP was copied and hash-verified in the requested Honk folder; it contains only the tested installer and release notes.
+
 - Fresh Rust suite: 92 passed, 11 opt-in checks ignored. Production signed loader-bundle qualification passed separately.
 - Fresh profile workflow/version, universal runtime, source authentication/file selection, encoding, installed presence, dependency-link and command-registry checks passed. The command audit covers 160 registered commands; dependency links cover 43 records and 16 profile click targets.
 - Final Tauri build produced MSI and NSIS installers. The first installer gate caught stale v2.0.2 startup/sidebar labels; both were corrected before rebuilding.

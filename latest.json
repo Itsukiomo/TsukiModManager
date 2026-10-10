@@ -1,7 +1,7 @@
 {
-  "version": "2.0.1",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.1/Tsuki.Mod.Manager_2.0.1_x64-setup.exe",
-  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.1",
-  "sha256": "7cf92079cffda9f13e6c7afe5d91885c18468f0482308a351844d5a065a5f1c9",
-  "notes": "Fixes multi-game Nexus browsing, skipped results between pages, premature pagination stops, hidden cache substitutions, Borderlands Enhanced source selection, and source-switch loading races."
+  "version": "2.0.3",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.3/Tsuki.Mod.Manager_2.0.3_x64-setup.exe",
+  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.3",
+  "sha256": "2edb9bf9c340d0bbb0572f8cb43ec85f5f645130e8b7968a0897be10361ec034",
+  "notes": "Fixes Nexus downloads, profile dependencies, exact update matching, Creator install routes, mod enable/disable and Outlast Steam launching. Supports signed Outlast loader 1.0.2 movie and No-Intro fixes."
 }
