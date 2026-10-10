@@ -22,6 +22,8 @@ export interface DependencyDefinition {
   releaseUrl?: string;
   installableByTsuki?: boolean;
   automaticInstallSafe?: boolean;
+  managedToolDownload?: boolean;
+  thumbnailUrl?: string | null;
   required?: boolean;
   recommended?: boolean;
   optional?: boolean;
@@ -43,9 +45,20 @@ export interface DynamicDependencyInput {
   url?: string;
   notes?: string;
   versionConstraint?: string;
+  thumbnailUrl?: string | null;
 }
 
-export const DEPENDENCY_CATALOG = catalogJson as DependencyDefinition[];
+const managedDependencyIds = new Set([
+  "pd2-superblt-x64", "pd2-beardlib", "pd2-legendary-armour-skins", "pdth-mod-overrides", "pd3-ue5-ue4ss-allow-pak",
+  "borderlands-willow1-classic", "borderlands-willow1-enhanced", "borderlands2-willow2",
+  "borderlands3-oak", "borderlands4-oak2", "borderlands-plugin-loader", "borderlands-open-hotfix-loader",
+  "re-reframework", "mhw-reframework-nexus", "mhw-catlib",
+]);
+export const DEPENDENCY_CATALOG: DependencyDefinition[] = (catalogJson as DependencyDefinition[]).map((dependency) => {
+  const managed = managedDependencyIds.has(dependency.id) || (dependency.id.startsWith("cyberpunk-") && Boolean(dependency.nexus));
+  const managedToolDownload = ["outlast-iris", "outlast-janus", "outlast-odessa", "re-fluffy-mod-manager", "spiderman-overstrike-remastered", "borderlands2-openblcmm"].includes(dependency.id);
+  return { ...dependency, managedToolDownload, ...(managed ? { installableByTsuki: true, automaticInstallSafe: true } : {}) };
+});
 
 function normalizeIdentity(value?: string | null) {
   return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -74,6 +87,9 @@ const aliases: Record<string, string> = {
   dorhud: "pdth-dahm",
   dahmdorhud: "pdth-dahm",
   beardlib: "pd2-beardlib",
+  las: "pd2-legendary-armour-skins",
+  legendaryarmourskins: "pd2-legendary-armour-skins",
+  legendaryarmorskins: "pd2-legendary-armour-skins",
   superblt: "pd2-superblt-x64",
   pd3logicmodloader: "pd3-logic-mod-loader",
   logicmodloader: "pd3-logic-mod-loader",
@@ -167,6 +183,7 @@ export function enrichDependency(input: DynamicDependencyInput, profileId?: stri
       optional: input.optional ?? known.optional,
       notes: input.notes ?? known.notes,
       versionConstraint: input.versionConstraint ?? known.versionConstraint,
+      thumbnailUrl: input.thumbnailUrl ?? known.thumbnailUrl,
     };
     if (input.url && !getDependencyPrimaryUrl(enriched)) {
       return { ...enriched, sourceKind: "external", preferredSource: "external", external: { canonicalUrl: input.url }, sourceUnverified: false };
@@ -194,6 +211,7 @@ export function enrichDependency(input: DynamicDependencyInput, profileId?: stri
     notes: input.notes,
     versionConstraint: input.versionConstraint,
     dynamic: true,
+    thumbnailUrl: input.thumbnailUrl,
   };
 }
 

@@ -1,0 +1,7 @@
+{
+  "name": "Tsuki LAS Runtime Probe",
+  "description": "Read-only runtime registration check; does not equip outfits or alter saves.",
+  "author": "Tsuki",
+  "version": "1",
+  "hooks": [{ "hook_id": "lib/managers/menumanager", "script_path": "probe.lua" }]
+}

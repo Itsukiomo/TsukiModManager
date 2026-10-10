@@ -41,7 +41,7 @@ const CUSTOM_GROUPS_KEY = "tsuki-custom-installed-groups:v0.90-state-first";
 const CRASH_TEST_EXCLUSION_OVERRIDES_KEY = "tsuki-crash-test-exclusions:v2";
 const PAIR_STATE_CACHE_KEY = "tsuki-installed-pair-ledger:v1";
 
-const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v1";
+const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v2";
 
 function profileLocalStorageKey(base: string, profileId: string) {
   return `${base}:${profileId || "unknown-profile"}`;
@@ -701,7 +701,7 @@ function pairingReportText(matches: InstalledSourceMatch[], foundMods: number) {
 }
 
 function isReceiptBackedInstalledItem(item: PairedInstalledMod) {
-  return item.match.ownershipClassification === "tsuki_installed"
+  return Boolean(item.match.receiptId) || item.match.matchKind === "receipt" || item.match.ownershipClassification === "tsuki_installed"
     || item.match.ownershipClassification === "tsuki_imported";
 }
 
@@ -2397,7 +2397,8 @@ export function InstalledPage({ currentGameProfile, profileRuntime, profileSwitc
     const map = new Map<string, SourceUpdateStatus>();
 
     for (const update of sourceUpdates) {
-      map.set(`${update.source}-${update.modId}`, update);
+      map.set(`${update.source}-${update.modId}-${update.installedFileId ?? "unknown"}`, update);
+      if (update.uid) map.set(update.uid, update);
     }
 
     return map;
@@ -2420,7 +2421,7 @@ export function InstalledPage({ currentGameProfile, profileRuntime, profileSwitc
       // They can become suggestions later, but they should not count as paired.
       if (!["receipt", "unknown"].includes(match.matchKind) && match.confidence < 86) continue;
 
-      const updateStatus = updateStatusBySourceKey.get(`${sourceMod.source}-${sourceMod.sourceId}`);
+      const updateStatus = updateStatusBySourceKey.get(match.receiptId ?? "") ?? updateStatusBySourceKey.get(`${sourceMod.source}-${sourceMod.sourceId}-${match.sourceFileId ?? "unknown"}`);
       const matchWithUpdates = updateStatus
         ? {
             ...match,
@@ -2976,7 +2977,7 @@ export function InstalledPage({ currentGameProfile, profileRuntime, profileSwitc
   async function checkStateFirstUpdates() {
     if (updatesBusy) return;
     setUpdatesBusy(true);
-    setStatus("Checking updates for Tsuki-downloaded receipt mods only...");
+    setStatus("Checking updates for tracked and hash-verified mods...");
     reportTaskProgress("Check Updates", 12, "Checking receipt-backed source files...");
     try {
       const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId });
@@ -2984,7 +2985,7 @@ export function InstalledPage({ currentGameProfile, profileRuntime, profileSwitc
       setReceiptUpdateCache(readReceiptUpdateCheckCache(profileId));
       setSourceUpdates(updates);
       const count = updates.filter((update) => update.updateAvailable).length;
-      setStatus(`Receipt update check complete: ${count}/${updates.length} Tsuki-downloaded mod(s) have updates.`);
+      setStatus(`Update check complete: ${count}/${updates.length} identified mod(s) have updates.`);
       reportTaskProgress("Check Updates", 100, `${count}/${updates.length} update(s) found.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4352,8 +4353,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
     try {
       const win64 = groupLooksWin64OrUe4ss(group);
-      const fileNames = group.files.map((file) => file.fileName);
-      const filePaths = [...new Set(group.files.flatMap((file) => [file.fullPath, file.fileName]).filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+      const fileNames = group.files.map((file) => profileId === "builtin.payday3" ? file.fileName : file.fullPath || file.fileName);
+      const filePaths = [...new Set(group.files.map((file) => file.fullPath || file.fileName).filter(Boolean))];
       const result = win64
         ? await invoke<string>("set_local_win64_matched_files_enabled", { filePaths, enabled, profileId })
         : await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled, profileId });
@@ -4411,6 +4412,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       const result = await invoke<string>("set_source_install_enabled", {
         source: match.source,
         sourceId: match.sourceId,
+        receiptId: match.receiptId ?? null,
         enabled,
         profileId,
       });
@@ -4433,8 +4435,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     setBusyKey(busyId);
 
     try {
-      const win64 = installedSurfaceLabel(item) === "Win64/UE4SS";
-      const groupedPaths = item.files.flatMap((file) => [file.fullPath, file.fileName]);
+      const win64 = profileId !== "builtin.payday3" || installedSurfaceLabel(item) === "Win64/UE4SS";
+      const groupedPaths = item.files.map((file) => file.fullPath || file.fileName);
       const groupedFileNames = item.files.map((file) => file.fileName);
       const rawTogglePaths = [...new Set([...(win64 ? groupedPaths : groupedFileNames), ...item.match.matchedFiles]
         .filter((value): value is string => Boolean(value && value.trim().length > 0)))];
@@ -4571,8 +4573,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
           continue;
         }
 
-        const win64 = installedSurfaceLabel(candidate.item) === "Win64/UE4SS";
-        const groupedPaths = candidate.item.files.flatMap((file) => [file.fullPath, file.fileName]);
+        const win64 = profileId !== "builtin.payday3" || installedSurfaceLabel(candidate.item) === "Win64/UE4SS";
+        const groupedPaths = candidate.item.files.map((file) => file.fullPath || file.fileName);
         const groupedFileNames = candidate.item.files.map((file) => file.fileName);
         const toggleValues = [...new Set([...(win64 ? groupedPaths : groupedFileNames), ...candidate.item.match.matchedFiles]
           .filter((value): value is string => Boolean(value && value.trim().length > 0)))];
@@ -4592,9 +4594,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
           pakPatchMatches.push({ ...candidate.item.match, matchedFiles: toggleValues.map(fileNameKey).filter(Boolean) });
         }
       } else if (candidate.group) {
-        const win64 = groupLooksWin64OrUe4ss(candidate.group);
+        const win64 = profileId !== "builtin.payday3" || groupLooksWin64OrUe4ss(candidate.group);
         const toggleValues = win64
-          ? [...new Set(candidate.group.files.flatMap((file) => [file.fullPath, file.fileName]).filter((value): value is string => Boolean(value && value.trim().length > 0)))]
+          ? [...new Set(candidate.group.files.map((file) => file.fullPath || file.fileName).filter(Boolean))]
           : candidate.group.files.map((file) => file.fileName).map(fileNameKey).filter(Boolean);
 
         if (toggleValues.length === 0) {
@@ -4625,6 +4627,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         const message = await invoke<string>("set_source_install_enabled", {
           source: action.match.source,
           sourceId: action.match.sourceId,
+          receiptId: action.match.receiptId ?? null,
           enabled,
           profileId,
         });
@@ -4993,7 +4996,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
     await restoreCrashTestOriginalState();
   }
-  async function uninstallMatch(match: InstalledSourceMatch, receiptBacked = match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported") {
+  async function uninstallMatch(match: InstalledSourceMatch, receiptBacked = Boolean(match.receiptId) || match.matchKind === "receipt" || match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported") {
     if (!(await ensureRuntimeMutationAllowed())) return;
 
     setBusyKey(`uninstall-${match.source}-${match.sourceId}`);
@@ -5025,7 +5028,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     reportTaskProgress("Remove broken receipt", 25, `Removing receipt ${receiptId}...`);
 
     try {
-      const result = await invoke<string>("remove_broken_receipt", { receiptId, profileId });
+      const result = await invoke<string>("remove_receipt_by_id", { receiptId, profileId });
       const removedKey = `${match.source}-${match.sourceId}`;
       setMatches((current) => {
         const next = { ...current };
@@ -5313,29 +5316,18 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         return;
       }
 
-      const matchedGroup = pairFilesFromMatch(match, groups, sourceMod) ?? {
-        key: `${match.source}-${match.sourceId}`,
-        label: sourceMod.name,
-        files: [],
-        modifiedUnix: match.installedModifiedUnix ?? 0,
-        sizeBytes: 0,
-        enabled: match.enabled,
-      };
-      const selected = bestReinstallFileForGroup(safeDetail.files, matchedGroup, match);
-      if (!selected.file) {
-        setStatus(`${safeDetail.name}: Original file no longer exists. Manual selection required.`);
-        reportTaskProgress("Update failed", 100, "Manual file selection required.");
-        recordRuntimeDiagnostic("Update installed mod", "blocked", selected.reason, [
-          safeDetail.name,
-          `${safeDetail.source}:${safeDetail.sourceId}`,
-          `Available files: ${files.map((candidate) => `${candidate.id}:${candidate.name}`).slice(0, 12).join(" | ")}`,
-        ]);
+      const checks = await invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId, force: true });
+      setSourceUpdates(checks);
+      const check = checks.find((entry) => entry.source === match.source && entry.modId === match.sourceId && (match.receiptId ? entry.uid === match.receiptId : entry.installedFileId === match.sourceFileId));
+      const file = check?.canUpdate ? files.find((entry) => entry.id === check.latestFileId) : undefined;
+      if (!file) {
+        setSelectedSourceMatch(match);
+        setSelectedSourceMod(safeDetail);
+        setStatus(check?.reason ?? "No verified compatible update. Select a file for manual review.");
+        reportTaskProgress("Review update", 100, "Manual file selection required.");
         return;
       }
-
-      const file = selected.file;
-
-      setStatus(`Downloading update for ${safeDetail.name} (${selected.reason})...`);
+      setStatus(`Downloading update for ${safeDetail.name} (${check?.reason})...`);
       reportTaskProgress("Update mod", 45, `Downloading ${file.name}...`);
 
       const staged = await invoke<StagedDownloadResult>("stage_source_file_download", {
@@ -5376,6 +5368,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         pageUrl: safeDetail.pageUrl ?? null,
         description: safeDetail.description,
         replaceFileNames: match.matchedFiles,
+        replaceReceiptId: match.receiptId ?? null,
         profileId,
       });
 
@@ -5743,6 +5736,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
             const crashCandidate = crashCandidateMap.get(selectionKey);
             const crashExcluded = Boolean(crashCandidate?.excluded);
             const tagList = [
+              (updateStatusBySourceKey.get(item.match.receiptId ?? "")?.health === "verified" || (item.match.matchKind === "sha256" && item.match.confidence === 100)) ? "Verified" : item.match.matchKind === "receipt" ? "Receipt" : item.match.confidence >= 85 ? "Likely" : "Unknown",
+              updateStatusBySourceKey.get(item.match.receiptId ?? "")?.health === "modified" ? "Modified files" : null,
+              updateStatusBySourceKey.get(item.match.receiptId ?? "")?.health === "missing" ? "Missing files" : null,
               ...(sourceMod.tags ?? []),
               item.match.updateAvailable ? "Update" : null,
               ownershipLabel,
@@ -6343,7 +6339,7 @@ function ManualReceiptEditModal({
 
   useEffect(() => {
     let cancelled = false;
-    invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId })
+    invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId, profileId })
       .then((database) => {
         if (!cancelled) setTaxonomyTags(tagsFromTaxonomyDatabase(database));
       })
@@ -6383,12 +6379,12 @@ function ManualReceiptEditModal({
     setStatus(`Refreshing tag catalog for ${gameId}...`);
     try {
       const [taxonomyStatus, taxonomyDatabase, indexedMods] = await Promise.all([
-        invoke("refresh_current_game_taxonomy", { gameId }).catch(() => null),
-        invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId }).catch(() => null),
+        invoke<SourceTaxonomyDatabase>("refresh_current_game_taxonomy", { gameId, profileId }).catch(() => null),
+        invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId, profileId }).catch(() => null),
         invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 1200, profileId }).catch(() => []),
       ]);
       void taxonomyStatus;
-      const officialTags = tagsFromTaxonomyDatabase(taxonomyDatabase);
+      const officialTags = tagsFromTaxonomyDatabase(taxonomyStatus ?? taxonomyDatabase);
       void indexedMods;
       if (officialTags.length === 0) {
         setStatus(`Refresh failed: no valid official taxonomy entries were returned for ${gameId}. Custom tags were kept.`);
@@ -6487,7 +6483,7 @@ function ManualReceiptEditModal({
     setThumbnailError(null);
     try {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-      const saved = await invoke<SavedCustomThumbnail>("save_custom_receipt_thumbnail", { receiptId: target.match.receiptId, fileName: file.name, bytes });
+      const saved = await invoke<SavedCustomThumbnail>("save_custom_receipt_thumbnail", { receiptId: target.match.receiptId, profileId, fileName: file.name, bytes });
       setThumbnailUrl(saved.path);
       setThumbnailPreview(await resolveThumbnailSrc(saved.path));
       setStatus(`Stored ${saved.fileName}. Save to attach it to this receipt.`);
@@ -6697,7 +6693,7 @@ function InstalledSourceDetailPage({
   const safeStats = Array.isArray(mod.stats) ? mod.stats : [];
   const safeTags = Array.isArray(mod.tags) ? mod.tags : [];
   const safeMatchedFiles: string[] = Array.isArray(match?.matchedFiles) ? (match?.matchedFiles ?? []).filter((item): item is string => typeof item === "string") : [];
-  const receiptBacked = Boolean(match?.installed && (match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported"));
+  const receiptBacked = Boolean(match?.installed && (match.receiptId || match.matchKind === "receipt" || match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported"));
   const heroImage = mod.bannerUrl ?? mod.thumbnailUrl ?? match?.bannerUrl ?? match?.thumbnailUrl ?? null;
 
   useEffect(() => {
@@ -6912,7 +6908,7 @@ function InstalledSourceDetailPage({
     title: match.updateAvailable ? "Update available" : "Installed version",
     detail: match.reason,
     date: match.sourceUpdatedAt ?? match.sourceFileUploadedAt ?? null,
-    status: match.updateAvailable ? "Review update" : "Current",
+    status: match.updateAvailable ? "Review update" : "No verified update",
     tone: match.updateAvailable ? "warning" : "good",
   }] : [];
   const actions: UnifiedAction[] = [
@@ -6949,7 +6945,7 @@ function InstalledSourceDetailPage({
       notes: dependency.notes ?? undefined,
       versionConstraint: dependency.versionConstraint ?? undefined,
     }, profileId);
-    return { id: enriched.id, title: <DependencyName dependency={enriched} />, detail: `${dependencySourceLabel(enriched)}${enriched.versionConstraint ? ` - ${enriched.versionConstraint}` : ""}`, status: enriched.required ? "Required" : "Optional", tone: enriched.required ? "warning" : "neutral", actions: <DependencyActions dependency={enriched} /> };
+    return { id: enriched.id, title: <DependencyName dependency={enriched} />, detail: `${dependencySourceLabel(enriched)}${enriched.versionConstraint ? ` - ${enriched.versionConstraint}` : ""}`, status: enriched.required ? "Required" : "Optional", tone: enriched.required ? "warning" : "neutral", actions: <DependencyActions profileId={profileId} dependency={enriched} /> };
   });
 
   return (

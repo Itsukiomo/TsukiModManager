@@ -11191,6 +11191,20 @@ html[data-theme] .tsuki-mod-card .tsuki-mod-card-actions button:hover:not(:disab
   flex-wrap: wrap;
 }
 
+.dependency-actions .install-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dependency-setup-status {
+  flex-basis: 100%;
+  max-width: 440px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .dependency-name-link {
   appearance: none;
   border: 0;

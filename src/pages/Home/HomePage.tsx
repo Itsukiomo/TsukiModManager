@@ -850,11 +850,11 @@ export function HomePage({ onOpenPage, onOpenModInApp, refreshTick, currentGameP
     } finally {
       if (!homePreloadTimingRecordedRef.current) {
         homePreloadTimingRecordedRef.current = true;
-        void invoke("record_startup_diagnostic", {
+        void invoke("record_runtime_process_diagnostic", {
           label: "Home browse preload",
-          durationMs: Math.round(performance.now() - timingStart),
           status: timingStatus,
-          detail: timingDetail || `mode=${mode}`,
+          reason: timingDetail || `mode=${mode}`,
+          details: [`Duration: ${Math.round(performance.now() - timingStart)}ms`],
         }).catch(() => undefined);
       }
       feedBusyRef.current = false;

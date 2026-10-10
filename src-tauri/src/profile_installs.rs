@@ -354,9 +354,10 @@ fn builtin_non_willow_profile_draft(profile_id: &str) -> Option<serde_json::Valu
         "builtin.outlast-trials" => Some(builtin_profile_draft(
             profile_id,
             "outlast-trials",
-            vec![builtin_file_rule("outlast-pak", "Outlast Trials PAK", &[".pak"], "${GAME_ROOT}/OPP/Content/Paks", "", 100)],
+            vec![builtin_file_rule("outlast-pak", "Outlast Trials PAK", &[".pak"], "${GAME_ROOT}/OPP/Content/Paks", "", 100),
+                builtin_file_rule("outlast-movie", "Outlast Trials Bink movie / subtitles", &[".bk2", ".srt"], "${GAME_ROOT}/NativePakLoader/Mods", "", 100)],
             Vec::new(),
-            "Direct install supports standard PAK files only. Movie replacements, audio workflows, Iris, Janus and Odessa remain explicit external-manager handoffs.",
+            "PAK assets and native Bink movies/subtitles use the signed native backend. Loose movies are staged outside the game's Movies folder; originals are backed up and restored by the backend. Other video formats require conversion and unsupported audio-manager packages require review.",
         )),
         "builtin.payday-the-heist" => Some(builtin_profile_draft(
             profile_id,
@@ -373,8 +374,10 @@ fn builtin_non_willow_profile_draft(profile_id: &str) -> Option<serde_json::Valu
             "payday-2",
             vec![builtin_folder_rule("payday2-blt-folder", "PAYDAY 2 SuperBLT mod folder", "mod.txt", "${GAME_ROOT}/mods", "SuperBLT", 95),
                 builtin_folder_rule("payday2-superblt-assets", "PAYDAY 2 SuperBLT asset folder", "supermod.xml", "${GAME_ROOT}/mods", "SuperBLT", 95),
+                builtin_folder_rule("payday2-beardlib-content", "PAYDAY 2 BeardLib content package", "main.xml", "${GAME_ROOT}/assets/mod_overrides", "BeardLib", 90),
                 builtin_tree_rule("payday2-overrides", "Authored PAYDAY 2 mod_overrides tree", "assets/mod_overrides", "${GAME_ROOT}/assets/mod_overrides", "")],
-            vec![builtin_dependency("superblt", "SuperBLT", &["WSOCK32.dll"], "https://superblt.znix.xyz/", "The installed loader must match the active 64-bit or legacy 32-bit game branch.")],
+            vec![builtin_dependency("superblt", "SuperBLT", &["WSOCK32.dll"], "https://superblt.znix.xyz/", "The installed loader must match the active 64-bit or legacy 32-bit game branch."),
+                builtin_dependency("beardlib", "BeardLib", &["mods/BeardLib/mod.txt", "mods/BeardLib/main.xml"], "https://modworkshop.net/mod/14924", "BeardLib content requires SuperBLT. Current releases require the 64-bit game.")],
             "Loose Lua routing is guarded by SuperBLT detection. BeardLib and mod_overrides package trees remain manager-aware handoffs unless their authored root is preserved.",
         )),
         "builtin.resident-evil-7" => Some(builtin_profile_draft(profile_id, "resident-evil-7", reframework_rules(), vec![reframework()], "REFramework scripts/plugins are direct and receipt-owned. Fluffy asset archives remain an external-manager handoff.")),
@@ -545,6 +548,33 @@ pub(crate) fn inspect_profile_source_file(profile_id: &str, path: &Path) -> Resu
     Ok((analysis.archive_kind, analysis.entries, warnings))
 }
 
+pub(crate) fn prepare_archive_dependencies(profile_id: &str, path: &Path, declared: &[String]) -> Result<Vec<String>, String> {
+    let context = load_profile_context(profile_id)?;
+    let analysis = analyze_custom_profile_path(&context, path)?;
+    let mut messages = Vec::new();
+    if profile_id == "builtin.outlast-trials" && analysis.entries.iter().any(|e| matches!(e.route_kind.as_str(), "outlast-pak" | "outlast-movie")) {
+        messages.push(managed_loaders::ensure_archive_dependency()?);
+    }
+    let mut names = declared.iter().cloned().collect::<BTreeSet<_>>();
+    for entry in &analysis.entries {
+        if let Some(rule) = context.rules.iter().find(|rule| rule.id == entry.route_kind) {
+            if let Some(name) = clean_text(Some(rule.required_dependency.clone())) {
+                if !name.eq_ignore_ascii_case("none") { names.insert(name); }
+            }
+        }
+    }
+    // PAYDAY 2 main.xml content packages require BeardLib, even when the source omitted its dependency list.
+    if profile_id == "builtin.payday2" && analysis.entries.iter().any(|e| e.archive_path.to_ascii_lowercase().ends_with("/main.xml")) {
+        names.insert("BeardLib".into());
+        if analysis.entries.iter().any(|e| e.archive_path.split('/').any(|part| {
+            let part = part.to_ascii_lowercase();
+            part.ends_with(" las") || part.starts_with("las ") || part.contains("(las)") || part.contains("[las]")
+        })) { names.insert("Legendary Armour Skins".into()); }
+    }
+    messages.extend(profile_dependencies::ensure(profile_id, &names.into_iter().collect::<Vec<_>>(), false)?.messages);
+    Ok(messages)
+}
+
 pub(crate) fn install_profile_source_file(profile_id: &str, path: &Path, source: &str, mod_id: &str, file_id: &str, name: &str, version: Option<String>, author: Option<String>, thumbnail: Option<String>, page_url: Option<String>) -> Result<InstallApplyResult, String> {
     let context = load_profile_context(profile_id)?;
     let item = analyze_custom_profile_path(&context, path)?;
@@ -558,6 +588,45 @@ pub(crate) fn install_profile_source_file(profile_id: &str, path: &Path, source:
         item, selected_match: Some(selected_match), install_as_local: false, display_name: name.to_string(),
         version_override: version, thumbnail_override: thumbnail, notes: None, allow_overwrite: false,
     })
+}
+
+pub(crate) fn replace_profile_source_install(profile: &str, receipt_id: &str, source: &str, mod_id: &str, install: impl FnOnce() -> Result<InstallApplyResult, String>) -> Result<InstallApplyResult, String> {
+    profile_dependencies::game_closed(profile)?;
+    let old = list_profile_receipts_internal(profile)?.into_iter().find(|r| r.id == receipt_id && r.source == source && r.source_mod_id.as_deref() == Some(mod_id)).ok_or("Replacement receipt identity does not match this profile/mod")?;
+    if old.files.iter().any(|f| f.backup_path.is_some()) { return Err("This mod overwrites original files. Review/uninstall it before replacing so original backups remain intact.".into()); }
+    for (path, expected) in receipt_file_locations(profile, &old) {
+        if expected.as_deref() != Some(sha256_file(&path)?.as_str()) { return Err(format!("Replacement blocked: missing or modified tracked file {}", path.display())); }
+    }
+    let was_enabled = old.enabled.unwrap_or(true);
+    let old_path = profile_receipt_path(profile, &old.id)?;
+    let holding = ensure_profile_data_dirs(profile)?.join("backups/mod-updates").join(format!("{}-{}", sanitize_file_component(&old.id), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()));
+    fs::create_dir_all(&holding).map_err(|e| e.to_string())?;
+    if was_enabled { set_profile_receipt_enabled_internal(profile, &old.id, false)?; }
+    let held_receipt = holding.join("receipt.json");
+    if let Err(error) = fs::rename(&old_path, &held_receipt) {
+        if was_enabled { let _ = set_profile_receipt_enabled_internal(profile, &old.id, true); }
+        return Err(format!("Could not archive original receipt: {error}"));
+    }
+    let installed = install().and_then(|mut result| {
+        if !was_enabled {
+            let receipt: InstallReceipt = serde_json::from_slice(&fs::read(&result.receipt_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if let Err(error) = set_profile_receipt_enabled_internal(profile, &receipt.id, false) {
+                uninstall_profile_receipt_internal(profile, &receipt.id)?;
+                return Err(error);
+            }
+        }
+        result.replaced_files = old.files.iter().map(|f| f.relative_path.clone()).collect();
+        result.warnings.push(format!("Previous version retained in disabled storage; recovery receipt: {}", held_receipt.display()));
+        Ok(result)
+    });
+    match installed {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            fs::rename(&held_receipt, &old_path).map_err(|e| format!("{error}. Receipt rollback failed: {e}"))?;
+            if was_enabled { set_profile_receipt_enabled_internal(profile, &old.id, true).map_err(|e| format!("{error}. File rollback failed: {e}"))?; }
+            Err(format!("Update failed; previous version restored: {error}"))
+        }
+    }
 }
 
 pub(crate) fn builtin_profile_executable_markers(profile_id: &str) -> &'static [&'static str] {
@@ -617,7 +686,7 @@ fn clean_text(value: Option<String>) -> Option<String> {
     })
 }
 
-fn profile_receipts_dir(profile_id: &str) -> Result<PathBuf, String> {
+pub(super) fn profile_receipts_dir(profile_id: &str) -> Result<PathBuf, String> {
     if is_builtin_payday3_profile(Some(profile_id)) {
         receipts_dir()
     } else {
@@ -641,7 +710,7 @@ fn profile_installed_state_path(profile_id: &str) -> Result<PathBuf, String> {
         .join("installed-state.json"))
 }
 
-fn profile_receipt_path(profile_id: &str, receipt_id: &str) -> Result<PathBuf, String> {
+pub(super) fn profile_receipt_path(profile_id: &str, receipt_id: &str) -> Result<PathBuf, String> {
     Ok(profile_receipts_dir(profile_id)?.join(format!("{}.json", sanitize_file_component(receipt_id))))
 }
 
@@ -791,10 +860,29 @@ fn allowed_profile_roots(context: &ProfileInstallContext) -> Result<Vec<PathBuf>
     Ok(roots)
 }
 
+fn comparable_profile_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut normalized = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:\\", drive as char)),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut root = PathBuf::from(r"\\"); root.push(server); root.push(share); root
+                }
+                _ => return path.to_owned(),
+            };
+            for component in components { if !matches!(component, Component::RootDir) { normalized.push(component.as_os_str()); } }
+            return normalized;
+        }
+    }
+    path.to_owned()
+}
 fn destination_is_allowed(destination: &Path, roots: &[PathBuf]) -> bool {
     destination.is_absolute()
         && !path_has_parent_component(destination)
-        && roots.iter().any(|root| destination.starts_with(root))
+        && roots.iter().any(|root| comparable_profile_path(destination).starts_with(comparable_profile_path(root)))
 }
 
 fn split_list(value: &str) -> Vec<String> {
@@ -832,7 +920,7 @@ fn dependency_marker_values(item: &serde_json::Value, plural: &str, singular: &s
         .collect()
 }
 
-fn portable_executable_machine(path: &Path) -> Option<u16> {
+pub(super) fn portable_executable_machine(path: &Path) -> Option<u16> {
     let mut file = File::open(path).ok()?;
     let mut header = [0u8; 64];
     file.read_exact(&mut header).ok()?;
@@ -1117,6 +1205,13 @@ fn package_root_for_rule(rule: &ProfileFileTypeRule, paths: &[String], source_pa
 
 fn route_relative_path(rule: &ProfileFileTypeRule, source_path: &str, all_paths: &[String], display_name: &str) -> String {
     let normalized = source_path.replace('\\', "/");
+    if rule.id == "outlast-movie" {
+        let parts = normalized.split('/').collect::<Vec<_>>();
+        let target = parts.iter().rposition(|part| part.eq_ignore_ascii_case("movies"))
+            .map(|index| parts[index + 1..].join("/"))
+            .unwrap_or_else(|| parts.last().copied().unwrap_or("movie.bk2").to_owned());
+        return format!("Tsuki-{}/Movies/{}", sanitize_file_component(display_name), target);
+    }
     if rule.id == "pdth-asset-package" {
         let parts = normalized.split('/').collect::<Vec<_>>();
         if let Some(index) = parts.iter().position(|part| ["units", "guis", "textures", "effects", "anims", "soundbanks"].iter().any(|root| part.eq_ignore_ascii_case(root))) {
@@ -1271,10 +1366,64 @@ fn block_duplicate_destinations(entries: &mut [ArchiveInspectEntry]) -> Vec<Stri
     display_paths.into_iter().collect()
 }
 
+fn beardlib_manifest_destination(bytes: &[u8]) -> Result<Option<&'static str>, String> {
+    use quick_xml::{events::Event, Reader};
+    let mut reader = Reader::from_reader(bytes);
+    let (mut assets, mut scripts, mut maps) = (false, false, false);
+    loop {
+        match reader.read_event().map_err(|e| format!("Invalid BeardLib manifest: {e}"))? {
+            Event::Start(tag) | Event::Empty(tag) => {
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_ascii_lowercase();
+                assets |= matches!(name.as_str(), "addfiles" | "armorskin" | "weapon" | "mask" | "material" | "melee");
+                maps |= matches!(name.as_str(), "heist" | "level");
+                scripts |= name == "hooks" || tag.attributes().flatten().any(|a| a.key.as_ref().eq_ignore_ascii_case(b"core_class"));
+            }
+            Event::DocType(_) => return Err("BeardLib XML declarations with external entities are not supported".into()),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(if maps { Some("${GAME_ROOT}/Maps") } else if assets { Some("${GAME_ROOT}/assets/mod_overrides") } else if scripts { Some("${GAME_ROOT}/mods") } else { None })
+}
+
+fn beardlib_destinations(path: &Path, kind: &str, paths: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let extracted = if !path.is_dir() && kind != "zip" { Some(extract_external_archive(path, "beardlib-manifests")?) } else { None };
+    let result = (|| {
+        let mut destinations = BTreeMap::new();
+        for manifest in paths.iter().filter(|p| p.rsplit('/').next().is_some_and(|p| p.eq_ignore_ascii_case("main.xml"))) {
+            let lower = manifest.to_ascii_lowercase();
+            let authored = if lower.starts_with("assets/mod_overrides/") || lower.contains("/assets/mod_overrides/") { Some("${GAME_ROOT}/assets/mod_overrides") }
+                else if lower.starts_with("mods/") || lower.contains("/mods/") { Some("${GAME_ROOT}/mods") }
+                else if lower.starts_with("maps/") || lower.contains("/maps/") { Some("${GAME_ROOT}/Maps") } else { None };
+            let destination = if let Some(destination) = authored { Some(destination) } else {
+                let bytes = if path.is_dir() || extracted.is_some() {
+                    let root = extracted.as_deref().unwrap_or(path);
+                    let file = root.join(safe_relative_path(manifest)?);
+                    if fs::metadata(&file).map_err(|e| e.to_string())?.len() > 3 * 1024 * 1024 { return Err("BeardLib manifest exceeds inspection limit".into()); }
+                    fs::read(file).map_err(|e| e.to_string())?
+                } else {
+                    let mut zip = ZipArchive::new(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                    let file = zip.by_name(manifest).map_err(|e| e.to_string())?;
+                    if file.size() > 3 * 1024 * 1024 { return Err("BeardLib manifest exceeds inspection limit".into()); }
+                    let mut bytes = Vec::new();
+                    file.take(3 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                    bytes
+                };
+                beardlib_manifest_destination(&bytes)?
+            };
+            if let Some(destination) = destination { destinations.insert(manifest.clone(), destination.into()); }
+        }
+        Ok(destinations)
+    })();
+    if let Some(extracted) = extracted { cleanup_temp_extraction_folder(&extracted, &mut Vec::new()); }
+    result
+}
+
 fn analyze_custom_profile_path(context: &ProfileInstallContext, path: &Path) -> Result<DragDropAnalysisItem, String> {
     let display_name = path.file_stem().and_then(|value| value.to_str()).or_else(|| path.file_name().and_then(|value| value.to_str())).unwrap_or("Dropped Mod").to_string();
     let (archive_kind, source_entries, mut warnings) = inspect_profile_source(path)?;
     let all_paths = source_entries.iter().map(|entry| entry.relative_path.clone()).collect::<Vec<_>>();
+    let beardlib_routes = if context.rules.iter().any(|r| r.id == "payday2-beardlib-content") { beardlib_destinations(path, &archive_kind, &all_paths)? } else { BTreeMap::new() };
     let mut entries = Vec::new();
     let mut matched_names = BTreeSet::new();
     let mut required_dependencies = BTreeSet::new();
@@ -1286,19 +1435,29 @@ fn analyze_custom_profile_path(context: &ProfileInstallContext, path: &Path) -> 
         let package_rules = context.rules.iter().filter(|rule| {
             (rule.kind.eq_ignore_ascii_case("folder_based") || matches!(rule.file_match_mode.as_str(), "folder" | "whole_folder"))
                 && package_root_for_rule(rule, &all_paths, &source.relative_path).is_some()
-        }).cloned().collect::<Vec<_>>();
+        }).cloned().filter_map(|mut rule| {
+            if rule.id == "payday2-beardlib-content" {
+                let root = package_root_for_rule(&rule, &all_paths, &source.relative_path)?;
+                let manifest = if root.is_empty() { "main.xml".into() } else { format!("{root}/main.xml") };
+                rule.destination = beardlib_routes.get(&manifest)?.clone();
+                if rule.destination.ends_with("/Maps") { rule.confidence = 96; }
+            }
+            Some(rule)
+        }).collect::<Vec<_>>();
         let companion_rule = if source.relative_path.to_ascii_lowercase().ends_with(".ini") {
             let dll = format!("{}.dll", &source.relative_path[..source.relative_path.len() - 4]);
             all_paths.iter().any(|path| path.eq_ignore_ascii_case(&dll))
                 .then(|| best_rule_for_path(&context.rules, &dll)).flatten()
                 .filter(|rule| rule.id == "oak-plugin")
         } else { None };
-        let rule = best_rule_for_paths(&package_rules, &all_paths).or_else(|| best_rule_for_path(&context.rules, &source.relative_path)).or(companion_rule);
+        let rule = best_rule_for_paths(&package_rules, &all_paths).or_else(|| best_rule_for_path(&context.rules, &source.relative_path).filter(|r| r.id != "payday2-beardlib-content")).or(companion_rule);
         let Some(rule) = rule else {
             let leaf = source.relative_path.rsplit('/').next().unwrap_or(&source.relative_path).to_ascii_lowercase();
             let documentation = (["readme", "license", "licence", "changelog", "credits"].iter().any(|name| leaf.starts_with(name))
                 && [".txt", ".md", ".html", ".pdf"].iter().any(|extension| leaf.ends_with(extension)))
-                || ["modinfo.ini", "preview.png", "preview.jpg", "preview.jpeg"].contains(&leaf.as_str());
+                || ["modinfo.ini", "preview.png", "preview.jpg", "preview.jpeg"].contains(&leaf.as_str())
+                || (all_paths.iter().any(|path| path.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("modinfo.ini")))
+                    && ["cover.png", "cover.jpg", "cover.jpeg", "screenshot.png", "screenshot.jpg", "screenshot.jpeg", "bg.jpg"].contains(&leaf.as_str()));
             entries.push(ArchiveInspectEntry {
                 archive_path: source.relative_path,
                 route_kind: if documentation { "folder" } else { "unmatched" }.to_string(),
@@ -1593,8 +1752,8 @@ fn rollback_profile_install(files: &[AppliedInstallFile], backups: &[OverwriteBa
 
 #[tauri::command]
 pub(crate) fn install_drag_drop_item(request: DragDropInstallRequest) -> Result<InstallApplyResult, String> {
-    if let Some(message) = runtime_mutation_locked_message() { return Err(message); }
     let profile_id = clean_profile_id(&request.item.profile_id)?;
+    profile_dependencies::game_closed(&profile_id)?;
     if request.display_name.trim().is_empty() { return Err("A display name is required before installing.".to_string()); }
     if request.item.blocked { return Err("Install blocked: the package contains unsupported files, unresolved routes, dependencies or conflicts. Review the archive before installing.".to_string()); }
     let custom_context = if is_builtin_payday3_profile(Some(&profile_id)) { None } else { Some(load_profile_context(&profile_id)?) };
@@ -1740,12 +1899,12 @@ fn toggle_receipt_files(receipt: &InstallReceipt, disabled_root: &Path, roots: &
             if !source.starts_with(disabled_root) { return Err(format!("Disabled file escaped profile storage: {}", source.display())); }
             if !destination_is_allowed(&destination, roots) { return Err(format!("Restore destination escaped approved roots: {}", destination.display())); }
             if destination.exists() { return Err(format!("Cannot enable because a file already exists at {}.", destination.display())); }
+            if !source.is_file() { return Err(format!("Cannot enable: disabled file is missing at {}. The recovery manifest was preserved.", source.display())); }
         }
         let mut moved_records: Vec<(PathBuf, PathBuf)> = Vec::new();
         for record in &manifest.files {
             let source = PathBuf::from(&record.disabled_path);
             let destination = PathBuf::from(&record.original_path);
-            if !source.exists() { continue; }
             if let Err(error) = move_file_to_target(&source, &destination) {
                 let mut rollback_errors = Vec::new();
                 for moved in moved_records.iter().rev() {
@@ -1785,12 +1944,16 @@ fn toggle_receipt_files(receipt: &InstallReceipt, disabled_root: &Path, roots: &
         }
         moved_records.push((source, destination));
     }
-    write_disabled_manifest(&manifest_path, &DisabledInstallManifest { receipt_id: receipt.id.clone(), display_name: receipt.display_name.clone(), disabled_at_unix: now_unix_seconds(), files: records.clone() })?;
+    if let Err(error) = write_disabled_manifest(&manifest_path, &DisabledInstallManifest { receipt_id: receipt.id.clone(), display_name: receipt.display_name.clone(), disabled_at_unix: now_unix_seconds(), files: records.clone() }) {
+        let mut failures = Vec::new();
+        for (original, disabled) in moved_records.iter().rev() { if let Err(reason) = move_file_to_target(disabled, original) { failures.push(reason); } }
+        return Err(format!("Failed to save disabled manifest: {error}. Rollback: {}", failures.join(" | ")));
+    }
     Ok(records.len())
 }
 
 pub(crate) fn set_profile_receipt_enabled_internal(profile_id: &str, receipt_id: &str, enabled: bool) -> Result<String, String> {
-    if let Some(message) = runtime_mutation_locked_message() { return Err(message); }
+    profile_dependencies::game_closed(profile_id)?;
     let context = load_profile_context(profile_id)?;
     let receipt = list_profile_receipts_internal(&context.profile_id)?.into_iter().find(|receipt| receipt.id == receipt_id).ok_or_else(|| format!("Profile receipt was not found: {}", receipt_id))?;
     let roots = allowed_profile_roots(&context)?;
@@ -1800,13 +1963,99 @@ pub(crate) fn set_profile_receipt_enabled_internal(profile_id: &str, receipt_id:
     Ok(format!("{} {} by moving {} tracked file(s).", if enabled { "Enabled" } else { "Disabled" }, receipt.display_name, moved))
 }
 
+pub(crate) fn receipt_file_locations(profile: &str, receipt: &InstallReceipt) -> Vec<(PathBuf, Option<String>)> {
+    let manifest = if is_builtin_payday3_profile(Some(profile)) {
+        detect_payday3_paths_internal().and_then(|paths| read_disabled_manifest(&disabled_manifest_path(&paths, receipt)))
+    } else { disabled_manifest(profile, receipt) };
+    receipt.files.iter().map(|file| {
+        let original = if is_builtin_payday3_profile(Some(profile)) { receipt_destination_path(file) } else { PathBuf::from(&file.relative_path) };
+        let path = manifest.as_ref().and_then(|m| m.files.iter().find(|r| r.original_path.eq_ignore_ascii_case(&original.display().to_string())))
+            .map(|r| PathBuf::from(&r.disabled_path)).unwrap_or(original);
+        (path, file.sha256.clone())
+    }).collect()
+}
+
+#[tauri::command]
+pub(crate) fn get_profile_creator_install_rules(template_id: String) -> Result<serde_json::Value, String> {
+    let profile = match template_id.as_str() { "superblt" => "builtin.payday2", "reframework" => "builtin.resident-evil-requiem", _ => return Err("This template has no shared game-specific rules".into()) };
+    Ok(builtin_non_willow_profile_draft(profile).ok_or("Template is unavailable")?["customFileTypes"].clone())
+}
+
+pub(crate) fn toggle_profile_local_files(profile: &str, requested: Vec<String>, enabled: bool) -> Result<String, String> {
+    profile_dependencies::game_closed(profile)?;
+    if requested.is_empty() { return Err("No local files selected".into()); }
+    let receipts = list_profile_receipts_internal(profile)?;
+    let mut owners = BTreeSet::new();
+    let mut unowned = Vec::new();
+    let requested = requested.into_iter().collect::<BTreeSet<_>>();
+    for value in &requested {
+        let path = PathBuf::from(value);
+        let matches = receipts.iter().filter(|receipt| receipt.files.iter().any(|file| file.relative_path.eq_ignore_ascii_case(value)
+            || (!path.is_absolute() && Path::new(&file.relative_path).file_name() == path.file_name()))
+            || receipt_file_locations(profile, receipt).iter().any(|(file, _)| file.display().to_string().eq_ignore_ascii_case(value))).collect::<Vec<_>>();
+        if matches.len() > 1 { return Err(format!("Ambiguous file name '{value}'; use its full path")); }
+        if let Some(owner) = matches.first() { owners.insert(owner.id.clone()); }
+        else if path.is_absolute() { unowned.push(path); }
+        else { return Err(format!("No tracked file matches '{value}'; select its full path")); }
+    }
+    if !unowned.is_empty() {
+        if enabled { return Err("No disabled receipt exists for these local files. Re-scan before restoring.".into()); }
+        let (roots, destinations) = if is_builtin_payday3_profile(Some(profile)) {
+            let paths = detect_payday3_paths_internal().ok_or("PAYDAY 3 was not detected")?;
+            (vec![paths.game_root.clone()], vec![paths.pak_mods, paths.win64.join("UE4SS/Mods"), paths.win64.join("ue4ss/Mods"), paths.win64.join("Mods")])
+        } else {
+            let context = load_profile_context(profile)?;
+            let destinations = context.rules.iter().filter_map(|rule| resolve_destination_root(&context, &rule.destination).ok()).filter(|path| path != &context.game_root && path != &context.executable_dir).collect();
+            (allowed_profile_roots(&context)?, destinations)
+        };
+        let mut files = Vec::new();
+        for path in unowned {
+            let path = comparable_profile_path(&path.canonicalize().map_err(|e| e.to_string())?);
+            if !destination_is_allowed(&path, &roots) || !destinations.iter().any(|root| root.canonicalize().ok().is_some_and(|root| path.starts_with(comparable_profile_path(&root))))
+                || path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) { return Err(format!("Local file is outside a configured mod destination: {}", path.display())); }
+            files.push(serde_json::json!({"relativePath":path.display().to_string(),"sizeBytes":path.metadata().map_err(|e| e.to_string())?.len(),"sha256":sha256_file(&path)?}));
+        }
+        let id = format!("local-toggle-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let receipt: InstallReceipt = serde_json::from_value(serde_json::json!({"id":id,"displayName":"Imported local mod","source":"local","modType":"local-import","profileId":profile,"enabled":true,"files":files})).map_err(|e| e.to_string())?;
+        let path = if is_builtin_payday3_profile(Some(profile)) { receipt_file_path(&id)? } else { profile_receipt_path(profile, &id)? };
+        write_json_file(&path, &serde_json::to_value(&receipt).map_err(|e| e.to_string())?, "local import receipt")?;
+        owners.insert(id);
+    }
+    let mut changed = Vec::new();
+    let mut previous = Vec::new();
+    for id in owners {
+        let receipt = list_profile_receipts_internal(profile)?.into_iter().find(|r| r.id == id).ok_or("Local receipt disappeared")?;
+        let was_enabled = receipt.enabled.unwrap_or(true);
+        if was_enabled == enabled { continue; }
+        let result = if is_builtin_payday3_profile(Some(profile)) { set_receipt_mod_enabled_internal(&id, enabled) } else { set_profile_receipt_enabled_internal(profile, &id, enabled) };
+        match result {
+            Ok(message) => { changed.push(message); previous.push((id, was_enabled)); }
+            Err(error) => {
+                let mut failures = Vec::new();
+                for (id, state) in previous.into_iter().rev() {
+                    let rollback = if is_builtin_payday3_profile(Some(profile)) { set_receipt_mod_enabled_internal(&id, state) } else { set_profile_receipt_enabled_internal(profile, &id, state) };
+                    if let Err(reason) = rollback { failures.push(reason); }
+                }
+                return Err(format!("{error}. Rollback errors: {}", failures.join(" | ")));
+            }
+        }
+    }
+    Ok(changed.join(" "))
+}
+
+#[tauri::command]
+pub(crate) fn set_local_win64_matched_files_enabled(file_paths: Vec<String>, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
+    toggle_profile_local_files(profile_id.as_deref().unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID), file_paths, enabled)
+}
+
 pub(crate) fn apply_profile_receipt_selection(profile_id: &str, enabled_receipt_ids: &[String]) -> Result<usize, String> {
-    if let Some(message) = runtime_mutation_locked_message() { return Err(message); }
+    profile_dependencies::game_closed(profile_id)?;
     let context = load_profile_context(profile_id)?;
     let roots = allowed_profile_roots(&context)?;
     let receipts = list_profile_receipts_internal(&context.profile_id)?;
     let mut changed = Vec::<(InstallReceipt, bool)>::new();
     for receipt in receipts {
+        if receipt.source == "tsuki-managed-dependency" { continue; }
         let was_enabled = receipt.enabled.unwrap_or_else(|| profile_receipt_enabled(&context.profile_id, &receipt));
         let should_enable = enabled_receipt_ids.iter().any(|id| id == &receipt.id);
         if was_enabled == should_enable { continue; }
@@ -1830,6 +2079,9 @@ pub(crate) fn apply_profile_receipt_selection(profile_id: &str, enabled_receipt_
 
 pub(crate) fn remove_profile_receipt_internal(profile_id: &str, receipt_id: &str) -> Result<String, String> {
     let receipt = list_profile_receipts_internal(profile_id)?.into_iter().find(|receipt| receipt.id == receipt_id).ok_or_else(|| format!("Profile receipt was not found: {}", receipt_id))?;
+    if receipt.source == "tsuki-managed-dependency" {
+        return Err("Managed dependency ownership cannot be forgotten while its files remain installed. Use Uninstall after removing dependent mods.".into());
+    }
     if receipt.files.iter().any(|file| file.backup_path.is_some()) {
         return Err(format!("{} owns overwrite backups. Uninstall it to restore those files before removing its receipt.", receipt.display_name));
     }
@@ -1840,9 +2092,12 @@ pub(crate) fn remove_profile_receipt_internal(profile_id: &str, receipt_id: &str
 }
 
 pub(crate) fn uninstall_profile_receipt_internal(profile_id: &str, receipt_id: &str) -> Result<String, String> {
-    if let Some(message) = runtime_mutation_locked_message() { return Err(message); }
+    profile_dependencies::game_closed(profile_id)?;
     let context = load_profile_context(profile_id)?;
     let receipt = list_profile_receipts_internal(&context.profile_id)?.into_iter().find(|receipt| receipt.id == receipt_id).ok_or_else(|| format!("Profile receipt was not found: {}", receipt_id))?;
+    if receipt.source == "tsuki-managed-dependency" && list_profile_receipts_internal(&context.profile_id)?.iter().any(|other| other.id != receipt.id && other.source != "tsuki-managed-dependency") {
+        return Err("This is a shared game dependency. Remove other installed mods first so their requirements are not broken.".into());
+    }
     let allowed_roots = allowed_profile_roots(&context)?;
     validate_receipt_paths(&receipt, &allowed_roots)?;
     let holding = ensure_profile_data_dirs(&context.profile_id)?.join("uninstalled").join(format!("{}-{}", sanitize_file_component(&receipt.display_name), current_timestamp()));
@@ -2055,6 +2310,15 @@ pub(crate) async fn prepare_external_manager_handoff(profile_id: String, staged_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn beardlib_manifests_distinguish_assets_scripts_maps_and_unknown() {
+        assert_eq!(beardlib_manifest_destination(b"<table><AddFiles directory='assets'/></table>").unwrap(), Some("${GAME_ROOT}/assets/mod_overrides"));
+        assert_eq!(beardlib_manifest_destination(b"<table><AddFiles directory='assets'/><Hooks/></table>").unwrap(), Some("${GAME_ROOT}/assets/mod_overrides"));
+        assert_eq!(beardlib_manifest_destination(b"<mod core_class='lua/Core.lua'><Options/></mod>").unwrap(), Some("${GAME_ROOT}/mods"));
+        assert_eq!(beardlib_manifest_destination(b"<table><Heist/><Level/></table>").unwrap(), Some("${GAME_ROOT}/Maps"));
+        assert_eq!(beardlib_manifest_destination(b"<table><Localization/></table>").unwrap(), None);
+        assert!(beardlib_manifest_destination(b"<!DOCTYPE x SYSTEM 'file:///test'><table/>").is_err());
+    }
     use super::*;
 
     #[test]
@@ -2222,6 +2486,17 @@ mod tests {
         };
         assert_eq!(toggle_receipt_files(&receipt, &disabled, std::slice::from_ref(&game), false).unwrap(), 1);
         assert!(!installed.exists());
+        let manifest = read_disabled_manifest(&disabled.join("tsuki-disabled.json")).unwrap();
+        let stored = PathBuf::from(&manifest.files[0].disabled_path);
+        fs::write(&installed, b"do not overwrite").unwrap();
+        assert!(toggle_receipt_files(&receipt, &disabled, std::slice::from_ref(&game), true).is_err());
+        assert_eq!(fs::read(&installed).unwrap(), b"do not overwrite");
+        assert!(stored.is_file());
+        fs::remove_file(&installed).unwrap();
+        fs::rename(&stored, stored.with_extension("held")).unwrap();
+        assert!(toggle_receipt_files(&receipt, &disabled, std::slice::from_ref(&game), true).is_err());
+        assert!(disabled.join("tsuki-disabled.json").is_file());
+        fs::rename(stored.with_extension("held"), &stored).unwrap();
         assert_eq!(toggle_receipt_files(&receipt, &disabled, std::slice::from_ref(&game), true).unwrap(), 1);
         assert_eq!(fs::read(&installed).unwrap(), b"sample");
         let _ = fs::remove_dir_all(root);
@@ -2408,6 +2683,30 @@ mod tests {
     }
 
     #[test]
+    fn outlast_movies_are_staged_per_package_and_preserve_authored_subdirectories() {
+        let draft = builtin_non_willow_profile_draft("builtin.outlast-trials").unwrap();
+        let rules: Vec<ProfileFileTypeRule> = serde_json::from_value(draft["customFileTypes"].clone()).unwrap();
+        let movie = rules.iter().find(|rule| rule.id == "outlast-movie").unwrap();
+        for (source, expected) in [("Wrapper/OPP/Content/Movies/English/Intro.srt", "Tsuki-Cats/Movies/English/Intro.srt"),
+            ("Logo.bk2", "Tsuki-Cats/Movies/Logo.bk2")] {
+            assert_eq!(route_relative_path(movie, source, &[source.into()], "Cats"), expected);
+            assert!(best_rule_for_path(&rules, source).is_some());
+        }
+        assert!(best_rule_for_path(&rules, "RenamedVideo.mp4").is_none());
+        assert!(best_rule_for_path(&rules, "OtherEngine.utoc").is_none());
+        assert_eq!(movie.destination, "${GAME_ROOT}/NativePakLoader/Mods");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn canonical_windows_paths_stay_inside_profile_roots_without_allowing_siblings() {
+        let roots = vec![PathBuf::from(r"D:\Games\Outlast")];
+        assert!(destination_is_allowed(Path::new(r"\\?\D:\Games\Outlast\OPP\Content\Paks\UI.pak"), &roots));
+        assert!(!destination_is_allowed(Path::new(r"\\?\D:\Games\OutlastOther\UI.pak"), &roots));
+        assert!(!destination_is_allowed(Path::new(r"\\?\D:\Games\Outlast\..\Other\UI.pak"), &roots));
+        assert_eq!(comparable_profile_path(Path::new(r"\\?\UNC\server\share\Mods\UI.pak")), PathBuf::from(r"\\server\share\Mods\UI.pak"));
+    }
+
+    #[test]
     fn every_non_payday3_builtin_exposes_install_and_toggle_policy() {
         let profiles = ["builtin.cyberpunk2077", "builtin.outlast-trials", "builtin.payday-the-heist", "builtin.payday2", "builtin.resident-evil-7", "builtin.resident-evil-village", "builtin.resident-evil-requiem", "builtin.borderlands", "builtin.borderlands2", "builtin.borderlands3", "builtin.borderlands4", "builtin.tiny-tinas-wonderlands", "builtin.spider-man-remastered", "builtin.spider-man-2", "builtin.monster-hunter-wilds"];
         for profile in profiles {
@@ -2457,7 +2756,8 @@ mod tests {
                     sample
                 } else if rule.kind == "folder_based" {
                     fs::create_dir_all(&sample).unwrap();
-                    fs::write(sample.join(&rule.exact_filenames[0]), b"{}").unwrap();
+                    let bytes: &[u8] = if rule.id == "payday2-beardlib-content" { b"<table><AddFiles directory='assets'/></table>" } else { b"{}" };
+                    fs::write(sample.join(&rule.exact_filenames[0]), bytes).unwrap();
                     sample
                 } else if !rule.folder_markers.is_empty() {
                     let path = sample.join(&rule.folder_markers[0]).join("fixture.lua");
@@ -2542,6 +2842,7 @@ mod tests {
         fs::create_dir_all(source.join("reframework/images/example")).unwrap();
         fs::write(source.join("reframework/images/example/card.png"), b"image fixture").unwrap();
         fs::write(source.join("modinfo.ini"), b"name=Example").unwrap();
+        fs::write(source.join("cover.png"), b"manager preview").unwrap();
         let draft = builtin_non_willow_profile_draft("builtin.resident-evil-requiem").unwrap();
         let rules = serde_json::from_value(draft["customFileTypes"].clone()).unwrap();
         let context = ProfileInstallContext { profile_id:"test.reframework-data".into(), game_id:"requiem".into(), game_root:game.clone(), executable_dir:game.clone(), draft, rules };
@@ -2549,6 +2850,7 @@ mod tests {
         assert!(!item.blocked, "{:?}", item.warnings);
         assert!(item.entries.iter().any(|entry| Path::new(&entry.destination) == game.join("reframework/data/example.json")));
         assert!(item.entries.iter().any(|entry| Path::new(&entry.destination) == game.join("reframework/images/example/card.png")));
+        assert!(item.entries.iter().any(|entry| entry.archive_path == "cover.png" && !entry.blocked && entry.destination == "Documentation skipped"));
         let proxy = root.join("dinput8.dll");
         fs::write(&proxy, b"loader").unwrap();
         let item = analyze_custom_profile_path(&context, &proxy).unwrap();

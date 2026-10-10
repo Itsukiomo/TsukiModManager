@@ -27,6 +27,10 @@ mod modworkshop;
 mod text_encoding;
 mod profile_installs;
 mod managed_loaders;
+mod profile_dependencies;
+mod source_requirements;
+mod source_updates;
+mod receipt_metadata;
 mod source_catalog;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -144,7 +148,7 @@ fn safe_nexus_game_domain(value: Option<&str>) -> Option<String> {
         .trim()
         .to_ascii_lowercase();
 
-    if first
+    if !first.chars().all(|ch| ch.is_ascii_digit()) && first
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
@@ -370,7 +374,7 @@ struct PersistentSourcePair {
     banner_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceUpdateStatus {
     uid: String,
@@ -385,6 +389,10 @@ struct SourceUpdateStatus {
     can_update: bool,
     reason: String,
     page_url: Option<String>,
+    #[serde(default)]
+    checked_at_unix: u64,
+    #[serde(default)]
+    health: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1609,6 +1617,7 @@ fn cached_sha256_for_file(
     const MAX_SYNC_HASH_BYTES: u64 = 64 * 1024 * 1024;
 
     let key = path.display().to_string();
+    let modified_unix = fs::metadata(path).ok().and_then(|meta| meta.modified().ok()).and_then(|time| time.duration_since(UNIX_EPOCH).ok()).and_then(|time| u64::try_from(time.as_nanos()).ok()).or(modified_unix);
 
     if let Some(record) = cache.get(&key) {
         if record.size_bytes == size_bytes && record.modified_unix == modified_unix {
@@ -2696,7 +2705,13 @@ fn raw_disabled_pak_destination(paths: &PaydayPaths, file_name: &str) -> PathBuf
 #[tauri::command]
 fn set_pak_mod_files_enabled(file_names: Vec<String>, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
     if !is_builtin_payday3_profile(profile_id.as_deref()) {
-        return Err(profile_not_payday3_message(profile_id.as_deref()));
+        return profile_installs::toggle_profile_local_files(profile_id.as_deref().ok_or("Select a game profile")?, file_names, enabled);
+    }
+    let receipts = profile_installs::list_profile_receipts_internal(BUILTIN_PAYDAY3_PROFILE_ID)?;
+    if !file_names.is_empty() && file_names.iter().all(|name| receipts.iter().any(|receipt| receipt.files.iter().any(|file| {
+        file.relative_path.eq_ignore_ascii_case(name) || Path::new(&file.relative_path).file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name))
+    }))) {
+        return profile_installs::toggle_profile_local_files(BUILTIN_PAYDAY3_PROFILE_ID, file_names, enabled);
     }
 
     if let Some(message) = runtime_mutation_locked_message() {
@@ -4544,6 +4559,8 @@ fn check_update_for_record(record: InstalledStateRecord) -> SourceUpdateStatus {
         can_update: false,
         reason: "No update check performed.".to_string(),
         page_url: record.page_url.clone(),
+        checked_at_unix: now_unix_seconds(),
+        health: "unverified".into(),
     };
 
     let detail = match record.source.as_str() {
@@ -4643,12 +4660,8 @@ fn check_installed_source_updates_internal() -> Result<Vec<SourceUpdateStatus>, 
 }
 
 #[tauri::command]
-async fn check_installed_source_updates(profile_id: Option<String>) -> Result<Vec<SourceUpdateStatus>, String> {
-    if !is_builtin_payday3_profile(profile_id.as_deref()) {
-        return Ok(Vec::new());
-    }
-
-    tauri::async_runtime::spawn_blocking(check_installed_source_updates_internal)
+async fn check_installed_source_updates(profile_id: Option<String>, force: Option<bool>) -> Result<Vec<SourceUpdateStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || source_updates::check_profile(profile_id.as_deref().unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID), force.unwrap_or(true)))
         .await
         .map_err(|err| format!("Update check task failed: {}", err))?
 }
@@ -4733,21 +4746,37 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
     let manifest_path = disabled_manifest_path(&paths, &receipt);
 
     if enabled {
+        let had_manifest = manifest_path.is_file();
         let manifest = read_disabled_manifest(&manifest_path).unwrap_or_else(|| DisabledInstallManifest {
             receipt_id: receipt.id.clone(),
             display_name: receipt.display_name.clone(),
             disabled_at_unix: now_unix_seconds(),
             files: receipt.files.iter().map(|file| {
                 let original = receipt_destination_path(file);
+                let disabled = disabled_destination_for_receipt_file(&paths, &receipt, &original, file);
+                let disabled = if !disabled.is_file() && receipt_is_pak_file_path(&file.relative_path) {
+                    original.file_name().and_then(|n| n.to_str()).and_then(|n| find_disabled_pak_file(&paths, n)).unwrap_or(disabled)
+                } else { disabled };
                 DisabledInstallFileRecord {
                     original_path: original.display().to_string(),
-                    disabled_path: disabled_destination_for_receipt_file(&paths, &receipt, &original, file).display().to_string(),
+                    disabled_path: disabled.display().to_string(),
                 }
             }).collect(),
         });
 
         let mut moved = 0usize;
         let mut skipped = Vec::new();
+        let mut moved_paths = Vec::<(PathBuf, PathBuf)>::new();
+        for record in &manifest.files {
+            let source = PathBuf::from(&record.disabled_path);
+            let destination = PathBuf::from(&record.original_path);
+            if !destination.starts_with(&paths.game_root) { return Err("Restore destination is outside this game's root".into()); }
+            if !source.is_file() {
+                if !had_manifest && destination.is_file() { continue; }
+                return Err(format!("Disabled file is missing: {}. Recovery manifest was preserved.", source.display()));
+            }
+            if destination.exists() { return Err(format!("Cannot restore over an existing file: {}", destination.display())); }
+        }
 
         for record in manifest.files {
             let source_path = PathBuf::from(&record.disabled_path);
@@ -4758,14 +4787,13 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
                 continue;
             }
 
-            if destination.exists() && destination.is_file() {
-                if let Some(replaced) = move_existing_destination_file_for_install(&destination, &receipt.display_name)? {
-                    skipped.push(format!("Moved existing enabled file to {}", replaced));
-                }
-            }
-
             let source_parent = source_path.parent().map(PathBuf::from);
-            move_file_to_target(&source_path, &destination)?;
+            if let Err(error) = move_file_to_target(&source_path, &destination) {
+                let mut failures = Vec::new();
+                for (original, disabled) in moved_paths.iter().rev() { if let Err(reason) = move_file_to_target(original, disabled) { failures.push(reason); } }
+                return Err(format!("Restore failed: {error}. Rollback errors: {}", failures.join(" | ")));
+            }
+            moved_paths.push((destination.clone(), source_path.clone()));
             if let Some(parent) = source_parent {
                 for root in disabled_receipt_root_candidates(&paths, &receipt) {
                     if parent.starts_with(&root) {
@@ -4834,7 +4862,11 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
         let disabled_path = disabled_destination_for_receipt_file(&paths, &receipt, &original, file);
 
         let original_parent = original.parent().map(PathBuf::from);
-        move_file_to_target(&original, &disabled_path)?;
+        if let Err(error) = move_file_to_target(&original, &disabled_path) {
+            let mut failures = Vec::new();
+            for record in records.iter().rev() { let record: &DisabledInstallFileRecord = record; if let Err(reason) = move_file_to_target(Path::new(&record.disabled_path), Path::new(&record.original_path)) { failures.push(reason); } }
+            return Err(format!("Disable failed: {error}. Rollback errors: {}", failures.join(" | ")));
+        }
         if let Some(parent) = original_parent {
             remove_empty_dirs_up_to(&parent, &paths.win64);
         }
@@ -4855,7 +4887,11 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
             files: records,
         };
 
-        write_disabled_manifest(&disabled_root.join("tsuki-disabled.json"), &manifest)?;
+        if let Err(error) = write_disabled_manifest(&disabled_root.join("tsuki-disabled.json"), &manifest) {
+            let mut failures = Vec::new();
+            for record in manifest.files.iter().rev() { if let Err(reason) = move_file_to_target(Path::new(&record.disabled_path), Path::new(&record.original_path)) { failures.push(reason); } }
+            return Err(format!("Failed to save disable manifest: {error}. Rollback errors: {}", failures.join(" | ")));
+        }
     }
 
     let _ = sync_installed_state_database();
@@ -4871,6 +4907,9 @@ fn set_receipt_mod_enabled_internal(receipt_id: &str, enabled: bool) -> Result<S
 
 
 fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String> {
+    if receipt.source == "tsuki-managed-dependency" && list_install_receipts_internal()?.iter().any(|other| other.id != receipt.id && other.source != "tsuki-managed-dependency") {
+        return Err("This is a shared game dependency. Remove other installed mods first so their requirements are not broken.".into());
+    }
     if let Some(message) = runtime_mutation_locked_message() {
         return Err(message);
     }
@@ -4993,14 +5032,14 @@ fn uninstall_source_install(source: String, source_id: String, profile_id: Optio
 }
 
 #[tauri::command]
-fn set_source_install_enabled(source: String, source_id: String, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
+fn set_source_install_enabled(source: String, source_id: String, enabled: bool, profile_id: Option<String>, receipt_id: Option<String>) -> Result<String, String> {
     if !is_builtin_payday3_profile(profile_id.as_deref()) {
         let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
-        let receipt = profile_installs::find_profile_receipt_by_source(&profile_id, &source, &source_id)?;
+        let receipt = if let Some(id) = receipt_id { profile_installs::list_profile_receipts_internal(&profile_id)?.into_iter().find(|r| r.id == id && r.source == source && r.source_mod_id.as_deref().unwrap_or(&r.id) == source_id).ok_or("Receipt identity does not match this profile/mod")? } else { profile_installs::find_profile_receipt_by_source(&profile_id, &source, &source_id)? };
         return profile_installs::set_profile_receipt_enabled_internal(&profile_id, &receipt.id, enabled);
     }
 
-    let receipt = find_receipt_by_source(&source, &source_id)?;
+    let receipt = if let Some(id) = receipt_id { let receipt = find_receipt_by_id(&id)?; if receipt.source != source || receipt.source_mod_id.as_deref().unwrap_or(&receipt.id) != source_id { return Err("Receipt identity does not match this mod".into()); } receipt } else { find_receipt_by_source(&source, &source_id)? };
     set_receipt_mod_enabled_internal(&receipt.id, enabled)
 }
 
@@ -5304,6 +5343,9 @@ fn remove_receipt_by_id(receipt_id: String, profile_id: Option<String>) -> Resul
     }
 
     let receipt = find_receipt_by_id(&receipt_id)?;
+    if receipt.source == "tsuki-managed-dependency" {
+        return Err("Managed dependency ownership cannot be forgotten while its files remain installed. Use Uninstall after removing dependent mods.".into());
+    }
     let path = receipt_file_path(&receipt.id)?;
 
     if path.exists() {
@@ -6567,6 +6609,29 @@ fn nexus_domain_from_source_config(config: &serde_json::Value) -> Option<String>
         })
 }
 
+fn nexus_domain_for_request(requested: Option<&str>, config: &serde_json::Value) -> Result<String, String> {
+    if let Some(identity) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        if source_id_is_numeric(identity) {
+            if let Some(source) = config.get("sources").and_then(serde_json::Value::as_array).and_then(|sources| sources.iter().find(|source| {
+                json_string(source, "provider").as_deref() == Some("nexus")
+                    && json_string(source, "providerGameId").as_deref() == Some(identity)
+                    && source.get("enabled").and_then(serde_json::Value::as_bool) != Some(false)
+            })) {
+                if let Some(domain) = json_string(source, "providerSlug").and_then(|slug| safe_nexus_game_domain(Some(&slug))) {
+                    return Ok(domain);
+                }
+            }
+            if config_string(config, "nexusGameId").as_deref() != Some(identity) {
+                return Err(format!("Nexus game ID {} has no domain mapping in this profile. Refresh the mod page or configure its Nexus source.", identity));
+            }
+        } else {
+            return safe_nexus_game_domain(Some(identity)).ok_or_else(|| "Invalid Nexus game domain.".to_string());
+        }
+    }
+    nexus_domain_from_source_config(config).and_then(|domain| safe_nexus_game_domain(Some(&domain)))
+        .ok_or_else(|| "This profile has no valid Nexus game domain mapping.".to_string())
+}
+
 fn modworkshop_game_route_from_source_config(config: &serde_json::Value) -> Option<String> {
     configured_provider_source(config, "modworkshop")
         .and_then(|source| json_string(source, "providerSlug").or_else(|| json_string(source, "providerGameId")))
@@ -6699,7 +6764,7 @@ fn launch_mapped_profile(profile_id: String, vanilla: bool) -> Result<String, St
     if is_builtin_payday3_profile(Some(&profile_id)) { return launch_payday3_with_mode(!vanilla); }
     let mapping = profile_launch_mapping_internal(&profile_id)?;
     if profile_id == managed_loaders::PROFILE {
-        managed_loaders::prepare_launch(Path::new(&mapping.game_root), vanilla)?;
+        return managed_loaders::launch_via_steam(mapping, vanilla);
     }
     let previously_enabled = if vanilla {
         let enabled = profile_installs::enabled_profile_receipt_ids(&mapping.profile_id)?;
@@ -9838,6 +9903,8 @@ struct SourceDependencyItem {
     url: Option<String>,
     notes: Option<String>,
     version_constraint: Option<String>,
+    #[serde(default)]
+    thumbnail_url: Option<String>,
 }
 
 trait JsonStringKeys {
@@ -10035,9 +10102,8 @@ fn parse_source_timestamp_to_unix(value: Option<&str>) -> Option<u64> {
         return Some(number);
     }
 
-    // Keep this dependency-free. ISO dates are kept in source_updated_at for display,
-    // and update checks can still compare exact file IDs/versions through receipts.
-    None
+    time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+        .ok().and_then(|date| u64::try_from(date.unix_timestamp()).ok())
 }
 
 fn best_nexus_date(value: &serde_json::Value) -> Option<String> {
@@ -10175,22 +10241,19 @@ fn dependency_id_fragment(value: &str) -> String {
 }
 
 fn dependency_identity_from_url(url: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let lower = url.to_lowercase();
-    if let Some(start) = lower.find("nexusmods.com/") {
-        let path = &url[start + "nexusmods.com/".len()..];
-        let parts = path.split(&['/', '?', '#'][..]).filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let Ok(parsed) = reqwest::Url::parse(url) else { return (Some("external".into()), None, None); };
+    let host = parsed.host_str().unwrap_or_default();
+    let parts = parsed.path_segments().into_iter().flatten().filter(|p| !p.is_empty()).collect::<Vec<_>>();
+    if matches!(host, "nexusmods.com" | "www.nexusmods.com") {
+        let parts = if parts.first() == Some(&"games") { &parts[1..] } else { &parts[..] };
         if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("mods") {
-            return (Some("nexus".to_string()), Some(parts[0].to_string()), Some(parts[2].to_string()));
+            if parts[2].bytes().all(|c| c.is_ascii_digit()) { return (Some("nexus".to_string()), Some(parts[0].to_string()), Some(parts[2].to_string())); }
         }
     }
-    if let Some(start) = lower.find("modworkshop.net/mod/") {
-        let rest = &url[start + "modworkshop.net/mod/".len()..];
-        let mod_id = rest.split(&['/', '?', '#'][..]).next().unwrap_or_default().trim();
-        if !mod_id.is_empty() {
-            return (Some("modworkshop".to_string()), None, Some(mod_id.to_string()));
-        }
+    if matches!(host, "modworkshop.net" | "www.modworkshop.net") && parts.first() == Some(&"mod") {
+        if let Some(id) = parts.get(1).filter(|id| id.bytes().all(|c| c.is_ascii_digit())) { return (Some("modworkshop".into()), None, Some(id.to_string())); }
     }
-    if lower.contains("github.com/") {
+    if matches!(host, "github.com" | "www.github.com") {
         return (Some("github".to_string()), None, None);
     }
     (Some("external".to_string()), None, None)
@@ -10203,24 +10266,28 @@ fn source_dependency_from_value(
     fallback_game_domain: Option<&str>,
     fallback_numeric_game_id: Option<&str>,
 ) -> Option<SourceDependencyItem> {
+    let linked_mod = value.get("mod").filter(|entry| entry.is_object());
     let raw_text = value.as_str().map(str::trim).filter(|text| !text.is_empty());
     let url = raw_text
         .filter(|text| text.starts_with("http://") || text.starts_with("https://"))
         .map(ToString::to_string)
         .or_else(|| json_string(value, &["url", "link", "href", "page_url", "pageUrl", "external_url", "externalUrl", "download_url", "downloadUrl"]));
     let name = json_string(value, &["name", "title", "dependency_name", "dependencyName", "mod_name", "modName", "label"])
+        .or_else(|| linked_mod.and_then(|entry| json_string(entry, &["name", "title"])))
         .or_else(|| raw_text.filter(|text| !text.starts_with("http://") && !text.starts_with("https://")).map(ToString::to_string))
         .or_else(|| url.as_ref().map(|_| "External dependency".to_string()))?;
     let declared_source = json_string(value, &["source", "provider", "source_kind", "sourceKind"])
         .map(|source| source.to_lowercase());
     let (url_source, url_domain, url_mod_id) = url.as_deref().map(dependency_identity_from_url).unwrap_or((None, None, None));
     let source_kind = url_source.or(declared_source).or_else(|| fallback_source.map(ToString::to_string));
-    let mod_id = json_id_string(value, &["mod_id", "modId", "dependency_mod_id", "dependencyModId", "id"])
+    let mod_id = json_id_string(value, &["mod_id", "modId", "dependency_mod_id", "dependencyModId"])
+        .or_else(|| linked_mod.and_then(|entry| json_id_string(entry, &["id", "mod_id"])))
         .or(url_mod_id);
     let game_domain = json_string(value, &["game_domain", "gameDomain", "domain"])
         .or(url_domain)
         .or_else(|| fallback_game_domain.map(ToString::to_string));
     let numeric_game_id = json_id_string(value, &["game_id", "gameId", "numeric_game_id", "numericGameId"])
+        .or_else(|| linked_mod.and_then(|entry| json_id_string(entry, &["game_id"])))
         .or_else(|| fallback_numeric_game_id.map(ToString::to_string));
     let optional = value.get("optional").and_then(|entry| entry.as_bool()).unwrap_or_else(|| {
         json_string(value, &["type", "requirement_type", "requirementType", "status"])
@@ -10230,6 +10297,7 @@ fn source_dependency_from_value(
     let notes = json_string(value, &["notes", "note", "description", "instructions"]);
     let version_constraint = json_string(value, &["version_constraint", "versionConstraint", "minimum_version", "minimumVersion", "version"]);
     let identity = mod_id.as_deref().or(url.as_deref()).unwrap_or(&name);
+    let canonical_url = url.clone().or_else(|| if source_kind.as_deref() == Some("modworkshop") { mod_id.as_ref().map(|id| format!("https://modworkshop.net/mod/{id}")) } else { None });
     Some(SourceDependencyItem {
         id: format!("source-dependency-{}-{}", dependency_id_fragment(identity), index),
         name,
@@ -10239,9 +10307,11 @@ fn source_dependency_from_value(
         game_domain,
         numeric_game_id,
         mod_id,
-        url,
+        url: canonical_url,
         notes,
         version_constraint,
+        thumbnail_url: linked_mod.and_then(|entry| modworkshop_summary_from_api_value_for_game(entry, None)).and_then(|summary| summary.thumbnail_url)
+            .or_else(|| json_string(value, &["thumbnailUrl", "thumbnail_url", "pictureUrl", "picture_url"])),
     })
 }
 
@@ -11657,6 +11727,7 @@ fn modworkshop_dependencies_from_html(html: &str) -> Vec<SourceDependencyItem> {
                             url: Some(url),
                             notes: None,
                             version_constraint: None,
+                            thumbnail_url: None,
                         });
                     }
                 }
@@ -13112,12 +13183,7 @@ fn open_source_file_download(
             .nexus_api_key
             .as_deref()
             .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
-        let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
-            .or_else(|| {
-                let source_config = source_config_for_profile_id(profile_id.as_deref());
-                nexus_domain_from_source_config(&source_config)
-            })
-            .unwrap_or_else(|| "payday3".to_string());
+        let nexus_domain = nexus_domain_for_request(game_domain.as_deref(), &source_config_for_profile_id(profile_id.as_deref()))?;
 
         let url = format!(
             "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
@@ -13329,12 +13395,7 @@ fn fetch_nexus_mod_detail(mod_id: String, profile_id: Option<String>, game_domai
         .as_deref()
         .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
 
-    let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
-        .or_else(|| {
-            let source_config = source_config_for_profile_id(profile_id.as_deref());
-            nexus_domain_from_source_config(&source_config)
-        })
-        .ok_or_else(|| "This profile has no Nexus game mapping. Paste a full Nexus mod page URL or configure a Nexus source for this profile.".to_string())?;
+    let nexus_domain = nexus_domain_for_request(game_domain.as_deref(), &source_config_for_profile_id(profile_id.as_deref()))?;
 
     // GraphQL detail is metadata-only for now. The live schema path works, but
     // files are still more reliable through Nexus REST V1, so never return a
@@ -13348,7 +13409,7 @@ fn fetch_nexus_mod_detail(mod_id: String, profile_id: Option<String>, game_domai
     )?;
 
     let mut summary = nexus_summary_from_value(&mod_value);
-    summary.game_id = summary.game_id.or_else(|| Some(nexus_domain.clone()));
+    summary.game_id = Some(nexus_domain.clone());
     summary.page_url = Some(format!("https://www.nexusmods.com/{}/mods/{}", nexus_domain, mod_id));
     let description = json_string(&mod_value, &["description", "summary"])
         .map(|text| html_to_text(&text))
@@ -13358,7 +13419,11 @@ fn fetch_nexus_mod_detail(mod_id: String, profile_id: Option<String>, game_domai
         &format!("https://api.nexusmods.com/v1/games/{}/mods/{}/files.json", nexus_domain, mod_id),
         Some(api_key),
     )
-    .unwrap_or(serde_json::Value::Null);
+    .map_err(|error| format!("Nexus file list could not be loaded for {}/{}: {}", nexus_domain, mod_id, error))?;
+
+    if files_value.get("files").and_then(serde_json::Value::as_array).is_none() {
+        return Err("Nexus returned an invalid file-list response. Refresh the mod page to retry.".to_string());
+    }
 
     let mut file_items = json_array(&files_value, &["files", "data"])
         .into_iter()
@@ -13480,7 +13545,7 @@ fn fetch_nexus_mod_detail(mod_id: String, profile_id: Option<String>, game_domai
     }
 
     if detail.files.is_empty() {
-        detail.logs.push("Nexus REST V1 files endpoint returned no installable files. Use Website if the website shows files behind extra permissions.".to_string());
+        detail.logs.push("Nexus returned a valid file list with no downloadable mod files.".to_string());
     }
 
     upsert_source_index_detail(&detail);
@@ -15586,7 +15651,7 @@ fn resolve_source_file_download_url(
             .as_deref()
             .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
         let nexus_domain = safe_nexus_game_domain(nexus_game_domain)
-            .unwrap_or_else(|| "payday3".to_string());
+            .ok_or_else(|| "Nexus downloads require a game domain slug, not a numeric game ID.".to_string())?;
 
         let url = format!(
             "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
@@ -16721,14 +16786,26 @@ async fn install_staged_file_to_game(
     description: String,
     replace_file_names: Vec<String>,
     profile_id: Option<String>,
+    replace_receipt_id: Option<String>,
 ) -> Result<InstallApplyResult, String> {
     let profile_id = require_game_profile_installation(profile_id.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         if !is_builtin_payday3_profile(Some(&profile_id)) {
-            if !replace_file_names.is_empty() {
-                return Err("Remove the previous receipt-owned mod before installing its replacement for this profile.".to_string());
+            let install = || profile_installs::install_profile_source_file(&profile_id, Path::new(&staged_file_path), &source, &mod_id, &file_id, &mod_name, version, author, thumbnail_url, page_url);
+            let applied = if let Some(id) = replace_receipt_id {
+                profile_installs::replace_profile_source_install(&profile_id, &id, &source, &mod_id, install)?
+            } else {
+                if !replace_file_names.is_empty() { return Err("A verified receipt ID is required to replace this mod safely".into()); }
+                install()?
+            };
+            let path = Path::new(&applied.receipt_path);
+            let mut receipt = read_json_file(path).ok_or("Installed receipt could not be read")?;
+            let fields = receipt.as_object_mut().ok_or("Installed receipt is malformed")?;
+            for (key, value) in [("sourceFileName",source_file_name), ("sourceFileCategory",source_file_category), ("sourceFileUploadedAt",source_file_uploaded_at), ("sourceFileVersion",source_file_version), ("bannerUrl",banner_url)] {
+                if let Some(value) = value { fields.insert(key.into(), value.into()); }
             }
-            return profile_installs::install_profile_source_file(&profile_id, Path::new(&staged_file_path), &source, &mod_id, &file_id, &mod_name, version, author, thumbnail_url, page_url);
+            write_json_file(path, &receipt, "source file metadata")?;
+            return Ok(applied);
         }
         install_staged_file_to_game_internal(
             &staged_file_path,
@@ -16765,6 +16842,8 @@ async fn stage_source_file_download(
     description: String,
     game_domain: Option<String>,
     profile_id: Option<String>,
+    install_dependencies: Option<bool>,
+    dependency_names: Option<Vec<String>>,
 ) -> Result<StagedDownloadResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let profile_id = require_game_profile_installation(profile_id.as_deref())?;
@@ -16817,9 +16896,15 @@ async fn stage_source_file_download(
         } else {
             serde_json::Value::Null
         };
-        let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
-            .or_else(|| nexus_domain_from_source_config(&source_config));
-        let download_candidates = source_file_download_candidates(&source, &mod_id, &file_id, download_url.clone(), nexus_domain.as_deref());
+        let nexus_domain = if source.eq_ignore_ascii_case("nexus") {
+            Some(nexus_domain_for_request(game_domain.as_deref(), &source_config)?)
+        } else { None };
+        let download_candidates = if source.eq_ignore_ascii_case("nexus") {
+            vec![resolve_source_file_download_url(&source, &mod_id, &file_id, None, nexus_domain.as_deref())
+                .map_err(|error| format!("Nexus could not authorize this file download. {}", error))?]
+        } else {
+            source_file_download_candidates(&source, &mod_id, &file_id, download_url.clone(), None)
+        };
 
         if download_candidates.is_empty() {
             return Err("This source did not expose a download URL.".to_string());
@@ -16990,12 +17075,28 @@ async fn stage_source_file_download(
             }
         };
 
+        let dependency_policy = load_profile_settings_internal(&profile_id).dependency_setup;
+        let dependency_policy = if dependency_policy == "inherit" { settings.profile_default_dependency_setup.as_str() } else { dependency_policy.as_str() };
+        let dependency_result = (|| -> Result<Vec<String>, String> { Ok(if install_dependencies.unwrap_or(false) && dependency_policy != "off" {
+            if let Some(paths) = paths.as_ref() {
+                if payday_uses_ue5_layout(paths) {
+                    if let Some(message) = payday_ue5_runtime_warning(paths) { return Err(message); }
+                    profile_dependencies::ensure(&profile_id, &["pd3-ue5-ue4ss-allow-pak".into()], false)?.messages
+                } else { Vec::new() }
+            } else {
+                profile_installs::prepare_archive_dependencies(&profile_id, &staged_file, &dependency_names.unwrap_or_default())?
+            }
+        } else { Vec::new() }) })();
+        let (dependency_messages, dependency_error) = match dependency_result {
+            Ok(messages) => (messages, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let inspection = if let Some(paths) = paths.as_ref() {
             inspect_staged_file(paths, &staged_file, &description)
         } else {
             profile_installs::inspect_profile_source_file(&profile_id, &staged_file)
         };
-        let (archive_kind, entries, mut warnings) = match inspection {
+        let (archive_kind, mut entries, mut warnings) = match inspection {
             Ok(result) => result,
             Err(error) => {
                 write_stage_download_diagnostic(
@@ -17018,6 +17119,14 @@ async fn stage_source_file_download(
             }
         };
 
+        warnings.extend(dependency_messages);
+        if let Some(error) = dependency_error {
+            warnings.push(format!("Download preserved; installation blocked by dependency setup: {error}"));
+            for entry in entries.iter_mut().filter(|e| e.route_kind != "folder") {
+                entry.blocked = true;
+                entry.reason.push_str(&format!(" Dependency setup requires review: {error}"));
+            }
+        }
         if entries.iter().any(|entry| entry.blocked) {
             warnings.push("One or more entries are blocked until the installer has safer handling for this route.".to_string());
         }
@@ -21037,6 +21146,8 @@ mod profile_settings_tests {
         let selected = source_config_for_profile_source(Some("builtin.borderlands"), Some("borderlands-enhanced-nexus-api"));
         assert_eq!(nexus_domain_from_source_config(&selected).as_deref(), Some("borderlandsgotyenhanced"));
         assert_eq!(config_string(&selected, "nexusGameId").as_deref(), Some("2776"));
+        assert_eq!(nexus_domain_for_request(Some("2776"), &config).unwrap(), "borderlandsgotyenhanced");
+        assert_eq!(nexus_domain_for_request(Some("360"), &config).unwrap(), "borderlands");
     }
 
     #[test]
@@ -21074,6 +21185,7 @@ mod profile_settings_tests {
             let nexus = sources.iter().find(|source| json_string(source, "provider").as_deref() == Some("nexus") && json_string(source, "browseMode").as_deref() == Some("api")).unwrap_or_else(|| panic!("missing Nexus API source for {}", profile_id));
             assert_eq!(json_string(nexus, "providerSlug").as_deref(), Some(domain));
             assert_eq!(json_string(nexus, "providerGameId").as_deref(), Some(game_id));
+            assert_eq!(nexus_domain_for_request(Some(game_id), &config).unwrap(), domain);
         }
 
         for (profile_id, slug, game_id) in [
@@ -21268,6 +21380,18 @@ mod profile_settings_tests {
     }
 
     #[test]
+    fn nexus_file_requests_resolve_numeric_ids_without_cross_game_fallback() {
+        assert!(safe_nexus_game_domain(Some("5717")).is_none());
+        let config = serde_json::json!({"nexusGameId": "5717", "nexusDomain": "payday3"});
+        assert_eq!(nexus_domain_for_request(Some("5717"), &config).unwrap(), "payday3");
+        assert_eq!(nexus_domain_for_request(None, &config).unwrap(), "payday3");
+        assert_eq!(nexus_domain_for_request(Some("payday2"), &config).unwrap(), "payday2");
+        assert!(nexus_domain_for_request(Some("648"), &config).is_err());
+        assert!(nexus_domain_for_request(Some("https://invalid.example"), &config).is_err());
+        assert!(nexus_domain_for_request(None, &serde_json::Value::Null).is_err());
+    }
+
+    #[test]
     fn nexus_pagination_uses_server_counts_not_filtered_card_count() {
         assert!(nexus_page_has_more(1, 20, 20, Some(45)));
         assert!(nexus_page_has_more(2, 20, 20, Some(45)));
@@ -21332,8 +21456,17 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            receipt_metadata::load_managed_thumbnail_data_url,
+            receipt_metadata::save_custom_receipt_thumbnail,
+            receipt_metadata::update_install_receipt_metadata,
+            receipt_metadata::get_source_taxonomy_for_game,
+            receipt_metadata::refresh_current_game_taxonomy,
             managed_loaders::managed_loader_status,
             managed_loaders::managed_loader_action,
+            profile_dependencies::install_profile_dependency,
+            profile_dependencies::download_profile_dependency_tool,
+            source_requirements::fetch_mod_requirements,
+            source_requirements::fetch_dependency_metadata,
             window_minimize,
             window_toggle_maximize,
             window_close,
@@ -21359,6 +21492,8 @@ pub fn run() {
             open_game_profile_draft_runtime,
             preview_game_profile_setup,
             run_profile_creator_test_action,
+            profile_installs::get_profile_creator_install_rules,
+            profile_installs::set_local_win64_matched_files_enabled,
             save_profile_artwork_data_url,
             cache_profile_artwork_remote_url,
             import_profile_artwork_image,

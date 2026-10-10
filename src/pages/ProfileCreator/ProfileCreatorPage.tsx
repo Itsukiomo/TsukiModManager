@@ -440,7 +440,7 @@ const modTypePresets: ModTypePreset[] = [
   { id: "mod_override", label: "Mod Override", description: "Asset override folders that merge into a game or loader override directory.", name: "Mod Override", kind: "folder_based", extension: "", extensions: [], filenamePattern: "", folderMarker: "mod_overrides|assets|main.xml", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}/assets/mod_overrides", preserveStructure: true, flattenWrapper: true, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Filename order", requiredDependency: "", conflictPolicy: "Ask user on same destination file", conditions: "Merge matched folders into the selected override destination and track receipt ownership.", priority: 600 },
   { id: "reframework_script", label: "REFramework Script", description: "Lua scripts installed into REFramework autorun.", name: "REFramework Script", kind: "custom_extension", extension: ".lua", extensions: [], filenamePattern: "", folderMarker: "", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}/reframework/autorun", preserveStructure: false, flattenWrapper: true, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Loader manifest", requiredDependency: "REFramework", conflictPolicy: "Ask user on same destination file", conditions: defaultInstallBehavior, priority: 500 },
   { id: "beardlib_content", label: "BeardLib Content", description: "BeardLib folders detected by main.xml or mod metadata files.", name: "BeardLib Content", kind: "folder_based", extension: "", extensions: [], filenamePattern: "", folderMarker: "main.xml|mod.txt", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}/mods", preserveStructure: true, flattenWrapper: true, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Loader manifest", requiredDependency: "BeardLib", conflictPolicy: "Ask user on same destination file", conditions: defaultInstallBehavior, priority: 500 },
-  { id: "loose_file", label: "Loose File Mod", description: "Loose files or folders copied into an approved game destination.", name: "Loose File Mod", kind: "filename_pattern", extension: "", extensions: [], filenamePattern: "**/*", folderMarker: "", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}", preserveStructure: true, flattenWrapper: false, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Keep archive order", requiredDependency: "", conflictPolicy: "Ask user on same destination file", conditions: defaultInstallBehavior, priority: 700 },
+  { id: "loose_file", label: "Loose File Mod", description: "Loose files or folders copied into an approved game destination.", name: "Loose File Mod", kind: "filename_pattern", extension: "", extensions: [], filenamePattern: "**/*", folderMarker: "", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}", preserveStructure: true, flattenWrapper: false, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Keep archive order", requiredDependency: "", conflictPolicy: "Ask user on same destination file", conditions: defaultInstallBehavior, priority: 10 },
   { id: "streaming_asset", label: "Streaming Asset Mod", description: "Unity StreamingAssets content installed into the matching asset folder.", name: "Streaming Asset Mod", kind: "folder_based", extension: "", extensions: [], filenamePattern: "", folderMarker: "StreamingAssets|streamingassets", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "${GAME_ROOT}/StreamingAssets", preserveStructure: true, flattenWrapper: true, enableDisableStrategy: defaultReceiptToggle, loadOrderStrategy: "Keep archive order", requiredDependency: "", conflictPolicy: "Warn and allow overwrite with backup", conditions: defaultInstallBehavior, priority: 600 },
   { id: "custom", label: "Custom Mod Type", description: "Start empty and define the files, destination, dependency, and behavior yourself.", name: "", kind: "custom_extension", extension: "", extensions: [], filenamePattern: "", folderMarker: "", companionPattern: "", pairedRequired: false, allowMultipleExtensions: false, extensionGroupMode: "any", destination: "", preserveStructure: false, flattenWrapper: false, enableDisableStrategy: "", loadOrderStrategy: "", requiredDependency: "", conflictPolicy: "", conditions: "", priority: 500 },
 ];
@@ -990,7 +990,7 @@ function profileTemplateAdditions(templateId: ProfileTemplateId) {
   if (templateId === "blank" || templateId === "custom") return none;
   if (templateId === "unreal") return {
     customPaths: [templatePath("PAKS", "Paks", "Content/Paks"), templatePath("MODS", "~mods", "Content/Paks/~mods"), templatePath("WIN64", "Win64", "Binaries/Win64"), templatePath("DISABLED_MODS", "Disabled Mods", "Tsuki_Disabled_Mods"), templatePath("BACKUPS", "Backups", "Tsuki_Backups")],
-    customFileTypes: [makeCustomFileType("custom_extension", "pak"), makeCustomFileType("custom_extension", "win64"), makeCustomFileType("filename_pattern", "loose_file")],
+    customFileTypes: [makeCustomFileType("custom_extension", "pak"), makeCustomFileType("custom_extension", "win64")],
     dependencies: [makeDependency("UE4SS"), makeDependency("DLL Loader")],
     installBehavior: [templateInstallRule("pak", "PAK-family files", "Copy Matching Files", "${PATH:MODS}"), templateInstallRule("win64", "Runtime files", "Back Up and Replace", "${PATH:WIN64}"), templateInstallRule("loose", "Loose files", "Preserve Folder Structure", "${GAME_ROOT}")],
     enableDisable: [templateToggleStrategy("pak", "PAK Mod"), templateToggleStrategy("win64", "Win64 Mod")],
@@ -1006,7 +1006,7 @@ function profileTemplateAdditions(templateId: ProfileTemplateId) {
   };
   if (templateId === "reframework") return {
     customPaths: [templatePath("REFRAMEWORK", "REFramework", "reframework"), templatePath("AUTORUN", "Autorun", "reframework/autorun"), templatePath("PLUGINS", "Plugins", "reframework/plugins"), templatePath("DISABLED_MODS", "Disabled Mods", "Tsuki_Disabled_Mods")],
-    customFileTypes: [makeCustomFileType("custom_extension", "reframework_script"), makeCustomFileType("custom_extension", "win64"), makeCustomFileType("filename_pattern", "loose_file")],
+    customFileTypes: [makeCustomFileType("custom_extension", "reframework_script"), makeCustomFileType("custom_extension", "win64")],
     dependencies: [makeDependency("REFramework")],
     installBehavior: [templateInstallRule("reframework", "REFramework scripts", "Copy Matching Files", "${PATH:AUTORUN}"), templateInstallRule("plugins", "REFramework plugins", "Copy Matching Files", "${PATH:PLUGINS}")],
     enableDisable: [templateToggleStrategy("reframework", "REFramework Script")],
@@ -1014,7 +1014,7 @@ function profileTemplateAdditions(templateId: ProfileTemplateId) {
   };
   if (templateId === "bepinex") return {
     customPaths: [templatePath("BEPINEX", "BepInEx", "BepInEx"), templatePath("BEPINEX_PLUGINS", "BepInEx Plugins", "BepInEx/plugins"), templatePath("DISABLED_MODS", "Disabled Mods", "Tsuki_Disabled_Mods")],
-    customFileTypes: [makeCustomFileType("custom_extension", "win64"), makeCustomFileType("filename_pattern", "loose_file")],
+    customFileTypes: [makeCustomFileType("custom_extension", "win64")],
     dependencies: [makeDependency("BepInEx")],
     installBehavior: [templateInstallRule("bepinex", "BepInEx plugins", "Copy Matching Files", "${PATH:BEPINEX_PLUGINS}")],
     enableDisable: [templateToggleStrategy("bepinex", "Win64 Mod")],
@@ -2622,8 +2622,12 @@ export function ProfileCreatorPage({ sourceProfile = null, canEditOfficialProfil
     }
   }
 
-  function applyProfileTemplate(templateId: ProfileTemplateId) {
+  async function applyProfileTemplate(templateId: ProfileTemplateId) {
     const additions = profileTemplateAdditions(templateId);
+    if (templateId === "superblt" || templateId === "reframework") {
+      try { additions.customFileTypes = await invoke<CustomFileType[]>("get_profile_creator_install_rules", { templateId }); }
+      catch (error) { setMessage(`Template rules could not be loaded: ${dialogError(error)}`); return; }
+    }
     setDraft((current) => ({
       ...current,
       customPaths: [...current.customPaths, ...additions.customPaths],
@@ -3656,7 +3660,7 @@ function DependenciesPanel({ profileId, items, mode, addDependency, openEditor, 
           <div><DependencyName dependency={dependency} /><span>{dependency.description}</span></div>
           <span>{dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended"}</span>
           <span>{dependency.requires?.length ? `Requires ${dependency.requires.map((id) => catalogDependencies.find((candidate) => candidate.id === id)?.name ?? id).join(", ")}` : "No parent dependency"}</span>
-          <DependencyActions dependency={dependency} />
+          <DependencyActions profileId={profileId} dependency={dependency} />
         </article>)}
       </div>
       <SummaryCard title="Dependency Graph" summary="Tsuki resolves parent dependencies first and deduplicates shared frameworks."><div className="creator-guided-summary"><span>Profile records enriched</span><strong>{items.length}</strong><span>Catalog identities</span><strong>{catalogDependencies.length}</strong><span>Cycles</span><strong>{graph.cycles.length ? graph.cycles.join(" | ") : "None"}</strong></div></SummaryCard>

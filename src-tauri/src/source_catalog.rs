@@ -158,6 +158,7 @@ fn match_profile_sources_with_hashing(sources: &[SourceModSummary], profile: &st
     let index = file_index(profile);
     let proofs = unique_payloads(&index);
     let mut existing = BTreeMap::<String, Vec<String>>::new();
+    let all_hashes = index.archives.values().flat_map(|a| a.file_entries.iter()).filter(|f| payload_file(&f.file_name)).map(|f| f.sha256.clone()).collect::<BTreeSet<_>>();
     let names = index.archives.values().flat_map(|a| a.file_entries.iter())
         .filter(|file| payload_file(&file.file_name))
         .filter_map(|file| Path::new(&file.file_name).file_name().and_then(|n| n.to_str()).map(|n| n.to_ascii_lowercase()))
@@ -166,7 +167,7 @@ fn match_profile_sources_with_hashing(sources: &[SourceModSummary], profile: &st
         detect_payday3_paths_internal().map(|paths| paths.game_root)
     } else { profile_installs::indexed_game_root(profile).ok() };
     let mut cache = read_hash_cache();
-    fn scan(root: &Path, names: &BTreeSet<String>, proofs: &BTreeMap<String, IndexedArchive>, existing: &mut BTreeMap<String, Vec<String>>, cache: &mut BTreeMap<String, FileHashCacheRecord>, hash_large: bool) {
+    fn scan(root: &Path, names: &BTreeSet<String>, proofs: &BTreeSet<String>, existing: &mut BTreeMap<String, Vec<String>>, cache: &mut BTreeMap<String, FileHashCacheRecord>, hash_large: bool) {
         let Ok(items) = fs::read_dir(root) else { return; };
         for item in items.flatten() {
             let Ok(kind) = item.file_type() else { continue; };
@@ -176,7 +177,7 @@ fn match_profile_sources_with_hashing(sources: &[SourceModSummary], profile: &st
                 if !["tsuki_backups", "backups", "uninstalled", ".git", "saved"].contains(&name.as_str()) { scan(&item.path(), names, proofs, existing, cache, hash_large); }
             } else if names.contains(&name) {
                 let Ok(meta) = item.metadata() else { continue; };
-                let modified = meta.modified().ok().and_then(|v| v.duration_since(UNIX_EPOCH).ok()).map(|v| v.as_secs());
+                let modified = meta.modified().ok().and_then(|v| v.duration_since(UNIX_EPOCH).ok()).and_then(|v| u64::try_from(v.as_nanos()).ok());
                 let hash = cached_sha256_for_file(&item.path(), meta.len(), modified, cache).or_else(|| {
                     if !hash_large { return None; }
                     let sha256 = sha256_file(&item.path()).ok()?;
@@ -185,12 +186,12 @@ fn match_profile_sources_with_hashing(sources: &[SourceModSummary], profile: &st
                     Some(sha256)
                 });
                 if let Some(hash) = hash {
-                    if proofs.contains_key(&hash) { existing.entry(hash).or_default().push(item.path().display().to_string()); }
+                    if proofs.contains(&hash) { existing.entry(hash).or_default().push(item.path().display().to_string()); }
                 }
             }
         }
     }
-    if !names.is_empty() { if let Some(root) = root { scan(&root, &names, &proofs, &mut existing, &mut cache, hash_large); } }
+    if !names.is_empty() { if let Some(root) = root { scan(&root, &names, &all_hashes, &mut existing, &mut cache, hash_large); } }
     write_hash_cache(&cache);
     let mut receipt_lookup = BTreeMap::<(String, String), Vec<&InstalledStateRecord>>::new();
     for record in records.iter().filter(|record| record.files.iter().any(|file| file.live)) {
@@ -214,12 +215,20 @@ fn match_profile_sources_with_hashing(sources: &[SourceModSummary], profile: &st
         if receipt.is_none() {
             for (proof, files) in payload_lookup.get(&(source.source.clone(), source.source_id.clone())).into_iter().flatten() {
                 if proof.source == "nexus" && !source.page_url.as_deref().is_some_and(|url| url.contains(&format!("/{}/mods/", proof.game))) { continue; }
-                result.installed = true; result.enabled = true; result.confidence = 100;
-                result.reason = "Exact SHA-256 match to a unique payload in this game's source index".into();
+                let variants = index.archives.values().filter(|a| a.status == "hashed" && a.source == proof.source && a.game == proof.game && a.mod_id == proof.mod_id && a.file_entries.iter().any(|f| proofs.contains_key(&f.sha256)) && a.file_entries.iter().filter(|f| payload_file(&f.file_name) && f.file_size > 0).all(|f| existing.contains_key(&f.sha256))).collect::<Vec<_>>();
+                let variant_ids = variants.iter().map(|a| &a.file_id).collect::<BTreeSet<_>>();
+                let complete = !variants.is_empty();
+                result.installed = true; result.enabled = true; result.confidence = if complete { 100 } else { 85 };
+                result.reason = if complete { "Verified: complete indexed payload hash set" } else { "Likely: unique payload found, but archive contents are incomplete" }.into();
                 result.match_kind = "sha256".into(); result.matched_files.extend(files.iter().cloned());
-                result.source_file_id = Some(proof.file_id.clone()); result.source_file_name = Some(proof.file_name.clone()); result.source_file_version = proof.version.clone();
+                if complete && variant_ids.len() == 1 {
+                    let archive = variants[0];
+                    result.source_file_id = Some(archive.file_id.clone()); result.source_file_name = Some(archive.file_name.clone()); result.source_file_version = archive.version.clone();
+                    result.matched_files.extend(archive.file_entries.iter().flat_map(|f| existing.get(&f.sha256).into_iter().flatten().cloned()));
+                } else { result.source_file_id = None; result.source_file_version = None; }
             }
         }
+        result.matched_files.sort(); result.matched_files.dedup();
         result
     }).collect())
 }
@@ -238,6 +247,18 @@ fn matched_payload_lookup<'a>(proofs: &'a BTreeMap<String, IndexedArchive>, exis
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InstalledSourceIndexIdentity { source_mod: SourceModSummary, match_info: InstalledSourceMatch }
+
+pub(super) fn verified_update_records(profile: &str) -> Result<Vec<InstalledStateRecord>, String> {
+    let sources = read_catalog(Some(profile))?.records.into_values().map(|r| r.summary).collect::<Vec<_>>();
+    let matches = match_profile_sources_with_hashing(&sources, profile, true)?;
+    sources.into_iter().zip(matches).filter(|(_, matched)| matched.match_kind == "sha256" && matched.confidence == 100 && matched.source_file_id.is_some())
+        .map(|(source, matched)| serde_json::from_value(serde_json::json!({
+            "uid":format!("index:{profile}:{}:{}:{}", source.source, source.source_id, matched.source_file_id.as_deref().unwrap_or_default()),
+            "id":source.source_id,"sourceModId":source.source_id,"name":source.name,"source":source.source,
+            "filename":matched.source_file_name.clone().unwrap_or_default(),"fileType":"indexed","folderId":"indexed","location":"game","enabled":matched.enabled,"files":[],
+            "sourceFileId":matched.source_file_id,"sourceFileName":matched.source_file_name,"sourceFileVersion":matched.source_file_version,"pageUrl":source.page_url
+        })).map_err(|e| e.to_string())).collect()
+}
 
 #[tauri::command]
 pub(crate) async fn match_installed_source_index_v2(profile_id: Option<String>) -> Result<Vec<InstalledSourceIndexIdentity>, String> {
@@ -306,6 +327,21 @@ mod tests {
         let first = match_profile_sources_with_hashing(&[source.clone()], profile, true).unwrap();
         assert!(first[0].installed);
         assert_eq!(first[0].match_kind, "sha256");
+        assert_eq!(first[0].confidence, 100);
+        let index_path = root.join("file-hashes.json");
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        raw["archives"]["duplicate"] = raw["archives"]["fixture"].clone();
+        raw["archives"]["duplicate"]["fileId"] = "124".into();
+        fs::write(&index_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let ambiguous = match_profile_sources_with_hashing(&[source.clone()], profile, true).unwrap();
+        assert_eq!(ambiguous[0].confidence, 100);
+        assert!(ambiguous[0].source_file_id.is_none(), "Identical versions cannot prove an installed file ID");
+        raw["archives"].as_object_mut().unwrap().remove("duplicate");
+        raw["archives"]["fixture"]["fileEntries"].as_array_mut().unwrap().push(serde_json::json!({"fileName":"missing.lua","fileSize":4,"sha256":"b".repeat(64)}));
+        fs::write(&index_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let partial = match_profile_sources_with_hashing(&[source.clone()], profile, true).unwrap();
+        assert_eq!(partial[0].confidence, 85);
+        assert!(partial[0].source_file_id.is_none());
         let mut wrong_game = source.clone(); wrong_game.page_url = Some("https://www.nexusmods.com/borderlands/mods/99".into());
         assert!(!match_profile_sources(&[wrong_game], profile).unwrap()[0].installed);
         fs::remove_file(payload).unwrap();

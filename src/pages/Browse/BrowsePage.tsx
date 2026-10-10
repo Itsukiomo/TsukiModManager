@@ -17,6 +17,7 @@ import { ModCard } from "../../components/ModCard";
 import { UnifiedModPage } from "../../components/UnifiedModPage";
 import type { UnifiedAction, UnifiedDependencyItem, UnifiedFileGroup, UnifiedInfoItem, UnifiedTimelineItem } from "../../components/UnifiedModPage";
 import { DependencyActions, DependencyName } from "../../components/DependencyActions";
+import { DependencyRequirements } from "../../components/DependencyRequirements";
 import { buildDependencyGraph, dependencySourceLabel, dependencyToSourceSummary, enrichDependency, type DependencyDefinition, type DependencySourceKind } from "../../models/dependency";
 import { buildNexusBrowseKey, normalizeNexusId } from "../../sources/nexus/ids";
 import { readThumbnailFailures, thumbnailRecentlyFailed, writeThumbnailFailures } from "../../utils/thumbnailFailures";
@@ -2583,6 +2584,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
     reportTaskProgress("Download mod", 12, `${mod.name} / ${file.name}`);
 
     try {
+      const settings = await invoke<{ profileDefaultDependencySetup: "ask" | "auto" | "off" }>("get_app_settings");
+      const profileSettings = await invoke<ProfileSettings>("get_profile_settings", { profileId });
+      const dependencyPolicy = profileSettings.dependencySetup === "inherit" ? settings.profileDefaultDependencySetup : profileSettings.dependencySetup;
+      const installDependencies = dependencyPolicy === "auto" || (dependencyPolicy === "ask" && window.confirm("Install or update required game frameworks from their approved sources? Existing settings and externally modified files will be preserved."));
       const result = await invoke<StagedDownloadResult>("stage_source_file_download", {
         source: mod.source,
         modId: mod.sourceId,
@@ -2591,8 +2596,13 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
         downloadUrl: file.downloadUrl ?? null,
         modName: mod.name,
         description: mod.description,
-        gameDomain: mod.source === "nexus" ? nexusGameDomain : null,
+        gameDomain: mod.source === "nexus" ? mod.gameId ?? nexusGameDomain : null,
         profileId,
+        installDependencies,
+        dependencyNames: (mod.dependencies ?? []).filter((dependency) => dependency.required && !dependency.optional).map((dependency) => {
+          const identity = enrichDependency({ name: dependency.name, sourceKind: dependency.sourceKind, modId: dependency.modId ?? undefined, gameDomain: dependency.gameDomain ?? undefined, url: dependency.url ?? undefined }, profileId);
+          return identity.dynamic ? identity.name : identity.id;
+        }),
       });
 
       setResults((current) => [result, ...current].slice(0, 10));
@@ -2675,14 +2685,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
         return;
       }
 
-      if (files.length > 1) {
-        setInstallPickerReplacementFiles(match.matchedFiles);
-        setSelectedFileIds(defaultSelectedFileIds(files, detail.source));
-        setInstallPickerMod({ ...detail, files });
-        setStatus(`Choose the update file for ${detail.name}. Latest main file is selected.`);
-      } else {
-        await stageFile(detail, files[0], match.matchedFiles);
-      }
+      setInstallPickerReplacementFiles(match.matchedFiles);
+      setSelectedFileIds(defaultSelectedFileIds(files, detail.source));
+      setInstallPickerMod({ ...detail, files });
+      setStatus(`Choose the update file for ${detail.name}. Latest main file is selected.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -2712,11 +2718,6 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
         setSelectedMod(safeDetail);
         setView("detail");
         setStatus("No installable download files were exposed. Opened the mod page so you can check the source manually.");
-        return;
-      }
-
-      if (files.length === 1) {
-        await stageFile(safeDetail, files[0]);
         return;
       }
 
@@ -2868,7 +2869,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
                 <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFileNames(matchedNames)} disabled={installingKey !== null}>Uninstall</button>
               </>
             ) : (
-              <button className="ghost-button compact install-button" type="button" onClick={() => stageFile(selectedMod, file)} disabled={installingKey !== null || !downloadsEnabled} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>{installingKey === fileKey(selectedMod, file) ? "Installing..." : "Install"}</button>
+              <button className="ghost-button compact install-button" type="button" onClick={() => { setInstallPickerReplacementFiles([]); setSelectedFileIds([file.id]); setInstallPickerMod(selectedMod); }} disabled={installingKey !== null || !downloadsEnabled} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>{installingKey === fileKey(selectedMod, file) ? "Installing..." : "Install"}</button>
             ),
             progress: <MiniProgress active={installingKey === fileKey(selectedMod, file)} />,
           };
@@ -2962,7 +2963,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
         detail: [parent ? `Required by ${parent}` : dependency.description, dependency.versionConstraint ? `Version ${dependency.versionConstraint}` : null, dependencySourceLabel(dependency)].filter(Boolean).join(" - "),
         status: dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended",
         tone: dependency.required ? "warning" : "neutral",
-        actions: <DependencyActions dependency={dependency} onOpenNative={(item) => { const summary = dependencyToSourceSummary(item); if (!summary) return false; void openMod(summary); return true; }} />,
+        actions: <DependencyActions profileId={profileId} dependency={dependency} onOpenNative={(item) => { const summary = dependencyToSourceSummary(item); if (!summary) return false; void openMod(summary); return true; }} />,
       });
       const node = graphRoots.find((root) => root.dependency.id === dependency.id);
       node?.children.forEach((child) => addDependencyRow(child.dependency, dependency.name));
@@ -3028,6 +3029,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
 
         {installPickerMod && (
           <InstallPicker
+            profileId={profileId}
+            onDependenciesResolved={(dependencies) => setInstallPickerMod(current => current?.sourceId === installPickerMod.sourceId && current.source === installPickerMod.source ? { ...current, dependencies } : current)}
             mod={installPickerMod}
             match={sourceMatches[`${installPickerMod.source}-${installPickerMod.sourceId}`] ?? null}
             selectedFileIds={selectedFileIds}
@@ -3380,6 +3383,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
 
       {installPickerMod && (
         <InstallPicker
+          profileId={profileId}
+          onDependenciesResolved={(dependencies) => setInstallPickerMod(current => current?.sourceId === installPickerMod.sourceId && current.source === installPickerMod.source ? { ...current, dependencies } : current)}
           mod={installPickerMod}
           match={sourceMatches[`${installPickerMod.source}-${installPickerMod.sourceId}`] ?? null}
           selectedFileIds={selectedFileIds}
@@ -3417,6 +3422,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
 }
 
 function InstallPicker({
+  profileId,
+  onDependenciesResolved,
   mod,
   match,
   selectedFileIds,
@@ -3431,6 +3438,8 @@ function InstallPicker({
   onUninstall,
   onSetEnabled,
 }: {
+  profileId: string;
+  onDependenciesResolved: (dependencies: NonNullable<SourceModDetail["dependencies"]>) => void;
   mod: SourceModDetail;
   match: InstalledSourceMatch | null;
   selectedFileIds: string[];
@@ -3445,25 +3454,13 @@ function InstallPicker({
   onUninstall: (fileNames: string[]) => void;
   onSetEnabled: (fileNames: string[], enabled: boolean) => void;
 }) {
+  const [requirementsLoading, setRequirementsLoading] = useState(true);
   const files = installableFiles(mod.files, mod.source);
   const groups = groupedSourceFiles(files, mod.source);
   const installableUninstalledIds = files
     .filter((file) => matchedFileNamesForSourceFile(file, match).length === 0)
     .map((file) => file.id);
   const selectedUninstalledCount = selectedFileIds.filter((id) => installableUninstalledIds.includes(id)).length;
-  const requirements = (mod.dependencies ?? []).map((dependency) => enrichDependency({
-    name: dependency.name,
-    required: dependency.required,
-    optional: dependency.optional,
-    sourceKind: dependency.sourceKind as DependencySourceKind | undefined,
-    gameDomain: dependency.gameDomain ?? undefined,
-    numericGameId: dependency.numericGameId ?? undefined,
-    modId: dependency.modId ?? undefined,
-    url: dependency.url ?? undefined,
-    notes: dependency.notes ?? undefined,
-    versionConstraint: dependency.versionConstraint ?? undefined,
-  }));
-
   return (
     <div className="image-preview-overlay safe-overlay" role="dialog" aria-modal="true">
       <div className="install-preview-panel quick-install-panel">
@@ -3476,7 +3473,7 @@ function InstallPicker({
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds(defaultSelectedFileIds(files, mod.source).filter((id) => installableUninstalledIds.includes(id)))}>Latest Main</button>
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds(installableUninstalledIds)}>Select All</button>
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds([])}>Select None</button>
-          <button className="ghost-button compact install-button" type="button" onClick={onInstallSelected} disabled={!downloadsEnabled || installingKey !== null || selectedUninstalledCount === 0} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>
+          <button className="ghost-button compact install-button" type="button" onClick={onInstallSelected} disabled={requirementsLoading || !downloadsEnabled || installingKey !== null || selectedUninstalledCount === 0} title={!downloadsEnabled ? downloadsBlockedMessage : requirementsLoading ? "Loading requirements" : undefined}>
             {installingKey ? "Installing..." : `Install Selected (${selectedUninstalledCount})`}
           </button>
         </div>
@@ -3488,13 +3485,7 @@ function InstallPicker({
           </article>
         )}
 
-        {requirements.length > 0 && <section className="quick-file-bucket optional">
-          <div className="quick-file-bucket-heading"><strong>Requirements</strong><small>{requirements.length} linked</small></div>
-          {requirements.map((dependency) => <div className="quick-file-row" key={dependency.id}>
-            <div><DependencyName dependency={dependency} /><small>{dependency.required ? "Required" : "Optional"} - {dependencySourceLabel(dependency)}</small></div>
-            <DependencyActions dependency={dependency} />
-          </div>)}
-        </section>}
+        <DependencyRequirements mod={mod} profileId={profileId} onResolved={onDependenciesResolved} onLoadingChange={setRequirementsLoading} />
 
         <div className="quick-file-list quick-file-bucket-list">
           {([
@@ -3553,7 +3544,7 @@ function InstallPicker({
                       </div>
                     ) : (
                       <div className="quick-file-actions source-file-row-actions">
-                        <button className="ghost-button compact install-button" type="button" onClick={() => onInstallOne(mod, file)} disabled={!downloadsEnabled || installingKey !== null} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>
+                        <button className="ghost-button compact install-button" type="button" onClick={() => onInstallOne(mod, file)} disabled={requirementsLoading || !downloadsEnabled || installingKey !== null} title={!downloadsEnabled ? downloadsBlockedMessage : requirementsLoading ? "Loading requirements" : undefined}>
                           {installingKey === key ? "Installing..." : "Install"}
                         </button>
                       </div>

@@ -259,7 +259,7 @@ export function SettingsPage({ activeThemeId, onThemeChange, profile = null, pro
               return <div className={`managed-row ${reportItem?.found ? "" : "disabled"}`} key={dependency.id}>
                 <div><DependencyName dependency={dependency} /><p>{dependencySourceLabel(dependency)} - {dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended"}</p><small>{reportItem?.details ?? (dependency.sourceUnverified ? "Source not verified" : "Not detected")}</small></div>
                 <span className={reportItem?.found ? "badge good" : "badge"}>{reportItem?.status ?? "Not detected"}</span>
-                <DependencyActions dependency={dependency} />
+                <DependencyActions profileId={profileId} dependency={dependency} />
               </div>;
             })}
           </div>

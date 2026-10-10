@@ -274,9 +274,9 @@ fn recheck_profile_sandbox_receipts() {
             let receipt: InstallReceipt = serde_json::from_slice(&fs::read(&applied.receipt_path).unwrap()).unwrap();
             assert!(Path::new(&applied.receipt_path).canonicalize().unwrap().starts_with(&isolated));
             for owned in &receipt.files { assert!(Path::new(&owned.relative_path).starts_with(&game)); }
-            set_profile_receipt_enabled_internal(profile, &receipt.id, false).unwrap();
+            set_source_install_enabled(receipt.source.clone(), receipt.source_mod_id.clone().unwrap(), false, Some(profile.into()), Some(receipt.id.clone())).unwrap();
             assert!(receipt.files.iter().all(|owned| !Path::new(&owned.relative_path).exists()));
-            set_profile_receipt_enabled_internal(profile, &receipt.id, true).unwrap();
+            set_local_win64_matched_files_enabled(receipt.files.iter().map(|f| f.relative_path.clone()).collect(), true, Some(profile.into())).unwrap();
             for owned in &receipt.files { assert_eq!(sha256_file(Path::new(&owned.relative_path)).unwrap(),owned.sha256.clone().unwrap()); }
             uninstall_profile_receipt_internal(profile, &receipt.id).unwrap();
             assert!(receipt.files.iter().all(|owned| !Path::new(&owned.relative_path).exists()));
@@ -291,6 +291,61 @@ fn recheck_profile_sandbox_receipts() {
 fn sandbox_paths(root: &Path) -> PaydayPaths {
     let win64 = root.join("PAYDAY3/Binaries/Win64");
     PaydayPaths { game_root: root.to_path_buf(), pak_mods: root.join("PAYDAY3/Content/Paks/~mods"), ue4ss_mods: win64.join("ue4ss/Mods"), win64 }
+}
+
+#[test]
+#[ignore = "Requires isolated APPDATA under target/profile-smoke; no real game writes"]
+fn all_profile_toggle_command_round_trips() {
+    let appdata = PathBuf::from(env::var("APPDATA").unwrap()).canonicalize().unwrap();
+    let approved = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/profile-smoke").canonicalize().unwrap();
+    assert!(appdata.starts_with(&approved) && appdata != approved);
+    let profiles = ["builtin.payday3", "builtin.cyberpunk2077", "builtin.outlast-trials", "builtin.payday-the-heist", "builtin.payday2", "builtin.resident-evil-7", "builtin.resident-evil-village", "builtin.resident-evil-requiem", "builtin.borderlands", "builtin.borderlands2", "builtin.borderlands3", "builtin.borderlands4", "builtin.tiny-tinas-wonderlands", "builtin.spider-man-remastered", "builtin.spider-man-2", "builtin.monster-hunter-wilds", "user.creator-fixture"];
+    let mut report = Vec::new();
+    for profile in profiles {
+        let game = appdata.join("toggle-games").join(profile);
+        fs::create_dir_all(&game).unwrap();
+        if profile == BUILTIN_PAYDAY3_PROFILE_ID {
+            let paths = sandbox_paths(&game);
+            fs::create_dir_all(&paths.win64).unwrap(); fs::create_dir_all(&paths.pak_mods).unwrap();
+            fs::write(paths.win64.join("PAYDAY3Client-Win64-Shipping.exe"), b"SIMULATED GAME").unwrap();
+            save_settings_internal(&AppSettings { game_path:Some(game.display().to_string()), ..Default::default() }).unwrap();
+        } else if profile.starts_with("builtin.") { sandbox_context(profile, &game).unwrap(); }
+        else {
+            let rules = get_profile_creator_install_rules("reframework".into()).unwrap();
+            save_game_profile_draft(profile.into(), serde_json::json!({"profileId":profile,"overview":{"profileTitle":"Creator fixture","gameId":"creator-fixture"},"customTest":{"sampleGameRoot":game.display().to_string()},"customFileTypes":rules})).unwrap();
+        }
+        save_profile_settings_internal(profile, &ProfileSettings { game_root_override:Some(game.display().to_string()), game_version:Some("UE5.5".into()), ..Default::default() }).unwrap();
+        let directory = if profile == BUILTIN_PAYDAY3_PROFILE_ID { sandbox_paths(&game).pak_mods } else { game.join("mods") };
+        fs::create_dir_all(&directory).unwrap();
+        let mut receipts = Vec::new();
+        for variant in ["first", "second"] {
+            let file = directory.join(format!("{variant}_P.pak"));
+            fs::write(&file, variant.as_bytes()).unwrap();
+            let id = format!("toggle-{}-{variant}", sanitize_file_component(profile));
+            let receipt:InstallReceipt = serde_json::from_value(serde_json::json!({"id":id,"profileId":profile,"displayName":variant,"source":"nexus","sourceModId":"99","sourceFileId":variant,"modType":"pak","enabled":true,"files":[{"relativePath":file.display().to_string(),"sha256":sha256_file(&file).unwrap(),"sizeBytes":variant.len()}]})).unwrap();
+            let path = if profile == BUILTIN_PAYDAY3_PROFILE_ID { receipt_file_path(&id).unwrap() } else { profile_receipt_path(profile, &id).unwrap() };
+            write_json_file(&path, &serde_json::to_value(&receipt).unwrap(), "fixture").unwrap();
+            receipts.push(receipt);
+        }
+        let first = &receipts[0]; let second = &receipts[1];
+        set_source_install_enabled("nexus".into(), "99".into(), false, Some(profile.into()), Some(second.id.clone())).unwrap();
+        assert!(Path::new(&first.files[0].relative_path).is_file());
+        assert!(!Path::new(&second.files[0].relative_path).exists(), "Exact receipt ID must select the second variant");
+        assert_eq!(list_profile_receipts_internal(profile).unwrap().iter().find(|r| r.id == second.id).unwrap().enabled, Some(false));
+        set_local_win64_matched_files_enabled(vec![second.files[0].relative_path.clone()], true, Some(profile.into())).unwrap();
+        set_pak_mod_files_enabled(vec![if profile == BUILTIN_PAYDAY3_PROFILE_ID { "first_P.pak".into() } else { first.files[0].relative_path.clone() }], false, Some(profile.into())).unwrap();
+        set_local_win64_matched_files_enabled(vec![first.files[0].relative_path.clone()], true, Some(profile.into())).unwrap();
+        for receipt in &receipts { assert_eq!(sha256_file(Path::new(&receipt.files[0].relative_path)).unwrap(), receipt.files[0].sha256.clone().unwrap()); }
+        assert!(set_source_install_enabled("nexus".into(), "wrong".into(), false, Some(profile.into()), Some(first.id.clone())).is_err());
+        if profile != BUILTIN_PAYDAY3_PROFILE_ID {
+            assert!(replace_profile_source_install(profile, &first.id, "nexus", "99", || Err("Simulated install failure".into())).is_err());
+            assert_eq!(sha256_file(Path::new(&first.files[0].relative_path)).unwrap(), first.files[0].sha256.clone().unwrap());
+            assert_eq!(list_profile_receipts_internal(profile).unwrap().iter().find(|r| r.id == first.id).unwrap().enabled, Some(true));
+        }
+        report.push(serde_json::json!({"profileId":profile,"exactReceiptVariant":true,"disableRestore":true,"hashVerified":true,"runtimeVerified":false}));
+    }
+    fs::write(appdata.join("toggle-report.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    println!("All 16 built-in profiles and a saved Creator profile passed registered toggle command round trips.");
 }
 
 fn sandbox_context(profile_id: &str, root: &Path) -> Option<profile_installs::ProfileInstallContext> {

@@ -259,7 +259,7 @@ class PageCrashGuard extends Component<{ pageName: string; children: ReactNode }
 }
 
 
-const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v1";
+const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v2";
 const TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS = 30 * 60 * 1000;
 const INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY = "tsuki-installed-session-cache-invalidated-at";
 
@@ -271,9 +271,9 @@ interface ReceiptUpdateCheckCache {
   source: "launch" | "manual";
 }
 
-function readReceiptUpdateCheckCache(): ReceiptUpdateCheckCache | null {
+function readReceiptUpdateCheckCache(profileId: string): ReceiptUpdateCheckCache | null {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(TSUKI_RECEIPT_UPDATE_CACHE_KEY) ?? "null");
+    const parsed = JSON.parse(window.localStorage.getItem(`${TSUKI_RECEIPT_UPDATE_CACHE_KEY}:${profileId}`) ?? "null");
     if (!parsed || typeof parsed !== "object") return null;
 
     return {
@@ -288,7 +288,7 @@ function readReceiptUpdateCheckCache(): ReceiptUpdateCheckCache | null {
   }
 }
 
-function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "launch" | "manual") {
+function writeReceiptUpdateCheckCache(profileId: string, updates: SourceUpdateStatus[], source: "launch" | "manual") {
   const payload: ReceiptUpdateCheckCache = {
     savedAt: Date.now(),
     updates,
@@ -298,7 +298,7 @@ function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "la
   };
 
   try {
-    safeLocalStorageSet(TSUKI_RECEIPT_UPDATE_CACHE_KEY, JSON.stringify(payload));
+    safeLocalStorageSet(`${TSUKI_RECEIPT_UPDATE_CACHE_KEY}:${profileId}`, JSON.stringify(payload));
     window.dispatchEvent(new CustomEvent("tsuki-receipt-update-check", { detail: payload }));
   } catch {
     // Optional launch update cache.
@@ -491,7 +491,7 @@ function RepairPage({ profileId }: { profileId: string }) {
                   <small>{item.path ?? item.recommendation}</small>
                 </div>
                 <span className={item.found ? "badge good" : "badge"}>{item.status}</span>
-                {findDependency(item.label, profileId) ? <DependencyActions dependency={findDependency(item.label, profileId)!} /> : <span className="dependency-source-unverified">Source not verified</span>}
+                {findDependency(item.label, profileId) ? <DependencyActions profileId={profileId} dependency={findDependency(item.label, profileId)!} /> : <span className="dependency-source-unverified">Source not verified</span>}
               </div>
             ))}
             {!dependencies && <p>Loading dependency scan...</p>}
@@ -881,7 +881,7 @@ export function BootScreen({ message = "Starting Tsuki..." }: { message?: string
         </div>
         <div className="boot-status">
           <span>{message}</span>
-          <strong>v2.0.1</strong>
+          <strong>v2.0.3</strong>
         </div>
         <div className="boot-progress" role="progressbar" aria-label="Starting Tsuki">
           <div />
@@ -1004,7 +1004,7 @@ function SetupWizard({ open, currentGameProfile, profileRuntime, onClose, onOpen
                     <small>{reportItem?.found ? reportItem.details : dependency.sourceUnverified ? "Source not verified" : reportItem?.recommendation ?? "Not detected"}</small>
                   </div>
                   <span className={reportItem?.found ? "badge good" : "badge"}>{reportItem?.found ? "Installed" : "Not detected"}</span>
-                  <DependencyActions dependency={dependency} onOpenNative={onOpenDependency} />
+                  <DependencyActions profileId={currentGameProfile.profileId} dependency={dependency} onOpenNative={onOpenDependency} />
                 </div>;
               })}
               {setupDependencies.length === 0 && <p>No built-in dependencies for this profile.</p>}
@@ -1369,12 +1369,12 @@ export default function App() {
     if (!bootReady) return;
 
     const timer = window.setTimeout(() => {
-      invoke("migrate_receipts_to_v2")
-        .catch((error) => console.warn("Receipt v2 migration failed:", error));
+      invoke("list_installed_state_records", { profileId: currentGameProfile.profileId })
+        .catch((error) => console.warn("Receipt reconciliation failed:", error));
     }, 1800);
 
     return () => window.clearTimeout(timer);
-  }, [bootReady]);
+  }, [bootReady, currentGameProfile.profileId]);
 
   useEffect(() => {
     if (!bootReady) return;
@@ -1391,14 +1391,14 @@ export default function App() {
   useEffect(() => {
     if (!bootReady) return;
 
-    const cached = readReceiptUpdateCheckCache();
+    const cached = readReceiptUpdateCheckCache(currentGameProfile.profileId);
     if (cached?.savedAt && Date.now() - cached.savedAt < TSUKI_RECEIPT_UPDATE_CHECK_THROTTLE_MS) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId: currentGameProfile.profileId })
-        .then((updates) => writeReceiptUpdateCheckCache(updates, "launch"))
+      invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId: currentGameProfile.profileId, force: false })
+        .then((updates) => writeReceiptUpdateCheckCache(currentGameProfile.profileId, updates, "launch"))
         .catch(() => {
           // Silent launch check. Manual Check Updates still reports errors in Installed.
         });

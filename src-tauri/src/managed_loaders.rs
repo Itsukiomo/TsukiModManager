@@ -241,11 +241,26 @@ fn ensure(repair: bool, update: bool) -> Result<Status, String> {
         (fetch(&format!("{base}/manifest.json"), 65536)?, String::from_utf8(fetch(&format!("{base}/manifest.sig"), 1024)?).map_err(|_| "Invalid signature encoding.")?)
     };
     let manifest = verify(&raw, &sig, &config)?;
+    if let Some((_, prior)) = &previous {
+        if runtime_release_is_older(&prior.version, &manifest.version)? {
+            if intact(&runtime, prior) {
+                drop(_lock);
+                return status();
+            }
+            return Err("The available signed backend is older than the installed version. Repair the installed version; no runtime files were changed.".into());
+        }
+    }
     fs::write(dir.join("release-cache.json"), serde_json::to_vec(&Installed { manifest: raw.clone(), signature: sig.clone(), game_root: game.display().to_string() }).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let bytes = fetch(&manifest.archive_url, manifest.archive_size)?;
     install_bundle_owned(&game, &raw, &sig, &manifest, &bytes, previous.as_ref().map(|(_, m)| m).unwrap_or(&manifest))?; drop(_lock); status()
 }
+fn runtime_release_is_older(installed: &str, incoming: &str) -> Result<bool, String> {
+    let installed = semver::Version::parse(installed).map_err(|_| "Installed loader version cannot be compared safely.")?;
+    let incoming = semver::Version::parse(incoming).map_err(|_| "Signed loader version is not a semantic version.")?;
+    Ok(incoming.cmp_precedence(&installed).is_lt())
+}
 pub(crate) fn prepare_launch(game: &Path, vanilla: bool) -> Result<(), String> {
+    profile_dependencies::game_closed(PROFILE)?;
     let dir = data()?; let _lock = lock(&dir)?; recover(game)?;
     let runtime = game.join(RUNTIME);
     if vanilla && !runtime.exists() {
@@ -256,6 +271,7 @@ pub(crate) fn prepare_launch(game: &Path, vanilla: bool) -> Result<(), String> {
     let (_, manifest) = installed(&runtime, &source()?)?;
     if !intact(&runtime, &manifest) { return Err("Native PAK runtime is damaged. Repair it before launch.".into()); }
     let mut command = Command::new(runtime.join(&manifest.entry_point)); hide_command_window(&mut command);
+    let mut has_managed_movies = false;
     if !vanilla {
         for receipt in profile_installs::list_profile_receipts_internal(PROFILE)? {
             if receipt.enabled == Some(false) { continue; }
@@ -263,17 +279,97 @@ pub(crate) fn prepare_launch(game: &Path, vanilla: bool) -> Result<(), String> {
                 let path = PathBuf::from(file.relative_path);
                 if path.is_file() && path.extension().is_some_and(|v| v.eq_ignore_ascii_case("pak")) && path.starts_with(game.join("OPP/Content/Paks")) {
                     command.arg("--managed-pak").arg(path);
+                } else if path.is_file() && path.starts_with(game.join("NativePakLoader/Mods"))
+                    && path.extension().is_some_and(|v| v.eq_ignore_ascii_case("bk2") || v.eq_ignore_ascii_case("srt")) {
+                    command.arg("--managed-movie").arg(path);
+                    has_managed_movies = true;
                 }
             }
         }
     }
+    if has_managed_movies {
+        let mut probe = Command::new(runtime.join(&manifest.entry_point)); hide_command_window(&mut probe);
+        let result = probe.args(["--game-root"]).arg(game).arg("status").current_dir(&runtime).output().map_err(|e| e.to_string())?;
+        let capabilities: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap_or_default();
+        if !result.status.success() || !capabilities.get("capabilities").and_then(|v| v.as_array())
+            .is_some_and(|items| items.iter().any(|v| v.as_str() == Some("managed-movies"))) {
+            return Err("This native backend does not support Tsuki-managed movies. Update the signed Outlast backend before launching; no game movie was changed.".into());
+        }
+    }
     let result = command.arg("--game-root").arg(game).arg(if vanilla { "restore" } else { "apply" }).current_dir(&runtime).output().map_err(|_| "Native PAK backend could not start.")?;
-    let protocol: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap_or_default();
-    if !result.status.success() || protocol.get("protocol").and_then(|v| v.as_u64()) != Some(1) || protocol.get("state").and_then(|v| v.as_str()) != Some(if vanilla { "restored" } else { "applied" }) { return Err("Native PAK operation failed. The game was not launched; recovery records and user mods were retained.".into()); } Ok(())
+    validate_backend_result(result.status.success(), &result.stdout, &result.stderr, vanilla)
+}
+fn validate_backend_result(success: bool, stdout: &[u8], stderr: &[u8], vanilla: bool) -> Result<(), String> {
+    let protocol: serde_json::Value = serde_json::from_slice(stdout).unwrap_or_default();
+    if success && protocol.get("protocol").and_then(|v| v.as_u64()) == Some(1)
+        && protocol.get("state").and_then(|v| v.as_str()) == Some(if vanilla { "restored" } else { "applied" }) { return Ok(()); }
+    let detail = protocol.get("message").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(str::to_owned).unwrap_or_else(|| String::from_utf8_lossy(stderr).chars().take(1200).collect());
+    Err(format!("Native PAK operation failed: {}. The game was not launched; recovery records and user mods were retained.", if detail.trim().is_empty() { "the backend returned an invalid response" } else { detail.trim() }))
+}
+fn launch_lock(dir: &Path) -> Result<File, String> {
+    let guard = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(dir.join("launch.lock")).map_err(|e| e.to_string())?;
+    guard.try_lock_exclusive().map_err(|_| "Outlast Trials is already launching or running. Wait for it to exit before launching again.")?;
+    Ok(guard)
+}
+pub(crate) fn launch_via_steam(mapping: ProfileLaunchMapping, vanilla: bool) -> Result<String, String> {
+    let dir = data()?;
+    // Keep a separate cross-process launch lock through preparation and the actual game lifetime.
+    let guard = launch_lock(&dir)?;
+    profile_dependencies::game_closed(PROFILE).map_err(|error| if error.starts_with("Close the game") {
+        "Outlast Trials is already running. Close the game before launching again.".to_owned()
+    } else { error })?;
+    let steam = common_steam_roots().into_iter().map(|root| root.join("steam.exe"))
+        .find(|path| path.is_file()).ok_or("Steam was not found. Start Steam before launching Outlast Trials.")?;
+    prepare_launch(Path::new(&mapping.game_root), vanilla)?;
+    let enabled = if vanilla {
+        let ids = profile_installs::enabled_profile_receipt_ids(PROFILE)?;
+        profile_installs::apply_profile_receipt_selection(PROFILE, &[])?;
+        ids
+    } else { Vec::new() };
+    let mut command = Command::new(steam);
+    hide_command_window(&mut command);
+    command.args(["-applaunch", "1304930"]).args(&mapping.arguments);
+    for entry in load_profile_settings_internal(PROFILE).launch_environment {
+        if let Some((key, value)) = entry.split_once('=') { if !key.trim().is_empty() { command.env(key.trim(), value.trim()); } }
+    }
+    if let Err(error) = command.spawn() {
+        if vanilla { profile_installs::apply_profile_receipt_selection(PROFILE, &enabled)?; }
+        return Err(format!("Steam could not launch Outlast Trials: {error}"));
+    }
+    std::thread::spawn(move || {
+        let _guard = guard;
+        let mut observed = false;
+        let mut absent = 0;
+        for _ in 0..120 {
+            match profile_dependencies::game_closed(PROFILE) {
+                Ok(()) => { absent += 1; if observed && absent >= 5 { break; } }
+                Err(message) if message.starts_with("Close the game") => { observed = true; absent = 0; }
+                Err(_) => return, // Never restore files when process detection fails.
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        while profile_dependencies::game_closed(PROFILE).is_err() { std::thread::sleep(Duration::from_secs(2)); }
+        if vanilla { let _ = profile_installs::apply_profile_receipt_selection(PROFILE, &enabled); }
+    });
+    Ok("Requested Outlast Trials through Steam. Waiting for the game is not proof of a successful launch.".into())
 }
 pub(crate) fn dependency_item() -> DependencyStatusItem {
     let current = status().unwrap_or_else(|message| Status { state: "error".into(), message, version: None, authorized: false });
     DependencyStatusItem { id: "outlast-native-pak".into(), label: "Native PAK Loader".into(), found: current.state == "ready", status: current.state, path: root().ok().map(|game| game.join(RUNTIME).display().to_string()), details: current.message, recommendation: "Manage the independently distributed backend in the Outlast profile. Mod changes apply before launch; loader integrity is not game compatibility proof.".into() }
+}
+pub(crate) fn ensure_archive_dependency() -> Result<String, String> {
+    profile_dependencies::game_closed(PROFILE)?;
+    let dir = data()?;
+    if !authorized(&dir) { return Err("Authorize Native PAK support in the Outlast profile first. Automatic dependency setup cannot bypass its protection disclosure.".into()); }
+    let checked = dir.join("dependency-update-check");
+    let last = fs::read_to_string(&checked).ok().and_then(|v| v.parse::<u128>().ok()).unwrap_or(0);
+    let update = now_unix_millis().saturating_sub(last) >= 24 * 60 * 60 * 1000;
+    let current = ensure(false, update)?;
+    if current.state != "ready" { return Err(current.message); }
+    if update { fs::write(checked, now_unix_millis().to_string()).map_err(|e| e.to_string())?; }
+    Ok(current.message)
 }
 #[tauri::command]
 pub(crate) async fn managed_loader_status() -> Result<Status, String> { tauri::async_runtime::spawn_blocking(status).await.map_err(|e| e.to_string())? }
@@ -290,6 +386,65 @@ pub(crate) async fn managed_loader_action(action: String) -> Result<Status, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Owner-only local signed runtime deployment; requires explicit game, release and backup paths"]
+    fn local_owner_runtime_deployment() {
+        let game = PathBuf::from(env::var("TSUKI_LOADER_GAME_ROOT").expect("explicit game root"));
+        let release = PathBuf::from(env::var("TSUKI_LOADER_RELEASE").expect("signed release folder"));
+        let backup = PathBuf::from(env::var("TSUKI_LOADER_BACKUP_ROOT").expect("explicit fresh backup folder"));
+        profile_installs::validate_builtin_profile_root(PROFILE, &game).unwrap();
+        profile_dependencies::game_closed(PROFILE).unwrap();
+        ordinary_tree(&game).unwrap();
+        let raw = fs::read(release.join("manifest.json")).unwrap();
+        let signature = fs::read_to_string(release.join("manifest.sig")).unwrap();
+        let config = source().unwrap();
+        let manifest = verify(&raw, &signature, &config).unwrap();
+        let archive = fs::read(release.join("outlast-native-pak-win64.zip")).unwrap();
+        let dir = data().unwrap();
+        let _guard = lock(&dir).unwrap();
+        let runtime = game.join(RUNTIME);
+        let (_, prior) = installed(&runtime, &config).unwrap();
+        owned_tree(&runtime, &prior).unwrap();
+        assert!(intact(&runtime, &prior));
+        assert!(!backup.exists(), "Use a fresh backup folder");
+        assert!(!backup.starts_with(&runtime));
+        fs::create_dir_all(&backup).unwrap();
+        for path in prior.files.iter().map(|file| file.path.as_str()).chain(["installed.json", "tsuki-managed-receipt.json"]) {
+            let target = backup.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(runtime.join(path), &target).unwrap();
+            assert_eq!(file_hash(&runtime.join(path)).unwrap(), file_hash(&target).unwrap());
+        }
+        install_bundle_owned(&game, &raw, &signature, &manifest, &archive, &prior).unwrap();
+        assert!(intact(&runtime, &manifest));
+        println!("Installed signed local runtime {}. Previous runtime: {}. No publication performed.", manifest.version, backup.display());
+    }
+    #[test]
+    fn launch_guard_blocks_duplicates_until_game_exit() {
+        let sandbox = Sandbox::new();
+        let guard = launch_lock(&sandbox.0).unwrap();
+        assert!(launch_lock(&sandbox.0).unwrap_err().contains("already launching"));
+        drop(guard);
+        assert!(launch_lock(&sandbox.0).is_ok());
+    }
+    #[test]
+    fn backend_response_reports_failure_and_validates_action() {
+        assert!(validate_backend_result(true, br#"{"protocol":1,"state":"applied"}"#, b"", false).is_ok());
+        assert!(validate_backend_result(true, br#"{"protocol":1,"state":"applied"}"#, b"", true).is_err());
+        let error = validate_backend_result(false, br#"{"protocol":1,"state":"failed","message":"Close the game"}"#, b"", false).unwrap_err();
+        assert!(error.contains("Close the game"));
+        assert!(validate_backend_result(false, b"", b"Archive is locked", false).unwrap_err().contains("Archive is locked"));
+    }
+    #[test]
+    fn runtime_updates_never_downgrade_a_local_fix() {
+        assert!(runtime_release_is_older("1.0.2", "1.0.0").unwrap());
+        assert!(runtime_release_is_older("1.0.2", "1.0.2-rc.1").unwrap());
+        assert!(!runtime_release_is_older("1.0.2", "1.0.2").unwrap());
+        assert!(!runtime_release_is_older("1.0.2", "1.0.3").unwrap());
+        assert!(!runtime_release_is_older("1.0.2+local", "1.0.2+public").unwrap());
+        assert!(runtime_release_is_older("unknown", "1.0.2").is_err());
+        assert!(runtime_release_is_older("1.0.2", "unknown").is_err());
+    }
     #[test]
     #[ignore = "Set TSUKI_LOADER_RELEASE to the prepared release asset folder"]
     fn prepared_release_bundle() {

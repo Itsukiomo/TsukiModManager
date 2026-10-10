@@ -71,6 +71,7 @@ export interface SourceDependency {
   url?: string | null;
   notes?: string | null;
   versionConstraint?: string | null;
+  thumbnailUrl?: string | null;
 }
 
 export interface SourceModDetail extends SourceModSummary {
@@ -205,6 +206,8 @@ export interface PersistentSourcePair {
 }
 
 export interface SourceUpdateStatus {
+  checkedAtUnix?: number;
+  health?: "verified" | "modified" | "missing" | "unverified";
   uid: string;
   source: ModSourceKind;
   modId: string;
