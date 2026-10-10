@@ -1,7 +1,7 @@
 {
-  "version": "2.0.0",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.0/Tsuki.Mod.Manager_2.0.0_x64-setup.exe",
-  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.0",
-  "sha256": "fa7afe149c7df04e8c999afef4fef3b65ba43d2b5e5ea1c6cf83125153357017",
-  "notes": "Multi-game profiles, version-aware installation, safer receipt management, refreshed lunar UI, and separately downloaded signed Outlast Trials native support. See the release notes for beta loader and external-manager limitations."
+  "version": "2.0.1",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.1/Tsuki.Mod.Manager_2.0.1_x64-setup.exe",
+  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.1",
+  "sha256": "7cf92079cffda9f13e6c7afe5d91885c18468f0482308a351844d5a065a5f1c9",
+  "notes": "Fixes multi-game Nexus browsing, skipped results between pages, premature pagination stops, hidden cache substitutions, Borderlands Enhanced source selection, and source-switch loading races."
 }
