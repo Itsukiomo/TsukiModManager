@@ -4,6 +4,8 @@ Tsuki Mod Manager 2.0 is a standalone, profile-based mod manager for supported g
 
 This is not a normal PAYDAY 3 mod archive. Do **not** install Tsuki through Vortex, MO2, or another mod manager.
 
+[Version 2.0.1](RELEASE_NOTES_2.0.1.md) fixes multi-game Nexus browsing, pagination, and switching sources while loading.
+
 ## Features
 
 * Browse sources scoped to the selected game and version

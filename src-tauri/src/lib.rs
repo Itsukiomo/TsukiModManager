@@ -6493,6 +6493,7 @@ fn source_config_for_profile_source(profile_id: Option<&str>, source_id: Option<
     };
     let provider = json_string(&selected, "provider").unwrap_or_default();
     let target = config.as_object_mut().expect("source config object");
+    target.insert("selectedSourceId".to_string(), serde_json::Value::String(source_id.to_string()));
     match provider.as_str() {
         "nexus" => {
             for (from, to) in [
@@ -6536,6 +6537,15 @@ fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 fn configured_provider_source<'a>(config: &'a serde_json::Value, provider: &str) -> Option<&'a serde_json::Value> {
+    if let Some(selected_id) = config.get("selectedSourceId").and_then(|value| value.as_str()) {
+        if let Some(selected) = config.get("sources")?.as_array()?.iter().find(|source| {
+            json_string(source, "id").as_deref() == Some(selected_id)
+                && json_string(source, "provider").as_deref() == Some(provider)
+                && source.get("enabled").and_then(|value| value.as_bool()) != Some(false)
+        }) {
+            return Some(selected);
+        }
+    }
     config.get("sources")?.as_array()?.iter().find(|source| {
         json_string(source, "provider").as_deref() == Some(provider)
             && source.get("enabled").and_then(|value| value.as_bool()) != Some(false)
@@ -12200,12 +12210,41 @@ fn fetch_nexus_graphql_mods_page_paged_for_domain(
     page: u32,
     count: usize,
 ) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_graphql_browse_page(game_domain, sort, api_key, page, count).map(|result| result.mods)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NexusBrowsePage {
+    mods: Vec<SourceModSummary>,
+    page: u32,
+    has_more: bool,
+    total_count: Option<u64>,
+}
+
+fn nexus_page_has_more(page: u32, count: usize, raw_count: usize, total: Option<u64>) -> bool {
+    total.map(|total| u64::from(page) * (count as u64) < total).unwrap_or(raw_count >= count)
+}
+
+fn fetch_nexus_graphql_browse_page(
+    game_domain: &str,
+    sort: &str,
+    api_key: &str,
+    page: u32,
+    count: usize,
+) -> Result<NexusBrowsePage, String> {
     let mut errors = Vec::new();
     let game_domain = clean_source_slug(game_domain).ok_or_else(|| format!("Invalid Nexus game domain: {}", game_domain))?;
 
     for (query, variables) in nexus_graphql_query_variants_for_page_for_domain(&game_domain, sort, page.max(1), count) {
         match http_post_graphql(query, variables, Some(api_key)) {
             Ok(value) => {
+                let nodes = value.pointer("/data/mods/nodes").and_then(serde_json::Value::as_array);
+                let Some(nodes) = nodes else {
+                    errors.push("Nexus GraphQL did not return a mod page.".to_string());
+                    continue;
+                };
+                let total_count = value.pointer("/data/mods/totalCount").and_then(serde_json::Value::as_u64);
                 let summaries = nexus_graphql_nodes_to_summaries(&value)
                     .into_iter()
                     .map(|summary| force_nexus_game_summary(summary, &game_domain))
@@ -12213,13 +12252,14 @@ fn fetch_nexus_graphql_mods_page_paged_for_domain(
                     .filter(is_clean_nexus_summary_for_browser)
                     .collect::<Vec<_>>();
 
-                if !summaries.is_empty() {
-                    let sorted = nexus_sort_browser_summaries(summaries, sort);
-                    upsert_source_index_summaries(&sorted);
-                    return Ok(sorted);
-                }
-
-                errors.push("Nexus GraphQL query returned no parsable mods.".to_string());
+                let sorted = nexus_sort_browser_summaries(nexus_dedupe_summaries(summaries), sort);
+                upsert_source_index_summaries(&sorted);
+                return Ok(NexusBrowsePage {
+                    mods: sorted,
+                    page: page.max(1),
+                    has_more: nexus_page_has_more(page.max(1), count, nodes.len(), total_count),
+                    total_count,
+                });
             }
             Err(error) => errors.push(error),
         }
@@ -12414,6 +12454,9 @@ fn nexus_summary_from_value(item: &serde_json::Value) -> SourceModSummary {
 
 fn force_nexus_game_summary(mut summary: SourceModSummary, game_domain: &str) -> SourceModSummary {
     let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    if domain != "payday3" {
+        summary.tags.retain(|tag| !tag.eq_ignore_ascii_case("Payday 3"));
+    }
     if summary.source_id != "unknown" {
         summary.page_url = Some(format!("https://www.nexusmods.com/{}/mods/{}", domain, summary.source_id));
     }
@@ -18561,6 +18604,25 @@ async fn fetch_source_mods_page(
     result
 }
 
+#[tauri::command]
+async fn fetch_nexus_browse_page(
+    page: u32,
+    sort: Option<String>,
+    profile_id: Option<String>,
+    source_id: Option<String>,
+) -> Result<NexusBrowsePage, String> {
+    let config = source_config_for_profile_source(profile_id.as_deref(), source_id.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        let domain = nexus_domain_from_source_config(&config)
+            .ok_or_else(|| "This profile has no Nexus game domain.".to_string())?;
+        validate_nexus_source_mapping(&domain, config_string(&config, "nexusGameId").as_deref())?;
+        let settings = load_settings_internal();
+        let api_key = settings.nexus_api_key.as_deref().map(str::trim).filter(|key| !key.is_empty())
+            .ok_or_else(|| "Missing Nexus API key. Add it in Settings first.".to_string())?;
+        fetch_nexus_graphql_browse_page(&domain, sort.as_deref().unwrap_or("updated"), api_key, page.max(1), 20)
+    }).await.map_err(|error| format!("Nexus browse task failed: {}", error))?
+}
+
 fn fetch_source_mods_page_sync(
     source: String,
     page: u32,
@@ -18591,35 +18653,7 @@ fn fetch_source_mods_page_sync(
         }
         Ok(_) => Ok(Vec::new()),
         Err(error) => {
-            if source.eq_ignore_ascii_case("modworkshop") {
-                return Err(error);
-            }
-
-            let page_size = 24usize;
-            let start = page.saturating_sub(1) as usize * page_size;
-            let nexus_domain = if source.eq_ignore_ascii_case("nexus") {
-                nexus_domain_from_source_config(&source_config)
-            } else {
-                None
-            };
-            let cached = read_source_index_database()
-                .records
-                .into_values()
-                .filter(|record| record.source.eq_ignore_ascii_case(&source))
-                .map(|record| record.summary)
-                .filter(|summary| nexus_domain.as_deref().map(|domain| source_summary_matches_nexus_domain(summary, domain)).unwrap_or(true))
-                .collect::<Vec<_>>();
-
-            let mut sorted = nexus_sort_browser_summaries(cached, &sort_mode);
-
-            if start < sorted.len() {
-                Ok(sorted.drain(start..sorted.len().min(start + page_size)).collect())
-            } else if page == 1 {
-                let exact = sorted.into_iter().take(page_size).collect::<Vec<_>>();
-                if exact.is_empty() { Err(error) } else { Ok(exact) }
-            } else {
-                Err(error)
-            }
+            Err(error)
         }
     }
 }
@@ -18909,7 +18943,7 @@ fn build_nexus_payday3_index_sync(_max_id: u32) -> Result<Vec<SourceModSummary>,
     // Keep what the user already viewed/downloaded, but never as raw unsorted truth.
     combined.extend(nexus_cached_index_page(1, "updated", 240));
 
-    let mut summaries = nexus_sort_browser_summaries(nexus_dedupe_summaries(combined), "updated");
+    let mut summaries = nexus_sort_browser_summaries(nexus_dedupe_summaries(combined.into_iter().filter(source_summary_is_payday3_safe).collect()), "updated");
 
     // Enrich only the top chunk. This avoids the old ID sweep freeze.
     summaries = summaries
@@ -18942,8 +18976,9 @@ fn nexus_dedupe_summaries(summaries: Vec<SourceModSummary>) -> Vec<SourceModSumm
     let mut map = std::collections::BTreeMap::<String, SourceModSummary>::new();
 
     for summary in summaries {
-        if summary.source_id != "unknown" && is_clean_nexus_summary_for_browser(&summary) && source_summary_is_payday3_safe(&summary) {
-            map.entry(summary.source_id.clone())
+        if summary.source_id != "unknown" && is_clean_nexus_summary_for_browser(&summary) && !source_summary_is_external_mod_manager(&summary) {
+            let identity = format!("{}:{}", summary.page_url.as_deref().unwrap_or(summary.game_id.as_deref().unwrap_or("unknown")), summary.source_id);
+            map.entry(identity)
                 .and_modify(|existing| {
                     if existing.name.starts_with("Nexus Mod ") && !summary.name.starts_with("Nexus Mod ") {
                         existing.name = summary.name.clone();
@@ -19116,60 +19151,7 @@ fn fetch_nexus_mods_page_for_domain(game_domain: &str, page: u32, sort: &str) ->
         .as_deref()
         .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
 
-    let page_size = 24usize;
-
-    // v1.0.5: GraphQL Browse is now allowed to drive live Nexus cards because
-    // diagnostics proved the minimal PAYDAY 3 query returns nodes. REST/cache remain
-    // fallback and GraphQL errors must never blank Browse.
-    if let Ok(graphql_mods) = fetch_nexus_graphql_mods_page_paged_for_domain(&game_domain, sort, api_key, page, page_size) {
-        let visible = nexus_sort_browser_summaries(nexus_dedupe_summaries(graphql_mods), sort)
-            .into_iter()
-            .take(page_size)
-            .collect::<Vec<_>>();
-
-        if !visible.is_empty() {
-            upsert_source_index_summaries(&visible);
-            return Ok(visible);
-        }
-    }
-
-    if page == 1 {
-        let mut combined = nexus_rest_collect_for_domain(api_key, sort, 24, &game_domain);
-        let mut website = nexus_website_collect_for_domain(sort, settings.show_age_restricted_nexus, 2, &game_domain);
-        combined.append(&mut website);
-
-        let mut clean = nexus_sort_browser_summaries(nexus_dedupe_summaries(combined), sort);
-
-        if clean.is_empty() {
-            clean = nexus_cached_index_page_for_domain(page, sort, page_size, &game_domain);
-        }
-
-        if !clean.is_empty() {
-            let visible = clean.into_iter().take(page_size).collect::<Vec<_>>();
-            upsert_source_index_summaries(&visible);
-            return Ok(visible);
-        }
-
-        return Err(format!("Nexus Browse found no REST, website, or indexed cards for {}.", game_domain));
-    }
-
-    let mut indexed = nexus_cached_index_page_for_domain(page, sort, page_size, &game_domain);
-
-    if indexed.is_empty() {
-        let mut website = fetch_nexus_website_mods_page_for_domain(page, sort, settings.show_age_restricted_nexus, &game_domain)
-            .unwrap_or_default();
-        website = website
-            .into_iter()
-            .map(|summary| force_nexus_game_summary(summary, &game_domain))
-            .filter(|summary| source_summary_matches_nexus_domain(summary, &game_domain))
-            .collect();
-        indexed = nexus_sort_browser_summaries(nexus_dedupe_summaries(website), sort)
-            .into_iter()
-            .take(page_size)
-            .collect();
-    }
-
-    Ok(indexed)
+    fetch_nexus_graphql_browse_page(&game_domain, sort, api_key, page, 20).map(|result| result.mods)
 }
 
 fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>, String> {
@@ -21052,6 +21034,9 @@ mod profile_settings_tests {
         assert_eq!(sources[0].get("providerGameId").and_then(|value| value.as_str()), Some("360"));
         assert_eq!(sources[2].get("providerSlug").and_then(|value| value.as_str()), Some("borderlandsgotyenhanced"));
         assert_eq!(sources[2].get("providerGameId").and_then(|value| value.as_str()), Some("2776"));
+        let selected = source_config_for_profile_source(Some("builtin.borderlands"), Some("borderlands-enhanced-nexus-api"));
+        assert_eq!(nexus_domain_from_source_config(&selected).as_deref(), Some("borderlandsgotyenhanced"));
+        assert_eq!(config_string(&selected, "nexusGameId").as_deref(), Some("2776"));
     }
 
     #[test]
@@ -21273,6 +21258,36 @@ mod profile_settings_tests {
     }
 
     #[test]
+    fn nexus_dedupe_keeps_other_games_and_game_scoped_ids() {
+        let node = serde_json::json!({"modId": 42, "name": "Sample HUD", "gameId": 648});
+        let payday2 = force_nexus_game_summary(nexus_summary_from_graphql_node(&node).unwrap(), "payday2");
+        let outlast = force_nexus_game_summary(nexus_summary_from_graphql_node(&node).unwrap(), "theoutlasttrials");
+        let cards = nexus_dedupe_summaries(vec![payday2.clone(), payday2, outlast]);
+        assert_eq!(cards.len(), 2);
+        assert!(cards.iter().all(|card| !card.tags.iter().any(|tag| tag == "Payday 3")));
+    }
+
+    #[test]
+    fn nexus_pagination_uses_server_counts_not_filtered_card_count() {
+        assert!(nexus_page_has_more(1, 20, 20, Some(45)));
+        assert!(nexus_page_has_more(2, 20, 20, Some(45)));
+        assert!(!nexus_page_has_more(3, 20, 5, Some(45)));
+        assert!(!nexus_page_has_more(1, 20, 0, Some(0)));
+        assert!(nexus_page_has_more(1, 20, 20, None));
+        assert!(!nexus_page_has_more(2, 20, 4, None));
+    }
+
+    #[test]
+    fn nexus_browse_pages_share_the_ui_page_size_and_domain() {
+        for (page, offset) in [(1, 0), (2, 20), (3, 40)] {
+            let variants = nexus_graphql_query_variants_for_page_for_domain("cyberpunk2077", "updated", page, 20);
+            assert_eq!(variants[0].1["offset"], offset);
+            assert_eq!(variants[0].1["count"], 20);
+            assert_eq!(variants[0].1["filter"]["gameDomainName"][0]["value"], "cyberpunk2077");
+        }
+    }
+
+    #[test]
     fn nexus_newest_uses_created_at_and_latest_added() {
         assert_eq!(
             nexus_graphql_sort_value("published_at"),
@@ -21387,6 +21402,7 @@ pub fn run() {
             profile_installs::get_external_manager_target,
             fetch_modworkshop_categories,
             fetch_source_mods_page,
+            fetch_nexus_browse_page,
             fetch_modworkshop_browse_live_page,
             fetch_modworkshop_filter_page,
             diagnose_modworkshop_browse_live,

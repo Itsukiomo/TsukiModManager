@@ -1,6 +1,7 @@
 param([Parameter(Mandatory=$true)][string]$Installer, [string]$LegacyInstaller, [string]$QualificationRoot)
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$releaseVersion = (Get-Content -LiteralPath (Join-Path $workspace 'package.json') -Raw | ConvertFrom-Json).version
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $parent = if($QualificationRoot) { [IO.Path]::GetFullPath($QualificationRoot) } else { Join-Path $workspace 'src-tauri\target\release-qualification' }
 $root = Join-Path $parent ('installer-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -39,7 +40,7 @@ try {
     foreach ($item in $backups) { if ($item.existed) { Remove-Item -LiteralPath "HKCU:\$($item.key)" -Recurse } }
     $clean = Join-Path $root 'clean-install'
     Run-Installer $installerPath $clean
-    if ((Get-ItemProperty -LiteralPath "HKCU:\$($keys[0])").DisplayVersion -ne '2.0.0') { throw 'Installer registered wrong version' }
+    if ((Get-ItemProperty -LiteralPath "HKCU:\$($keys[0])").DisplayVersion -ne $releaseVersion) { throw 'Installer registered wrong version' }
     $report.checks += 'clean silent NSIS installation and Windows version registration'
     & node (Join-Path $PSScriptRoot 'native-release-smoke.mjs') (Join-Path $clean 'tsukimodmanagerapp.exe') clean (Join-Path $root 'clean-state')
     if ($LASTEXITCODE -ne 0) { throw 'Clean native startup failed' }
@@ -51,7 +52,7 @@ try {
     Run-Installer $installerPath $upgrade
     & node (Join-Path $PSScriptRoot 'native-release-smoke.mjs') (Join-Path $upgrade 'tsukimodmanagerapp.exe') upgrade (Join-Path $root 'upgrade-state')
     if ($LASTEXITCODE -ne 0) { throw 'Native upgrade migration failed' }
-    $report.checks += 'actual 1.8.2 NSIS installation upgraded to 2.0.0 with preserved app data'
+    $report.checks += "actual 1.8.2 NSIS installation upgraded to $releaseVersion with preserved app data"
     $report.passed = $true
 } catch {
     $report.error = $_.Exception.Message

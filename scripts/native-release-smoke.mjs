@@ -9,6 +9,7 @@ import {performance} from 'node:perf_hooks';
 const require = createRequire('C:/Users/jeffe/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/runtime.cjs');
 const {chromium} = require('playwright');
 const [exeArg, mode = 'clean', rootArg] = process.argv.slice(2);
+const releaseVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 assert(exeArg, 'Pass the packaged executable');
 const executable = fs.realpathSync(exeArg);
 const approved = path.resolve(process.env.TSUKI_RELEASE_QA_ROOT ?? 'src-tauri/target/release-qualification');
@@ -63,8 +64,10 @@ try {
     await page.evaluate(() => localStorage.setItem('tsuki-release-migration-sentinel', '1.8.2-preserved'));
     report.checks.push('actual 1.8.2 settings and WebView storage written');
   } else {
-    assert.equal((await invoke('check_app_update', {manifestUrl: 'http://127.0.0.1:1/unreachable'})).currentVersion, '2.0.0');
-    report.checks.push('native version 2.0.0');
+    assert.equal((await invoke('check_app_update', {manifestUrl: 'http://127.0.0.1:1/unreachable'})).currentVersion, releaseVersion);
+    report.checks.push(`native version ${releaseVersion}`);
+    assert(await page.locator('.sidebar').innerText().then(text => text.includes(`v${releaseVersion}`)), 'Sidebar release version');
+    report.checks.push('sidebar release version matches native version');
     if (mode === 'upgrade') {
       assert.equal(settings.keepDownloadedArchives, true);
       assert.equal(await page.evaluate(() => localStorage.getItem('tsuki-release-migration-sentinel')), '1.8.2-preserved');

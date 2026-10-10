@@ -1790,7 +1790,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
       fileListDataSource: "unchanged",
       cacheFallbackReason: reason,
     });
-    setHasMore((current) => ({ ...current, [source]: false }));
+    setHasMore((current) => ({ ...current, [source]: source === "nexus" }));
       setCacheNote(`${activeSource?.displayName ?? sourceLabel(source)} live request failed. No exact source/profile/game cache entry was used.`);
       setStatus(reason);
     setBrowseCardsLive(false);
@@ -1940,7 +1940,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
     }
 
     if (loadingSource && loadingSource !== source) return;
-    if (!reset && !hasMore[source]) return;
+    if (!reset && !hasMore[source] && !targetPage) return;
 
     if (activeNexusSearch.trim() && !reset) {
       setHasMore((current) => ({ ...current, nexus: false }));
@@ -1964,35 +1964,30 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
     setStatus(`Loading live Nexus page ${nextPage} through GraphQL first...`);
 
     try {
-      const loaded = await invokeWithTimeout<SourceModSummary[]>(
-        "fetch_source_mods_page",
-        { source, page: nextPage, sort: requestedSort, profileId, sourceId: activeSourceId },
-        reset ? 9000 : 12000,
+      const result = await invokeWithTimeout<{ mods: SourceModSummary[]; page: number; hasMore: boolean; totalCount: number | null }>(
+        "fetch_nexus_browse_page",
+        { page: nextPage, sort: requestedSort, profileId, sourceId: activeSourceId },
+        20000,
         `${sourceLabel(source)} live request timed out.`,
       );
 
       if (requestId !== browseRequestSeqRef.current) return;
 
-      const cleaned = sortBrowseMods(cleanMods(loaded).filter((mod) => mod.source === source), requestedSort);
+      const cleaned = sortBrowseMods(cleanMods(result.mods).filter((mod) => mod.source === source), requestedSort);
       const visiblePage = cleaned.slice(0, BROWSE_PAGE_SIZE);
-
-      if (visiblePage.length === 0) {
-        await loadSourceIndexFallback(source, reset, "Backend returned zero cards.", requestedSort);
-        return;
-      }
 
       setMods((current) => {
         const base = current.filter((mod) => mod.source !== source);
         const merged = cleanMods([...base, ...visiblePage]);
-        writeCache(profileId, source, sourceGameKeyFor(source), requestedSort, visiblePage, nextPage, cleaned.length >= BROWSE_PAGE_SIZE);
+        writeCache(profileId, source, sourceGameKeyFor(source), requestedSort, visiblePage, nextPage, result.hasMore);
         return merged;
       });
 
       setPages((current) => ({ ...current, [source]: nextPage }));
-      setHasMore((current) => ({ ...current, [source]: cleaned.length >= BROWSE_PAGE_SIZE }));
+      setHasMore((current) => ({ ...current, [source]: result.hasMore }));
       setBrowseCardsLive(true);
       setCacheNote("");
-      setStatus(`Loaded ${visiblePage.length} live/sorted ${sourceLabel(source)} mods on page ${nextPage}.`);
+      setStatus(visiblePage.length ? `Loaded ${visiblePage.length} live ${sourceLabel(source)} mods on page ${nextPage}.` : `No visible Nexus mods on page ${nextPage}.${result.hasMore ? " More pages are available." : " End of results."}`);
       recordCachePolicyDiagnostic({
         browseDataSource: "live",
         detailDataSource: "unchanged",
@@ -2018,6 +2013,9 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGam
   }
 
   function switchBrowseSource(nextSource: BrowseTab, sourceId?: string) {
+    browseRequestSeqRef.current += 1;
+    setLoadingSource(null);
+    clearTaskProgress();
     const selected = sourceId ? configuredSources.find((source) => source.id === sourceId) ?? null : null;
     if (activeSource?.browseMode === "webview_window" && activeSource.id !== sourceId) {
       void invoke<string>("control_embedded_browser_window", {
