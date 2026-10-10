@@ -1,7 +1,7 @@
 {
-  "version": "1.8.3",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v1.8.3/Tsuki.Mod.Manager_1.8.3_x64-setup.exe",
-  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v1.8.3",
-  "sha256": "40F6BFF68FA6EFE627BB40954FC4B11F5D0977EB87F73F7C100BB1E10DA4C180",
-  "notes": "Fixed Installed tab rescanning, performance issues, terminal popup windows, ModWorkshop date sorting, stale Home cards, version display issues, and general stability improvements."
+  "version": "2.0.0",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.0/Tsuki.Mod.Manager_2.0.0_x64-setup.exe",
+  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.0",
+  "sha256": "fa7afe149c7df04e8c999afef4fef3b65ba43d2b5e5ea1c6cf83125153357017",
+  "notes": "Multi-game profiles, version-aware installation, safer receipt management, refreshed lunar UI, and separately downloaded signed Outlast Trials native support. See the release notes for beta loader and external-manager limitations."
 }
