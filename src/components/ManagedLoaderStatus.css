@@ -1,0 +1,7 @@
+.managed-loader-status { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border-color, #393a48); background: #16191ee8; font-size: 12px; }
+.managed-loader-status > div { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.managed-loader-status span { color: #aab8c2; line-height: 1.5; overflow-wrap: anywhere; }
+.managed-loader-status button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; min-height: 30px; padding: 5px 10px; border: 1px solid #7975b8; border-radius: 8px; background: linear-gradient(135deg, #6353a0, #294a67); box-shadow: inset 0 1px 0 #ffffff22; color: #f2f4ff; font: inherit; font-weight: 600; cursor: pointer; }
+.managed-loader-status button:hover:not(:disabled) { filter: brightness(1.18); }
+.managed-loader-status button:disabled { opacity: .55; cursor: wait; }
+@media (max-width: 700px) { .managed-loader-status { flex-wrap: wrap; } .managed-loader-status > div { flex-basis: 100%; } }

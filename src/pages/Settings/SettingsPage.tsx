@@ -1,664 +1,276 @@
 import "./SettingsPage.css";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { ProfileArtwork } from "../../components/ProfileArtwork";
+import { DependencyActions, DependencyName } from "../../components/DependencyActions";
+import { dependenciesForProfile, dependencySourceLabel, findDependency } from "../../models/dependency";
+import type { GameProfile } from "../../models/gameProfiles";
+import type { ActiveProfileRuntime } from "../../models/profileRuntime";
+import type { ProfileSettings, ProfileSourceId } from "../../models/profileSettings";
+import { DEFAULT_PROFILE_SETTINGS, normalizeProfileSettings } from "../../models/profileSettings";
 import type { AppSettings } from "../../models/settings";
+import { applyAppearanceSettings, normalizeAppSettings } from "../../models/settings";
 import { APP_THEMES } from "../../models/theme";
+import { safeLocalStorageSet } from "../../utils/browserStorage";
+
+type UniversalCategoryId = "general" | "appearance" | "accounts" | "downloads" | "browser" | "profileDefaults" | "storage" | "updates" | "modIndexDefaults" | "advanced";
+type ProfileCategoryId = "profileOverview" | "profileGameLaunch" | "profileBrowsing" | "profileSources" | "profileModIndex" | "profileDependencies" | "profileBackups" | "profileSetup";
+type CategoryId = UniversalCategoryId | ProfileCategoryId;
+type SaveState = "idle" | "saving" | "saved" | "error";
+type OptionItem<T extends string = string> = { value: T; label: string };
+type SearchItem = { id: string; category: CategoryId; title: string; detail: string; terms: string };
 
 interface SettingsPageProps {
   activeThemeId: string;
   onThemeChange: (themeId: string) => void;
+  profile?: GameProfile | null;
+  profileRuntime?: ActiveProfileRuntime | null;
+  isProfileActive?: boolean;
+  openedFrom?: "manager" | "select-game";
+  initialCategory?: CategoryId;
+  onBack?: () => void;
+  onBackToGames?: () => void;
+  onOpenProfileCreator?: (profileId: string) => void;
+  onActivateProfile?: (profileId: string) => void;
 }
 
-interface AppUpdateStatus {
-  currentVersion: string;
-  currentSemver: string;
-  latestVersion?: string | null;
-  updateAvailable: boolean;
-  notes?: string | null;
-  pubDate?: string | null;
-  downloadUrl?: string | null;
-  releaseUrl?: string | null;
-  sha256?: string | null;
-  manifestUrl?: string | null;
-  checkedAtUnix: number;
-  error?: string | null;
-}
+interface CacheStats { appDataPath: string; cachePath: string; downloadCachePath: string; extractionCachePath: string; receiptsPath?: string; indexesPath?: string; backupsPath?: string; logsPath?: string; thumbnailsPath?: string; uninstalledPath: string; downloadCacheSizeBytes: number; extractionCacheSizeBytes: number; totalCacheSizeBytes: number; receiptsSizeBytes?: number; indexesSizeBytes?: number; backupsSizeBytes?: number; logsSizeBytes?: number; thumbnailsSizeBytes?: number; cachedDownloadCount: number; temporaryExtractionFolderCount: number; receiptCount?: number; indexFileCount?: number; backupCount?: number; logCount?: number; thumbnailCount?: number; uninstalledStorageSizeBytes: number; uninstalledEntryCount: number; }
+interface AppUpdateStatus { currentSemver: string; latestVersion?: string | null; updateAvailable: boolean; error?: string | null; }
+interface SourceIndexDiagnostics { remoteEnabled?: boolean; lastRefreshAt?: number | null; indexVersion?: string | null; recordCount?: number; fileEntryCount?: number; hashCacheEntries?: number; refreshError?: string | null; totalRecords?: number; hashEntries?: number; archiveManifests?: number; }
+interface DependencyReportItem { id?: string; label: string; found?: boolean; status?: string; details?: string; recommendation?: string; }
+interface DependencyReport { overallStatus?: string; status?: string; items?: DependencyReportItem[]; warnings?: string[]; }
 
-interface CacheStats {
-  appDataPath: string;
-  cachePath: string;
-  downloadCachePath: string;
-  extractionCachePath: string;
-  uninstalledPath: string;
-  downloadCacheSizeBytes: number;
-  extractionCacheSizeBytes: number;
-  totalCacheSizeBytes: number;
-  cachedDownloadCount: number;
-  temporaryExtractionFolderCount: number;
-  uninstalledStorageSizeBytes: number;
-  uninstalledEntryCount: number;
-}
-
-function maskKey(value: string) {
-  if (!value) return "Not saved";
-  if (value.length <= 6) return "******";
-  return `${"*".repeat(Math.max(4, value.length - 4))}${value.slice(-4)}`;
-}
-
-type SettingsTab = "game" | "sources" | "cache" | "updates" | "themes";
-
-const SETTINGS_CATEGORIES: Array<{ id: SettingsTab; label: string }> = [
-  { id: "game", label: "Game" },
-  { id: "sources", label: "Sources" },
-  { id: "cache", label: "Cache" },
-  { id: "updates", label: "Updates" },
-  { id: "themes", label: "Themes" },
+const universalCategories: Array<{ id: UniversalCategoryId; label: string; icon: string }> = [
+  { id: "general", label: "General", icon: "G" }, { id: "appearance", label: "Appearance", icon: "A" }, { id: "accounts", label: "Accounts", icon: "@" }, { id: "downloads", label: "Downloads", icon: "D" }, { id: "browser", label: "Browser", icon: "B" }, { id: "profileDefaults", label: "New Profile Defaults", icon: "N" }, { id: "storage", label: "Storage", icon: "S" }, { id: "updates", label: "Updates", icon: "U" }, { id: "modIndexDefaults", label: "Mod Index Defaults", icon: "I" }, { id: "advanced", label: "Advanced", icon: "*" },
 ];
+const universalTitles: Record<UniversalCategoryId, string> = { general: "General", appearance: "Appearance", accounts: "Accounts", downloads: "Downloads", browser: "Browser", profileDefaults: "New Profile Defaults", storage: "Storage", updates: "Updates", modIndexDefaults: "Mod Index Defaults", advanced: "Advanced" };
+const universalResetScopes: Record<UniversalCategoryId, string> = { general: "general", appearance: "appearance", accounts: "accounts", downloads: "downloads", browser: "browser", profileDefaults: "profiles", storage: "storage", updates: "updates", modIndexDefaults: "modIndex", advanced: "advanced" };
+const profileResetScopes: Record<ProfileCategoryId, string> = { profileOverview: "overview", profileGameLaunch: "gameLaunch", profileBrowsing: "browsing", profileSources: "sources", profileModIndex: "modIndex", profileDependencies: "dependencies", profileBackups: "backups", profileSetup: "setup" };
+const sourceLabels: Record<ProfileSourceId, string> = { modworkshop: "ModWorkshop", nexus: "Nexus Mods", github: "GitHub", custom: "Custom Browser" };
+const sourceList: ProfileSourceId[] = ["modworkshop", "nexus", "github", "custom"];
 
-function reportTaskProgress(label: string, progress: number | null = null, detail = "") {
-  window.dispatchEvent(new CustomEvent("tsuki-task-progress", {
-    detail: { active: true, label, detail, progress },
-  }));
+const startupOptions: OptionItem<AppSettings["startupDestination"]>[] = [{ value: "home", label: "Home" }, { value: "browse", label: "Browse" }, { value: "installed", label: "Installed" }, { value: "games", label: "Game Selection" }, { value: "last", label: "Last Opened Page" }];
+const densityOptions: OptionItem<AppSettings["interfaceDensity"]>[] = [{ value: "compact", label: "Compact" }, { value: "comfortable", label: "Comfortable" }, { value: "spacious", label: "Spacious" }];
+const sidebarOptions: OptionItem<AppSettings["sidebarDensity"]>[] = [{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }, { value: "icons", label: "Icons Only" }];
+const launchOptions: OptionItem<AppSettings["defaultLaunchAction"]>[] = [{ value: "ask", label: "Ask" }, { value: "vanilla", label: "Vanilla" }, { value: "modded", label: "Modded" }, { value: "remember", label: "Remember" }];
+const externalLinkOptions: OptionItem<AppSettings["externalLinkBehavior"]>[] = [{ value: "ask", label: "Ask" }, { value: "external", label: "Always External" }, { value: "block", label: "Block" }];
+const browserOptions: OptionItem<AppSettings["browserMode"]>[] = [{ value: "fallback", label: "Safe Fallback" }, { value: "embedded", label: "Embedded" }, { value: "native", label: "Native" }, { value: "ask", label: "Ask" }];
+const updateChannelOptions: OptionItem<AppSettings["updateChannel"]>[] = [{ value: "stable", label: "Stable" }];
+const remoteIndexOptions: OptionItem<AppSettings["indexRemoteBehavior"]>[] = [{ value: "auto", label: "Automatic" }, { value: "ask", label: "Ask" }, { value: "manual", label: "Manual" }, { value: "disabled", label: "Disabled" }];
+const profileBrowserOptions: OptionItem<ProfileSettings["browserModeOverride"]>[] = [{ value: "inherit", label: "Use Global" }, { value: "embedded", label: "Embedded" }, { value: "native", label: "Native" }, { value: "fallback", label: "Safe Fallback" }, { value: "ask", label: "Ask" }];
+const profileLaunchOptions: OptionItem<ProfileSettings["defaultLaunchAction"]>[] = [{ value: "inherit", label: "Use Global" }, { value: "ask", label: "Ask" }, { value: "vanilla", label: "Vanilla" }, { value: "modded", label: "Modded" }, { value: "remember", label: "Remember" }];
+const profileIndexOptions: OptionItem<ProfileSettings["indexBehavior"]>[] = [{ value: "inherit", label: "Use Default" }, { value: "auto", label: "Automatic" }, { value: "manual", label: "Manual" }, { value: "disabled", label: "Disabled" }];
+const profileDependencyOptions: OptionItem<ProfileSettings["dependencySetup"]>[] = [{ value: "inherit", label: "Use Default" }, { value: "ask", label: "Ask" }, { value: "auto", label: "Automatic" }, { value: "off", label: "Off" }];
+const profileDependencyUpdateOptions: OptionItem<ProfileSettings["dependencyUpdates"]>[] = [{ value: "inherit", label: "Use Global" }, { value: "auto", label: "Automatic" }, { value: "ask", label: "Ask" }, { value: "off", label: "Off" }];
+const profileBackupOptions: OptionItem<ProfileSettings["backupBehavior"]>[] = [{ value: "inherit", label: "Use Default" }, { value: "before-replace", label: "Before Replace" }, { value: "every-install", label: "Every Install" }, { value: "needed", label: "When Needed" }, { value: "disabled", label: "Disabled" }];
+const profileSourcePreferenceOptions: OptionItem<ProfileSettings["preferredBrowserSource"]>[] = [{ value: "auto", label: "Automatic" }, { value: "modworkshop", label: "ModWorkshop" }, { value: "nexus", label: "Nexus Mods" }, { value: "github", label: "GitHub" }, { value: "custom", label: "Custom" }];
+const profileDefaultBrowserOptions: OptionItem<AppSettings["profileDefaultBrowserMode"]>[] = [{ value: "global", label: "Use Global" }, { value: "embedded", label: "Embedded" }, { value: "native", label: "Native" }, { value: "ask", label: "Ask" }];
+const profileDefaultIndexOptions: OptionItem<AppSettings["profileDefaultIndexBehavior"]>[] = [{ value: "auto", label: "Automatic" }, { value: "manual", label: "Manual" }, { value: "disabled", label: "Disabled" }];
+const dependencyDefaultOptions: OptionItem<AppSettings["profileDefaultDependencySetup"]>[] = [{ value: "ask", label: "Ask" }, { value: "auto", label: "Automatic" }, { value: "off", label: "Off" }];
+const backupDefaultOptions: OptionItem<AppSettings["profileDefaultBackupBehavior"]>[] = [{ value: "before-replace", label: "Before Replace" }, { value: "every-install", label: "Every Install" }, { value: "needed", label: "When Needed" }, { value: "disabled", label: "Disabled" }];
+const installFlowOptions: OptionItem<AppSettings["profileDefaultInstallationFlow"]>[] = [{ value: "guided", label: "Guided" }, { value: "quick", label: "Quick" }, { value: "ask", label: "Ask" }];
+const indexBuildOptions: OptionItem<AppSettings["indexBuildMode"]>[] = [{ value: "metadata", label: "Metadata" }, { value: "manifest", label: "Manifest" }, { value: "full", label: "Full" }];
+
+function profileCategories(profileName: string): Array<{ id: ProfileCategoryId; label: string; icon: string; subtitle?: string }> {
+  return [{ id: "profileOverview", label: profileName, icon: "P", subtitle: "Identity" }, { id: "profileGameLaunch", label: "Game & Launch", icon: "L" }, { id: "profileBrowsing", label: "Browsing", icon: "B" }, { id: "profileSources", label: "Sources", icon: "S" }, { id: "profileModIndex", label: "Mod Index", icon: "I" }, { id: "profileDependencies", label: "Dependencies", icon: "D" }, { id: "profileBackups", label: "Backups", icon: "R" }, { id: "profileSetup", label: "Setup", icon: "C" }];
 }
-
-function clearTaskProgressSoon(ms = 700) {
-  window.setTimeout(() => {
-    window.dispatchEvent(new CustomEvent("tsuki-task-progress", {
-      detail: { active: false, label: "", detail: "", progress: null },
-    }));
-  }, ms);
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-export function SettingsPage({ activeThemeId, onThemeChange }: SettingsPageProps) {
-  const [detectedPath, setDetectedPath] = useState("Not checked yet.");
-  const [manualPath, setManualPath] = useState("");
-  const [modworkshopApiKey, setModworkshopApiKey] = useState("");
+function isProfileCategory(value: string): value is ProfileCategoryId { return value.startsWith("profile"); }
+function categoryAvailable(value: string | null | undefined, hasProfile: boolean): value is CategoryId { return Boolean(value && (universalCategories.some((item) => item.id === value) || (hasProfile && isProfileCategory(value)))); }
+function titleForCategory(category: CategoryId, profileName: string) { return category === "profileOverview" ? profileName : isProfileCategory(category) ? profileCategories(profileName).find((item) => item.id === category)?.label ?? "Profile" : universalTitles[category]; }
+function formatBytes(value = 0) { if (!value) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; let size = value; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; } return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`; }
+function formatDate(value?: number | null) { return value ? new Date(value * 1000).toLocaleString() : "Not available"; }
+function maskKey(value?: string | null) { if (!value?.trim()) return "Not connected"; const clean = value.trim(); return clean.length <= 8 ? "Saved key" : `${"*".repeat(Math.max(4, clean.length - 4))}${clean.slice(-4)}`; }
+function summarizeUnknown(value: unknown) { if (typeof value === "string") return value; if (!value || typeof value !== "object") return String(value ?? "Done."); const record = value as Record<string, unknown>; return typeof record.message === "string" ? record.message : typeof record.status === "string" ? record.status : typeof record.overallStatus === "string" ? record.overallStatus : JSON.stringify(value); }
+function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function arrayOf(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
+function stringOf(value: unknown) { return typeof value === "string" ? value : ""; }
+function sourceIdFromText(value: string): ProfileSourceId | null { const lower = value.toLowerCase(); if (lower.includes("modworkshop") || lower.includes("mws")) return "modworkshop"; if (lower.includes("nexus")) return "nexus"; if (lower.includes("github")) return "github"; if (lower.includes("custom") || lower.includes("browser")) return "custom"; return null; }
+function configuredSourceIds(profile: GameProfile, runtime?: ActiveProfileRuntime | null) { const ids = new Set<ProfileSourceId>(); const config = runtime?.sourceConfig ?? profile.sourceConfig ?? {}; if (config.modworkshopGameId || config.modworkshopSlug) ids.add("modworkshop"); if (config.nexusDomain || config.nexusGameId) ids.add("nexus"); if (config.customBrowser || config.customBrowserStartUrl || config.customBrowserSources?.length) ids.add("custom"); for (const source of runtime?.sources ?? []) { const id = sourceIdFromText(source); if (id) ids.add(id); } const sections = recordOf(recordOf(profile.draft).sections); for (const item of arrayOf(sections.sources)) { const entry = recordOf(item); if (entry.enabled === false) continue; const id = sourceIdFromText([entry.id, entry.type, entry.source, entry.name, entry.title].map(stringOf).join(" ")); if (id) ids.add(id); } return [...ids]; }
+function uniqueSourceIds(values: ProfileSourceId[]) { return values.filter((value, index) => values.indexOf(value) === index); }
+function Highlight({ text, query }: { text: string; query: string }) { const clean = query.trim(); if (!clean) return <>{text}</>; const index = text.toLowerCase().indexOf(clean.toLowerCase()); if (index < 0) return <>{text}</>; return <>{text.slice(0, index)}<mark>{text.slice(index, index + clean.length)}</mark>{text.slice(index + clean.length)}</>; }
+function Button({ children, onClick, disabled, variant = "secondary", title }: { children: ReactNode; onClick?: () => void; disabled?: boolean; variant?: "primary" | "secondary" | "danger" | "ghost"; title?: string }) { return <button className={`settings-button ${variant}`} type="button" onClick={onClick} disabled={disabled} title={title}>{children}</button>; }
+function Switch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (value: boolean) => void; disabled?: boolean; label?: string }) { return <button className={`settings-switch ${checked ? "on" : ""}`} role="switch" aria-checked={checked} aria-label={label} disabled={disabled} type="button" onClick={() => onChange(!checked)}><span /></button>; }
+function SelectControl<T extends string>({ value, options, onChange, label }: { value: T; options: OptionItem<T>[]; onChange: (value: T) => void; label?: string }) { return <select className="settings-select" aria-label={label} value={value} onChange={(event) => onChange(event.target.value as T)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>; }
+function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: OptionItem<T>[]; onChange: (value: T) => void; label?: string }) { return <div className="settings-segmented" role="group" aria-label={label}>{options.map((option) => <button key={option.value} type="button" className={value === option.value ? "active" : ""} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>; }
+function Stepper({ value, min, max, onChange, label, suffix = "" }: { value: number; min: number; max: number; onChange: (value: number) => void; label: string; suffix?: string }) { const set = (next: number) => onChange(Math.max(min, Math.min(max, next))); return <div className="settings-stepper" aria-label={label}><button type="button" onClick={() => set(value - 1)} disabled={value <= min}>-</button><span>{value}{suffix}</span><button type="button" onClick={() => set(value + 1)} disabled={value >= max}>+</button></div>; }
+function SettingRow({ id, title, description, children, hidden }: { id: string; title: string; description?: string; children: ReactNode; hidden?: boolean }) { if (hidden) return null; return <div id={`setting-${id}`} className="settings-row"><div className="settings-row-copy"><strong>{title}</strong>{description && <p>{description}</p>}</div><div className="settings-control-cluster">{children}</div></div>; }
+function Section({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) { return <section className="settings-section"><div className="settings-section-heading"><h3>{title}</h3>{action}</div>{children}</section>; }
+function InfoGrid({ rows }: { rows: Array<[string, ReactNode]> }) { return <div className="settings-info-grid">{rows.map(([label, value]) => <article key={label}><span>{label}</span><strong>{value}</strong></article>)}</div>; }
+function SourceToggle({ source, checked, disabled, onChange }: { source: ProfileSourceId; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) { return <label className={`settings-check-tile ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}`}><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} /><span>{sourceLabels[source]}</span></label>; }
+export function SettingsPage({ activeThemeId, onThemeChange, profile = null, profileRuntime = null, isProfileActive = false, openedFrom = "manager", initialCategory, onBack, onBackToGames, onOpenProfileCreator, onActivateProfile }: SettingsPageProps) {
+  const profileId = profile?.profileId ?? "";
+  const profileDependencies = dependenciesForProfile(profileId, profile?.gameVersion);
+  const hasProfile = Boolean(profileId);
+  const profileName = profile?.displayName || "Current Profile";
+  const memoryKey = hasProfile ? `tsuki-settings:last-category:profile:${profileId}` : "tsuki-settings:last-category:global";
+  const [settings, setSettings] = useState<AppSettings>(() => normalizeAppSettings({ themeId: activeThemeId }));
+  const [profileSettings, setProfileSettings] = useState<ProfileSettings>(() => normalizeProfileSettings(DEFAULT_PROFILE_SETTINGS, profileId));
+  const [active, setActive] = useState<CategoryId>(() => categoryAvailable(initialCategory, hasProfile) ? initialCategory : "general");
+  const [query, setQuery] = useState("");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [cache, setCache] = useState<CacheStats | null>(null);
+  const [index, setIndex] = useState<SourceIndexDiagnostics | null>(null);
+  const [dependencyReport, setDependencyReport] = useState<DependencyReport | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
   const [nexusApiKey, setNexusApiKey] = useState("");
-  const [showAgeRestrictedNexus, setShowAgeRestrictedNexus] = useState(true);
-  const [showKeys, setShowKeys] = useState(false);
-  const [sourceStatus, setSourceStatus] = useState("Sources not verified yet.");
-  const [saveStatus, setSaveStatus] = useState("Settings loaded from AppData when available.");
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("game");
-  const [adminStatus, setAdminStatus] = useState("Admin state not checked yet.");
-  const [appUpdateStatus, setAppUpdateStatus] = useState("App update check has not run yet.");
-  const [appUpdateBusy, setAppUpdateBusy] = useState(false);
-  const [keepDownloadedArchives, setKeepDownloadedArchives] = useState(true);
-  const [keepUninstalledMods, setKeepUninstalledMods] = useState(false);
-  const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
-  const [cacheStatus, setCacheStatus] = useState("Cache stats not loaded yet.");
-  const [cacheBusy, setCacheBusy] = useState(false);
+  const [modworkshopApiKey, setModworkshopApiKey] = useState("");
+  const [showNexusKey, setShowNexusKey] = useState(false);
+  const [showModworkshopKey, setShowModworkshopKey] = useState(false);
+  const [accountStatus, setAccountStatus] = useState("Connections have not been tested yet.");
+  const saveTimer = useRef<number | null>(null);
+  const cleanQuery = query.trim().toLowerCase();
+  const profileNav = useMemo(() => profileCategories(profileName), [profileName]);
+  const configuredSources = useMemo(() => profile ? configuredSourceIds(profile, profileRuntime) : [], [profile, profileRuntime]);
+  const selectedSources = profileSettings.enabledSources.length ? profileSettings.enabledSources : configuredSources;
+  const explicitSourceSelection = profileSettings.enabledSources.length > 0;
+  const categoryTitle = titleForCategory(active, profileName);
+  const storageCards = [
+    { id: "receipts", name: "Receipts", size: cache?.receiptsSizeBytes ?? 0, count: `${cache?.receiptCount ?? 0} receipt files`, openCommand: "open_receipts_folder" },
+    { id: "indexes", name: "Indexes", size: cache?.indexesSizeBytes ?? 0, count: `${cache?.indexFileCount ?? 0} files`, openCommand: "open_indexes_folder" },
+    { id: "cache", name: "Cache", size: cache?.totalCacheSizeBytes ?? 0, count: `${(cache?.cachedDownloadCount ?? 0) + (cache?.temporaryExtractionFolderCount ?? 0)} cached items`, openCommand: "open_cache_folder", cleanCommand: "clear_all_download_cache" },
+    { id: "downloads", name: "Downloads", size: cache?.downloadCacheSizeBytes ?? 0, count: `${cache?.cachedDownloadCount ?? 0} archives`, openCommand: "open_downloads_folder", cleanCommand: "clear_download_cache" },
+    { id: "extraction", name: "Extraction", size: cache?.extractionCacheSizeBytes ?? 0, count: `${cache?.temporaryExtractionFolderCount ?? 0} temporary folders`, openCommand: "open_extraction_cache_folder", cleanCommand: "clear_extraction_cache" },
+    { id: "backups", name: "Backups", size: cache?.backupsSizeBytes ?? 0, count: `${cache?.backupCount ?? 0} files`, openCommand: "open_backups_folder" },
+    { id: "recovery", name: "Recovery", size: cache?.uninstalledStorageSizeBytes ?? 0, count: `${cache?.uninstalledEntryCount ?? 0} items`, openCommand: "open_uninstalled_folder" },
+    { id: "logs", name: "Logs", size: cache?.logsSizeBytes ?? 0, count: `${cache?.logCount ?? 0} files`, openCommand: "open_logs_folder" },
+  ];
+  const searchItems = useMemo<SearchItem[]>(() => hasProfile ? [
+    { id: "startup", category: "general", title: "Startup location", detail: "General", terms: "startup home browse installed game selection last opened page window" },
+    { id: "theme", category: "appearance", title: "Theme", detail: "Appearance", terms: "theme dark light accent color" },
+    { id: "accounts", category: "accounts", title: "Accounts", detail: "Accounts", terms: "api key nexus modworkshop github" },
+    { id: "download", category: "downloads", title: "Download folder", detail: "Downloads", terms: "download folder cache staging retry bandwidth" },
+    { id: "browser", category: "browser", title: "Browser mode", detail: "Browser", terms: "embedded native fallback links" },
+    { id: "defaults", category: "profileDefaults", title: "New Profile Defaults", detail: "Defaults", terms: "new profile sources dependencies backups browser index" },
+    { id: "storage", category: "storage", title: "Storage", detail: "Storage", terms: "cache receipts indexes backups logs" },
+    { id: "updates", category: "updates", title: "Updates", detail: "Updates", terms: "updates profile dependencies index" },
+    { id: "index", category: "modIndexDefaults", title: "Mod Index Defaults", detail: "Index", terms: "index remote build bandwidth" },
+    { id: "advanced", category: "advanced", title: "Advanced", detail: "Advanced", terms: "import export developer logging reset" },
+    { id: "profile-identity", category: "profileOverview", title: profileName, detail: "Current Profile", terms: "profile identity artwork name game status setup" },
+    { id: "profile-root", category: "profileGameLaunch", title: "Game root override", detail: "Game & Launch", terms: "profile game root executable working directory launch arguments env" },
+    { id: "profile-browser", category: "profileBrowsing", title: "Profile browser mode", detail: "Browsing", terms: "profile embedded browsing source website" },
+    { id: "profile-sources", category: "profileSources", title: "Profile sources", detail: "Sources", terms: "modworkshop nexus github custom source mapping" },
+    { id: "profile-index", category: "profileModIndex", title: "Profile mod index", detail: "Mod Index", terms: "profile index diagnostics records hashes behavior" },
+    { id: "profile-dependencies", category: "profileDependencies", title: "Dependency setup", detail: "Dependencies", terms: "dependencies updates install policy" },
+    { id: "profile-backups", category: "profileBackups", title: "Backup behavior", detail: "Backups", terms: "backup retention before replace install" },
+    { id: "profile-setup", category: "profileSetup", title: "Setup checks", detail: "Setup", terms: "setup wizard readiness detection source checks" },
+  ] : [
+    { id: "startup", category: "general", title: "Startup location", detail: "General", terms: "startup home browse installed game selection last opened page window" }, { id: "theme", category: "appearance", title: "Theme", detail: "Appearance", terms: "theme dark light accent color" }, { id: "accounts", category: "accounts", title: "Accounts", detail: "Accounts", terms: "api key nexus modworkshop github" }, { id: "download", category: "downloads", title: "Download folder", detail: "Downloads", terms: "download folder cache staging retry bandwidth" }, { id: "browser", category: "browser", title: "Browser mode", detail: "Browser", terms: "embedded native fallback links" }, { id: "defaults", category: "profileDefaults", title: "New Profile Defaults", detail: "Defaults", terms: "new profile sources dependencies backups browser index" }, { id: "storage", category: "storage", title: "Storage", detail: "Storage", terms: "cache receipts indexes backups logs" }, { id: "updates", category: "updates", title: "Updates", detail: "Updates", terms: "updates profile dependencies index" }, { id: "index", category: "modIndexDefaults", title: "Mod Index Defaults", detail: "Index", terms: "index remote build bandwidth" }, { id: "advanced", category: "advanced", title: "Advanced", detail: "Advanced", terms: "import export developer logging reset" },
+  ], [hasProfile, profileName]);
+  const matchedResults = useMemo(() => cleanQuery ? searchItems.filter((item) => `${item.title} ${item.detail} ${item.terms}`.toLowerCase().includes(cleanQuery)) : [], [cleanQuery, searchItems]);
+  const matchedCategories = useMemo(() => new Set(matchedResults.map((item) => item.category)), [matchedResults]);
+  const rowHidden = (terms: string) => Boolean(cleanQuery && !terms.toLowerCase().includes(cleanQuery));
 
-  const nexusConnected = nexusApiKey.trim().length > 0;
-  const modworkshopAdvanced = modworkshopApiKey.trim().length > 0;
-
-  async function loadSettings() {
-    try {
-      const settings = await invoke<AppSettings>("get_app_settings");
-      setManualPath(settings.gamePath ?? "");
-      setModworkshopApiKey(settings.modworkshopApiKey ?? "");
-      setNexusApiKey(settings.nexusApiKey ?? "");
-      setShowAgeRestrictedNexus(settings.showAgeRestrictedNexus ?? true);
-      setKeepDownloadedArchives(settings.keepDownloadedArchives ?? true);
-      setKeepUninstalledMods(settings.keepUninstalledMods ?? false);
-      // Theme is loaded once by App. Do not re-apply it here or Settings can snap back when reopened.
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function detectPayday3() {
-    try {
-      const result = await invoke<string>("detect_payday3_path");
-      setDetectedPath(result);
-    } catch (error) {
-      setDetectedPath(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function saveManualPath() {
-    try {
-      const result = await invoke<string>("save_game_path", { gamePath: manualPath });
-      setSaveStatus(result);
-      window.dispatchEvent(new Event("tsuki-data-refresh"));
-      await detectPayday3();
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function clearManualPath() {
-    try {
-      const result = await invoke<string>("clear_game_path");
-      setManualPath("");
-      setSaveStatus(result);
-      window.dispatchEvent(new Event("tsuki-data-refresh"));
-      await detectPayday3();
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function saveTheme(themeId: string) {
-    onThemeChange(themeId);
-
-    try {
-      const result = await invoke<string>("save_theme", { themeId });
-      setSaveStatus(result);
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function saveSourceKeys() {
-    try {
-      const result = await invoke<string>("save_source_api_keys", {
-        modworkshopApiKey,
-        nexusApiKey,
-        showAgeRestrictedNexus,
-      });
-      setSaveStatus(result);
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function clearSourceKeys() {
-    try {
-      const result = await invoke<string>("clear_source_api_keys");
-      setModworkshopApiKey("");
-      setNexusApiKey("");
-      setSourceStatus("Source keys cleared.");
-      setSaveStatus(result);
-    } catch (error) {
-      setSaveStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function loginWithNexus() {
-    try {
-      const result = await invoke<string>("open_nexus_login_page");
-      setSourceStatus(result);
-    } catch (error) {
-      setSourceStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function checkAdminState() {
-    try {
-      const isAdmin = await invoke<boolean>("is_running_as_admin");
-      setAdminStatus(isAdmin ? "Tsuki is running as administrator." : "Tsuki is not running as administrator.");
-    } catch (error) {
-      setAdminStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function relaunchAsAdmin() {
-    try {
-      const result = await invoke<string>("relaunch_tsuki_as_admin");
-      setAdminStatus(result);
-    } catch (error) {
-      setAdminStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function copyNexusKey() {
-    if (!nexusApiKey.trim()) {
-      setSourceStatus("No Nexus API key to copy.");
-      return;
-    }
-
-    await navigator.clipboard.writeText(nexusApiKey);
-    setSourceStatus("Copied Nexus API key.");
-  }
-
-  function formatAppUpdateStatus(result: AppUpdateStatus) {
-    if (result.error) return result.error;
-
-    if (result.updateAvailable) {
-      return [
-        `Update available: ${result.latestVersion}`,
-        `Current: ${result.currentSemver}`,
-        result.notes ? `Notes: ${result.notes}` : null,
-        result.downloadUrl ? "Download URL present." : "No download URL in manifest.",
-      ].filter(Boolean).join(" | ");
-    }
-
-    return `Tsuki is up to date. Current: ${result.currentSemver}${result.latestVersion ? ` Latest: ${result.latestVersion}` : ""}.`;
-  }
-
-  async function checkAppUpdateFromSettings() {
-    if (appUpdateBusy) return;
-    setAppUpdateBusy(true);
-    setAppUpdateStatus("Checking app update manifest...");
-
-    try {
-      const result = await invoke<AppUpdateStatus>("check_app_update", { manifestUrl: null });
-      setAppUpdateStatus(formatAppUpdateStatus(result));
-    } catch (error) {
-      setAppUpdateStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAppUpdateBusy(false);
-    }
-  }
-
-  async function downloadAndLaunchAppUpdateFromSettings() {
-    if (appUpdateBusy) return;
-    setAppUpdateBusy(true);
-    setAppUpdateStatus("Downloading latest Tsuki installer...");
-
-    try {
-      const result = await invoke<string>("download_and_launch_app_update", { manifestUrl: null });
-      setAppUpdateStatus(result);
-    } catch (error) {
-      setAppUpdateStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setAppUpdateBusy(false);
-    }
-  }
-
-  async function refreshCacheStats(message = "Cache stats refreshed.") {
-    try {
-      const stats = await invoke<CacheStats>("get_cache_stats");
-      setCacheStats(stats);
-      setCacheStatus(message);
-    } catch (error) {
-      setCacheStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function openTsukiDataFolder() {
-    try {
-      const result = await invoke<string>("open_app_data_folder");
-      setCacheStatus(result);
-    } catch (error) {
-      setCacheStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function openCacheFolder() {
-    try {
-      const result = await invoke<string>("open_cache_folder");
-      setCacheStatus(result);
-    } catch (error) {
-      setCacheStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function saveKeepDownloadedArchives(next: boolean) {
-    setKeepDownloadedArchives(next);
-    try {
-      const result = await invoke<string>("save_cache_settings", { keepDownloadedArchives: next });
-      setCacheStatus(result);
-      await refreshCacheStats(result);
-    } catch (error) {
-      setKeepDownloadedArchives(!next);
-      setCacheStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function saveKeepUninstalledMods(next: boolean) {
-    setKeepUninstalledMods(next);
-    try {
-      const result = await invoke<string>("save_uninstall_storage_settings", { keepUninstalledMods: next });
-      setCacheStatus(result);
-      await refreshCacheStats(result);
-    } catch (error) {
-      setKeepUninstalledMods(!next);
-      setCacheStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function clearCache(command: "clear_download_cache" | "clear_extraction_cache" | "clear_all_download_cache", label: string) {
-    const confirmed = window.confirm(`Clear ${label}? This only deletes Tsuki cache files and does not delete receipts, backups, profiles, or logs.`);
-    if (!confirmed || cacheBusy) return;
-
-    setCacheBusy(true);
-    setCacheStatus(`Clearing ${label}...`);
-    reportTaskProgress("Clear Cache", 10, `Clearing ${label}...`);
-
-    try {
-      const result = await invoke<string>(command);
-      reportTaskProgress("Clear Cache", 72, "Refreshing cache stats...");
-      await refreshCacheStats(result);
-      reportTaskProgress("Clear Cache", 100, result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setCacheStatus(message);
-      reportTaskProgress("Cache cleanup failed", 100, message);
-    } finally {
-      setCacheBusy(false);
-      clearTaskProgressSoon();
-    }
-  }
-
+  useEffect(() => { const stored = window.localStorage.getItem(memoryKey); const next = categoryAvailable(initialCategory, hasProfile) ? initialCategory : categoryAvailable(stored, hasProfile) ? stored : "general"; setActive(next); setQuery(""); }, [hasProfile, initialCategory, memoryKey]);
+  useEffect(() => { if (categoryAvailable(active, hasProfile)) safeLocalStorageSet(memoryKey, active); }, [active, hasProfile, memoryKey]);
   useEffect(() => {
-    void loadSettings();
-    void detectPayday3();
-    void checkAdminState();
-    void refreshCacheStats("Cache stats loaded.");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let cancelled = false;
+    invoke<AppSettings>("get_app_settings").then((value) => { if (cancelled) return; const normalized = normalizeAppSettings(value); setSettings(normalized); setNexusApiKey(normalized.nexusApiKey ?? ""); setModworkshopApiKey(normalized.modworkshopApiKey ?? ""); onThemeChange(normalized.themeId); safeLocalStorageSet("tsuki-theme-id", normalized.themeId); applyAppearanceSettings(normalized); }).catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
+    void refreshStorage(false);
+    return () => { cancelled = true; };
+  }, [onThemeChange]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!profileId) { setProfileSettings(normalizeProfileSettings(DEFAULT_PROFILE_SETTINGS, "")); setIndex(null); setDependencyReport(null); return () => { cancelled = true; }; }
+    invoke<ProfileSettings>("get_profile_settings", { profileId }).then((value) => { if (!cancelled) setProfileSettings(normalizeProfileSettings(value, profileId)); }).catch((error) => { if (!cancelled) { setProfileSettings(normalizeProfileSettings(DEFAULT_PROFILE_SETTINGS, profileId)); setMessage(error instanceof Error ? error.message : String(error)); } });
+    void refreshIndex(false, profileId);
+    void refreshDependencyReport(false, profileId);
+    return () => { cancelled = true; };
+  }, [profileId]);
+  useEffect(() => { if (cleanQuery && matchedResults[0]) setActive(matchedResults[0].category); }, [cleanQuery, matchedResults]);
+  useEffect(() => () => { if (saveTimer.current !== null) window.clearTimeout(saveTimer.current); }, []);
 
-  return (
-    <section className="page settings-page modern-settings-page">
-      <div className="settings-hero hero-glass">
-        <div>
-          <p className="eyebrow">Control panel</p>
-          <h1>Settings</h1>
-          <p className="page-description">
-            Configure PAYDAY 3 paths, source keys, updates, and themes. Advanced diagnostics live in the secret debug panel.
-          </p>
-        </div>
-        <div className="settings-category-nav">
-          {SETTINGS_CATEGORIES.map((item) => (
-            <button
-              className={`ghost-button compact ${settingsTab === item.id ? "active" : ""}`}
-              key={item.id}
-              type="button"
-              onClick={() => setSettingsTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
+  async function persist(patch: Partial<AppSettings>, successMessage = "Saved") {
+    const next = normalizeAppSettings({ ...settings, ...patch });
+    setSettings(next);
+    if (patch.themeId) { onThemeChange(next.themeId); safeLocalStorageSet("tsuki-theme-id", next.themeId); }
+    applyAppearanceSettings(next);
+    setSaveState("saving"); setMessage("");
+    try { const saved = normalizeAppSettings(await invoke<AppSettings>("save_app_settings", { settings: next })); setSettings(saved); applyAppearanceSettings(saved); onThemeChange(saved.themeId); safeLocalStorageSet("tsuki-theme-id", saved.themeId); setSaveState("saved"); setMessage(successMessage); if (saveTimer.current !== null) window.clearTimeout(saveTimer.current); saveTimer.current = window.setTimeout(() => setSaveState("idle"), 1800); window.dispatchEvent(new CustomEvent("tsuki-developer-mode-changed", { detail: saved.developerMode ?? false })); } catch (error) { setSaveState("error"); setMessage(error instanceof Error ? error.message : String(error)); }
+  }
+  async function persistProfile(patch: Partial<ProfileSettings>, successMessage = "Profile settings saved.") {
+    if (!profileId) return;
+    const next = normalizeProfileSettings({ ...profileSettings, ...patch }, profileId);
+    setProfileSettings(next); setSaveState("saving"); setMessage("");
+    try { const saved = normalizeProfileSettings(await invoke<ProfileSettings>("save_profile_settings", { profileId, settings: next }), profileId); setProfileSettings(saved); setSaveState("saved"); setMessage(successMessage); if (saveTimer.current !== null) window.clearTimeout(saveTimer.current); saveTimer.current = window.setTimeout(() => setSaveState("idle"), 1800); window.dispatchEvent(new CustomEvent("tsuki-profile-settings-changed", { detail: { profileId, settings: saved } })); } catch (error) { setSaveState("error"); setMessage(error instanceof Error ? error.message : String(error)); }
+  }
+  async function run<T>(id: string, action: () => Promise<T>, done?: (value: T) => void) { if (busy) return; setBusy(id); setMessage(""); try { const value = await action(); done?.(value); setMessage(summarizeUnknown(value)); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } finally { setBusy(null); } }
+  async function chooseFolder(done: (value: string) => void) { const selected = await open({ directory: true, multiple: false }); if (typeof selected === "string") done(selected); }
+  async function chooseExecutable(done: (value: string) => void) { const selected = await open({ multiple: false, filters: [{ name: "Executable", extensions: ["exe"] }] }); if (typeof selected === "string") done(selected); }
+  async function refreshStorage(showMessage = true) { try { const stats = await invoke<CacheStats>("get_cache_stats"); setCache(stats); if (showMessage) setMessage("Storage usage refreshed."); } catch (error) { if (showMessage) setMessage(error instanceof Error ? error.message : String(error)); } }
+  async function refreshIndex(showMessage = true, targetProfileId = profileId) { if (!targetProfileId) { setIndex(null); return; } try { const stats = await invoke<SourceIndexDiagnostics>("get_source_index_diagnostics", { profileId: targetProfileId }); setIndex(stats); if (showMessage) setMessage("Mod Index status refreshed."); } catch (error) { setIndex(null); if (showMessage) setMessage(error instanceof Error ? error.message : String(error)); } }
+  async function refreshDependencyReport(showMessage = true, targetProfileId = profileId) { if (!targetProfileId) { setDependencyReport(null); return; } try { const report = await invoke<DependencyReport>("get_dependency_report", { profileId: targetProfileId }); setDependencyReport(report); if (showMessage) setMessage("Dependency status refreshed."); } catch (error) { setDependencyReport(null); if (showMessage) setMessage(error instanceof Error ? error.message : String(error)); } }
+  function jumpTo(item: SearchItem) { setActive(item.category); window.setTimeout(() => document.getElementById(`setting-${item.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80); }
+  function saveAccounts(next: { nexus?: string; modworkshop?: string; ageRestricted?: boolean } = {}) { const nexus = next.nexus ?? nexusApiKey; const modworkshop = next.modworkshop ?? modworkshopApiKey; const ageRestricted = next.ageRestricted ?? settings.showAgeRestrictedNexus ?? true; void run("accounts", () => invoke<string>("save_source_api_keys", { nexusApiKey: nexus, modworkshopApiKey: modworkshop, showAgeRestrictedNexus: ageRestricted }), (text) => { setSettings((current) => normalizeAppSettings({ ...current, nexusApiKey: nexus || null, modworkshopApiKey: modworkshop || null, showAgeRestrictedNexus: ageRestricted })); setNexusApiKey(nexus); setModworkshopApiKey(modworkshop); setAccountStatus(text); }); }
+  async function exportSettings() { const target = await save({ defaultPath: "tsuki-settings.json", filters: [{ name: "Tsuki Settings", extensions: ["json"] }] }); if (target) await run("export", () => invoke<string>("export_app_settings_to_path", { path: target })); }
+  async function importSettings() { const selected = await open({ multiple: false, filters: [{ name: "Tsuki Settings", extensions: ["json"] }] }); if (typeof selected !== "string") return; await run("import", () => invoke<AppSettings>("import_app_settings_from_path", { path: selected }), (value) => { const normalized = normalizeAppSettings(value); setSettings(normalized); setNexusApiKey(normalized.nexusApiKey ?? ""); setModworkshopApiKey(normalized.modworkshopApiKey ?? ""); onThemeChange(normalized.themeId); safeLocalStorageSet("tsuki-theme-id", normalized.themeId); applyAppearanceSettings(normalized); setMessage("Settings imported."); }); }
+  function resetUniversalScope(scope: UniversalCategoryId | "all") { const label = scope === "all" ? "all global settings" : universalTitles[scope]; const resetScope = scope === "all" ? "all" : universalResetScopes[scope]; if (!window.confirm(`Reset ${label}?`)) return; void run("reset", () => invoke<AppSettings>("reset_app_settings", { scope: resetScope }), (value) => { const normalized = normalizeAppSettings(value); setSettings(normalized); setNexusApiKey(normalized.nexusApiKey ?? ""); setModworkshopApiKey(normalized.modworkshopApiKey ?? ""); onThemeChange(normalized.themeId); safeLocalStorageSet("tsuki-theme-id", normalized.themeId); applyAppearanceSettings(normalized); setMessage(`${label} reset.`); }); }
+  function resetProfileScope(scope: ProfileCategoryId | "all") { if (!profileId) return; const label = scope === "all" ? `${profileName} settings` : titleForCategory(scope, profileName); const resetScope = scope === "all" ? "all" : profileResetScopes[scope]; if (!window.confirm(`Reset ${label}?`)) return; void run("profile-reset", () => invoke<ProfileSettings>("reset_profile_settings", { profileId, scope: resetScope }), (value) => { setProfileSettings(normalizeProfileSettings(value, profileId)); setMessage(`${label} reset.`); window.dispatchEvent(new CustomEvent("tsuki-profile-settings-changed", { detail: { profileId, settings: value } })); }); }
+  function toggleProfileSource(source: ProfileSourceId, enabled: boolean) { const base = explicitSourceSelection ? profileSettings.enabledSources : configuredSources; const next = enabled ? uniqueSourceIds([...base, source]) : base.filter((item) => item !== source); void persistProfile({ enabledSources: next }, `${sourceLabels[source]} ${enabled ? "enabled" : "disabled"} for ${profileName}.`); }
+  function profileSourceDescription(source: ProfileSourceId) { const config = profileRuntime?.sourceConfig ?? profile?.sourceConfig ?? {}; if (source === "modworkshop") return config.modworkshopGameId || config.modworkshopSlug || "No game mapping"; if (source === "nexus") return config.nexusDomain || config.nexusGameId || "No game mapping"; if (source === "github") return profileRuntime?.sources?.includes("github") ? "Runtime source" : "Optional source"; return config.customBrowserStartUrl || config.customBrowserSources?.[0]?.startUrl || config.customBrowserAllowedDomains?.join(", ") || (config.customBrowser ? "Configured" : "Optional source"); }
+  const saveLabel = saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : saveState === "error" ? "Could not save" : "";
+  return <section className={`page settings-page-v4 ${hasProfile ? "profile-settings-mode" : "universal-settings-mode"}`}>
+    <header className="settings-header"><div><p className="eyebrow">{hasProfile ? "Settings / Current Profile" : "Settings / Tsuki"}</p><h1>{categoryTitle}</h1></div><div className="settings-header-actions">{onBack && <Button onClick={onBack}>Back</Button>}{openedFrom === "select-game" && onBackToGames && <Button onClick={onBackToGames}>Select Game</Button>}{saveLabel && <span className={`settings-save-state ${saveState}`}>{saveLabel}</span>}{message && <span className="settings-inline-message" role="status">{message}</span>}<label className="settings-search"><span>Search</span><div><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="theme, browser, API, profile..." />{query && <button type="button" onClick={() => setQuery("")} aria-label="Clear search">x</button>}</div></label></div></header>
+    <div className="settings-workspace"><aside className="settings-category-rail" aria-label="Settings categories"><p className="settings-rail-label">TSUKI</p>{universalCategories.map((category) => { const dimmed = Boolean(cleanQuery && !matchedCategories.has(category.id)); return <button type="button" key={category.id} className={`${active === category.id ? "active" : ""} ${dimmed ? "dimmed" : ""}`} onClick={() => setActive(category.id)}><span className="settings-nav-icon">{category.icon}</span><span><strong>{category.label}</strong></span></button>; })}{hasProfile && <p className="settings-rail-label profile">CURRENT PROFILE</p>}{hasProfile && profileNav.map((category) => { const dimmed = Boolean(cleanQuery && !matchedCategories.has(category.id)); return <button type="button" key={category.id} className={`${active === category.id ? "active" : ""} ${dimmed ? "dimmed" : ""}`} onClick={() => setActive(category.id)}><span className="settings-nav-icon">{category.icon}</span><span><strong>{category.label}</strong>{category.subtitle && <small>{category.subtitle}</small>}</span></button>; })}</aside><main className="settings-content">
+      {cleanQuery && <section className="settings-search-results"><div><strong>{matchedResults.length ? `${matchedResults.length} result${matchedResults.length === 1 ? "" : "s"}` : "No results"}</strong><span>Matches use friendly setting names.</span></div>{matchedResults.slice(0, 10).map((item) => <button key={item.id} type="button" onClick={() => jumpTo(item)}><Highlight text={item.title} query={query} /><small>{item.detail}</small></button>)}</section>}
 
-      <div className="settings-tab-panel" id="settings-game" hidden={settingsTab !== "game"}>
-      <div className="settings-layout">
-        <div className="card settings-section-card">
-          <h2>Game Path</h2>
-          <div className="setting-block">
-            <label htmlFor="gamePath">Detected Payday 3 install folder</label>
-            <input id="gamePath" className="setting-input" value={detectedPath} readOnly />
+      {active === "general" && <><Section title="Startup"><SettingRow id="startup" title="Startup location" description="Choose where Tsuki opens after launch." hidden={rowHidden("startup location home browse installed game selection last opened page")}><SelectControl value={settings.startupDestination} options={startupOptions} onChange={(value) => void persist({ startupDestination: value })} /></SettingRow><SettingRow id="remember-window" title="Remember window size and position" hidden={rowHidden("remember window size position monitor center restore")}><Switch checked={settings.rememberWindowState} onChange={(value) => void persist({ rememberWindowState: value })} /></SettingRow><SettingRow id="notifications" title="Notifications" hidden={rowHidden("notifications status background tasks")}><Switch checked={settings.notificationsEnabled} onChange={(value) => void persist({ notificationsEnabled: value })} /></SettingRow><SettingRow id="default-launch" title="Default launch action" hidden={rowHidden("default launch action ask vanilla modded remember")}><SelectControl value={settings.defaultLaunchAction} options={launchOptions} onChange={(value) => void persist({ defaultLaunchAction: value })} /></SettingRow><SettingRow id="confirm-destructive" title="Confirm destructive actions" hidden={rowHidden("confirm destructive delete uninstall reset")}><Switch checked={settings.confirmDestructiveActions} onChange={(value) => void persist({ confirmDestructiveActions: value })} /></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("general")}>Reset General</Button></div></>}
+
+      {active === "appearance" && <><Section title="Theme"><div id="setting-theme" className="settings-theme-grid">{APP_THEMES.map((theme) => <button type="button" key={theme.id} className={`settings-theme-tile ${settings.themeId === theme.id || activeThemeId === theme.id ? "active" : ""}`} onClick={() => void persist({ themeId: theme.id }, `Theme set to ${theme.name}.`)} title={theme.description}><span className="theme-preview" style={{ background: `linear-gradient(135deg, ${theme.preview[0]} 0 52%, ${theme.preview[1]} 52% 76%, ${theme.preview[2]} 76%)` }} /><strong>{theme.name}</strong><small>{theme.mode === "light" ? "Light" : "Dark"}</small></button>)}</div></Section><Section title="Interface"><SettingRow id="accent" title="Accent color" hidden={rowHidden("accent color swatch")}><input className="settings-color" type="color" value={settings.accentColor} onChange={(event) => void persist({ accentColor: event.target.value })} /></SettingRow><SettingRow id="density" title="Interface spacing" hidden={rowHidden("interface spacing compact comfortable spacious density")}><Segmented value={settings.interfaceDensity} options={densityOptions} onChange={(value) => void persist({ interfaceDensity: value })} /></SettingRow><SettingRow id="motion" title="Animations" hidden={rowHidden("animations motion reduce movement")}><Switch checked={settings.animationsEnabled} onChange={(value) => void persist({ animationsEnabled: value })} /></SettingRow><SettingRow id="transparency" title="Transparency and blur" hidden={rowHidden("transparency blur glass")}><Switch checked={settings.transparencyEnabled} onChange={(value) => void persist({ transparencyEnabled: value })} /></SettingRow><SettingRow id="text-size" title="Text size" hidden={rowHidden("text size font scale percentage")}><input className="settings-range" type="range" min="90" max="125" value={settings.fontScale} onChange={(event) => void persist({ fontScale: Number(event.target.value) })} /><span className="settings-value">{settings.fontScale}%</span></SettingRow><SettingRow id="thumbnail-size" title="Thumbnail size" hidden={rowHidden("thumbnail size artwork cards")}><input className="settings-range" type="range" min="96" max="280" value={settings.thumbnailSize} onChange={(event) => void persist({ thumbnailSize: Number(event.target.value) })} /><span className="settings-value">{settings.thumbnailSize}px</span></SettingRow><SettingRow id="sidebar-density" title="Sidebar density" hidden={rowHidden("sidebar density navigation compact icons")}><SelectControl value={settings.sidebarDensity} options={sidebarOptions} onChange={(value) => void persist({ sidebarDensity: value })} /></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("appearance")}>Reset Appearance</Button></div></>}
+
+      {active === "accounts" && <><Section title="Connections"><article id="setting-nexus" className="settings-account-row"><div><strong>Nexus Mods</strong><span className={settings.nexusApiKey?.trim() ? "status-good" : "status-neutral"}>{settings.nexusApiKey?.trim() ? "Connected" : "Not Connected"}</span><p>{maskKey(settings.nexusApiKey)}</p></div><div className="settings-account-controls"><input type={showNexusKey ? "text" : "password"} value={nexusApiKey} onChange={(event) => setNexusApiKey(event.target.value)} placeholder="Nexus API key" /><Button onClick={() => setShowNexusKey((value) => !value)}>{showNexusKey ? "Hide" : "Reveal"}</Button><Button variant="primary" onClick={() => saveAccounts()}>Save</Button><Button onClick={() => void run("nexus-test", () => invoke<unknown>("nexus_account_integration_status"), (value) => setAccountStatus(summarizeUnknown(value)))}>Test</Button>{settings.nexusApiKey?.trim() && <Button variant="ghost" onClick={() => saveAccounts({ nexus: "" })}>Disconnect</Button>}</div></article><article id="setting-modworkshop" className="settings-account-row"><div><strong>ModWorkshop</strong><span className="status-good">Public API</span><p>Public browsing works without a personal key.</p></div><div className="settings-account-controls"><input type={showModworkshopKey ? "text" : "password"} value={modworkshopApiKey} onChange={(event) => setModworkshopApiKey(event.target.value)} placeholder="Optional API key" /><Button onClick={() => setShowModworkshopKey((value) => !value)}>{showModworkshopKey ? "Hide" : "Reveal"}</Button><Button variant="primary" onClick={() => saveAccounts()}>Save</Button><Button onClick={() => void run("modworkshop-test", () => invoke<string>("diagnose_modworkshop_categories"), setAccountStatus)}>Test</Button>{settings.modworkshopApiKey?.trim() && <Button variant="ghost" onClick={() => saveAccounts({ modworkshop: "" })}>Disconnect</Button>}</div></article><article id="setting-github" className="settings-account-row"><div><strong>GitHub</strong><span className="status-good">Public Releases</span><p>Public releases work without an account.</p></div><div className="settings-account-controls"><Button onClick={() => void run("github-test", () => invoke<unknown>("test_github_public_repository"), (value) => setAccountStatus(summarizeUnknown(value)))}>Test</Button><Button onClick={() => void run("github", () => invoke<string>("open_external_url", { url: "https://github.com/settings/profile" }))}>Open GitHub</Button></div></article><SettingRow id="nexus-age" title="Nexus age-restricted metadata" hidden={rowHidden("nexus age restricted adult metadata")}><Switch checked={settings.showAgeRestrictedNexus ?? true} onChange={(value) => saveAccounts({ ageRestricted: value })} /></SettingRow><p className="settings-subtle-status">{accountStatus}</p></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("accounts")}>Reset Accounts</Button></div></>}
+
+      {active === "downloads" && <><Section title="Download Location"><SettingRow id="download-folder" title="Download folder" description={settings.downloadFolder || "Tsuki AppData cache"} hidden={rowHidden("download folder path cache staging")}><div className="settings-path-control"><input value={settings.downloadFolder ?? ""} onChange={(event) => void persist({ downloadFolder: event.target.value || null })} placeholder="Use Tsuki cache" /><Button onClick={() => void chooseFolder((value) => void persist({ downloadFolder: value }))}>Choose Folder</Button></div></SettingRow></Section><Section title="Download Behavior"><SettingRow id="simultaneous" title="Simultaneous downloads" hidden={rowHidden("simultaneous concurrent downloads queue cap")}><Stepper value={settings.simultaneousDownloads} min={1} max={8} onChange={(value) => void persist({ simultaneousDownloads: value })} label="Simultaneous downloads" /></SettingRow><SettingRow id="download-retries" title="Retry failed downloads" hidden={rowHidden("retry failed downloads attempts")}><Stepper value={settings.downloadRetryCount} min={0} max={6} onChange={(value) => void persist({ downloadRetryCount: value })} label="Retry failed downloads" /></SettingRow><SettingRow id="download-speed" title="Download speed" hidden={rowHidden("download speed bandwidth limit unlimited custom mb/s")}><div className="settings-speed-control"><Segmented value={settings.downloadBandwidthLimitMbS === 0 ? "unlimited" : "custom"} options={[{ value: "unlimited", label: "Unlimited" }, { value: "custom", label: "Custom" }]} onChange={(value) => void persist({ downloadBandwidthLimitMbS: value === "unlimited" ? 0 : Math.max(settings.downloadBandwidthLimitMbS, 25) })} />{settings.downloadBandwidthLimitMbS > 0 && <Stepper value={settings.downloadBandwidthLimitMbS} min={1} max={250} suffix=" MB/s" onChange={(value) => void persist({ downloadBandwidthLimitMbS: value })} label="Custom bandwidth" />}</div></SettingRow><SettingRow id="verify-hashes" title="Verify hashes when available" hidden={rowHidden("verify hashes downloads integrity")}><Switch checked={settings.verifyHashes} onChange={(value) => void persist({ verifyHashes: value })} /></SettingRow><SettingRow id="keep-archives" title="Keep downloaded archives" hidden={rowHidden("keep downloaded archives retention delete after install")}><Switch checked={settings.keepDownloadedArchives ?? true} onChange={(value) => void persist({ keepDownloadedArchives: value })} /></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("downloads")}>Reset Downloads</Button></div></>}
+
+      {active === "browser" && <><Section title="Browsing"><SettingRow id="browser-mode" title="Browser mode" hidden={rowHidden("browser mode native embedded fallback ask")}><SelectControl value={settings.browserMode} options={browserOptions} onChange={(value) => void persist({ browserMode: value })} /></SettingRow><SettingRow id="external-links" title="Open external links" hidden={rowHidden("open external links ask always block")}><SelectControl value={settings.externalLinkBehavior} options={externalLinkOptions} onChange={(value) => void persist({ externalLinkBehavior: value })} /></SettingRow><SettingRow id="remember-logins" title="Remember website logins" hidden={rowHidden("remember website logins cookies sessions")}><Switch checked={settings.rememberWebsiteLogins} onChange={(value) => void persist({ rememberWebsiteLogins: value })} /></SettingRow><SettingRow id="intercept-downloads" title="Intercept supported downloads" hidden={rowHidden("intercept supported downloads browser")}><Switch checked={settings.interceptSupportedDownloads} onChange={(value) => void persist({ interceptSupportedDownloads: value })} /></SettingRow><SettingRow id="embedded-sites" title="Keep embedded browsing in supported sites" hidden={rowHidden("embedded browsing supported sites")}><Switch checked={settings.keepEmbeddedBrowsingInSites} onChange={(value) => void persist({ keepEmbeddedBrowsingInSites: value })} /></SettingRow><SettingRow id="wrong-game" title="Protect wrong-game downloads" hidden={rowHidden("protect wrong game downloads")}><Switch checked={settings.protectWrongGameDownloads} onChange={(value) => void persist({ protectWrongGameDownloads: value })} /></SettingRow><SettingRow id="last-website-profile" title="Remember last website per profile" hidden={rowHidden("remember last website per profile")}><Switch checked={settings.rememberLastWebsitePerProfile} onChange={(value) => void persist({ rememberLastWebsitePerProfile: value })} /></SettingRow><SettingRow id="website-data" title="Website data" hidden={rowHidden("website data cache storage")}><Button onClick={() => void run("website-data", () => invoke<string>("open_cache_folder"))}>Open Website Data</Button></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("browser")}>Reset Browser</Button></div></>}
+
+      {active === "profileDefaults" && <><Section title="New Profile Defaults"><SettingRow id="new-profile-sources" title="Default sources" hidden={rowHidden("default sources modworkshop nexus github new profile")}><div className="settings-check-grid">{(["modworkshop", "nexus", "github"] as const).map((source) => <label key={source} className={settings.profileDefaultSources.includes(source) ? "checked" : ""}><input type="checkbox" checked={settings.profileDefaultSources.includes(source)} onChange={(event) => { const next = event.target.checked ? [...settings.profileDefaultSources, source] : settings.profileDefaultSources.filter((item) => item !== source); void persist({ profileDefaultSources: [...new Set(next)] }); }} />{sourceLabels[source]}</label>)}</div></SettingRow><SettingRow id="new-profile-dependencies" title="Dependency setup" hidden={rowHidden("dependency setup ask automatic off new profile")}><SelectControl value={settings.profileDefaultDependencySetup} options={dependencyDefaultOptions} onChange={(value) => void persist({ profileDefaultDependencySetup: value })} /></SettingRow><SettingRow id="new-profile-backups" title="Backup behavior" hidden={rowHidden("backup behavior before replace every install needed disabled new profile")}><SelectControl value={settings.profileDefaultBackupBehavior} options={backupDefaultOptions} onChange={(value) => void persist({ profileDefaultBackupBehavior: value })} /></SettingRow><SettingRow id="new-profile-install" title="Installation flow" hidden={rowHidden("installation flow guided quick ask new profile")}><SelectControl value={settings.profileDefaultInstallationFlow} options={installFlowOptions} onChange={(value) => void persist({ profileDefaultInstallationFlow: value })} /></SettingRow><SettingRow id="new-profile-browser" title="Browser mode" hidden={rowHidden("profile default browser mode embedded native ask global")}><SelectControl value={settings.profileDefaultBrowserMode} options={profileDefaultBrowserOptions} onChange={(value) => void persist({ profileDefaultBrowserMode: value })} /></SettingRow><SettingRow id="new-profile-index" title="Mod index behavior" hidden={rowHidden("profile default index behavior automatic manual disabled")}><SelectControl value={settings.profileDefaultIndexBehavior} options={profileDefaultIndexOptions} onChange={(value) => void persist({ profileDefaultIndexBehavior: value })} /></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("profileDefaults")}>Reset New Profile Defaults</Button></div></>}
+
+      {active === "storage" && <><Section title="Storage Usage" action={<Button onClick={() => void refreshStorage()}>Refresh Storage Usage</Button>}><div className="settings-storage-grid">{storageCards.map((card) => <article key={card.id} id={`setting-storage-${card.id}`} className="settings-storage-card"><div><strong>{card.name}</strong><span>{formatBytes(card.size)}</span></div><p>{card.count}</p><div className="settings-card-actions"><Button onClick={() => void run(card.openCommand, () => invoke<string>(card.openCommand))}>Open Folder</Button>{card.cleanCommand && card.size > 0 && <Button onClick={() => { if (window.confirm(`Clean ${card.name}?`)) void run(card.cleanCommand, () => invoke<string>(card.cleanCommand), () => void refreshStorage(false)); }}>Clean</Button>}</div></article>)}</div></Section><Section title="Recovery"><SettingRow id="keep-removed" title="Keep removed mod files for recovery" description={`Moved files are stored in ${cache?.uninstalledPath ?? "Tsuki recovery storage"}.`} hidden={rowHidden("keep removed mod files recovery uninstalled storage")}><Switch checked={settings.keepUninstalledMods ?? false} onChange={(value) => void persist({ keepUninstalledMods: value })} /></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("storage")}>Reset Storage</Button></div></>}
+
+      {active === "updates" && <><Section title="Tsuki Updates"><SettingRow id="tsuki-update-checks" title="Check automatically" hidden={rowHidden("tsuki updates check automatically")}><Switch checked={settings.autoUpdateChecks} onChange={(value) => void persist({ autoUpdateChecks: value })} /></SettingRow><SettingRow id="updates-channel" title="Update channel" hidden={rowHidden("update channel stable")}><SelectControl value={settings.updateChannel} options={updateChannelOptions} onChange={(value) => void persist({ updateChannel: value })} /></SettingRow><SettingRow id="profile-updates" title="Profile update checks" hidden={rowHidden("profile update checks")}><Switch checked={settings.profileUpdateChecks} onChange={(value) => void persist({ profileUpdateChecks: value })} /></SettingRow><SettingRow id="dependency-updates" title="Dependency update checks" hidden={rowHidden("dependency update checks")}><Switch checked={settings.dependencyUpdateChecks} onChange={(value) => void persist({ dependencyUpdateChecks: value })} /></SettingRow><SettingRow id="index-updates" title="Index update checks" hidden={rowHidden("index update checks")}><Switch checked={settings.indexUpdateChecks} onChange={(value) => void persist({ indexUpdateChecks: value })} /></SettingRow><SettingRow id="check-now" title="Manual update check" hidden={rowHidden("check now manual update download installer")}><div className="settings-action-row"><Button onClick={() => void run("update", () => invoke<AppUpdateStatus>("check_app_update", { manifestUrl: null }), setAppUpdate)} disabled={busy === "update"}>Check Now</Button>{appUpdate?.updateAvailable && <Button variant="primary" onClick={() => void run("download-update", () => invoke<string>("download_and_launch_app_update", { manifestUrl: null }))}>Download Update</Button>}</div></SettingRow>{appUpdate && <p className="settings-subtle-status">{appUpdate.error || (appUpdate.updateAvailable ? `Update available: ${appUpdate.latestVersion ?? "unknown"}` : `Tsuki is up to date (${appUpdate.currentSemver}).`)}</p>}</Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("updates")}>Reset Updates</Button></div></>}
+      {active === "modIndexDefaults" && <><Section title="Mod Index Defaults"><SettingRow id="index-behavior" title="Remote index behavior" hidden={rowHidden("remote index behavior automatic ask manual disabled")}><SelectControl value={settings.indexRemoteBehavior} options={remoteIndexOptions} onChange={(value) => void persist({ indexRemoteBehavior: value, sourceIndexV2RemoteEnabled: value !== "disabled" })} /></SettingRow><SettingRow id="index-build" title="Build mode" hidden={rowHidden("index build mode metadata manifest full")}><SelectControl value={settings.indexBuildMode} options={indexBuildOptions} onChange={(value) => void persist({ indexBuildMode: value })} /></SettingRow><SettingRow id="index-overnight" title="Run overnight" hidden={rowHidden("index overnight schedule")}><Switch checked={settings.indexOvernight} onChange={(value) => void persist({ indexOvernight: value })} /></SettingRow><SettingRow id="index-pause-game" title="Pause while game is running" hidden={rowHidden("index pause game running")}><Switch checked={settings.indexPauseWhileGameRunning} onChange={(value) => void persist({ indexPauseWhileGameRunning: value })} /></SettingRow><SettingRow id="index-pause-battery" title="Pause on battery" hidden={rowHidden("index pause battery power")}><Switch checked={settings.indexPauseOnBattery} onChange={(value) => void persist({ indexPauseOnBattery: value })} /></SettingRow><SettingRow id="index-bandwidth" title="Index bandwidth" hidden={rowHidden("index bandwidth limit unlimited mb/s")}><Stepper value={settings.indexBandwidthLimitMbS} min={0} max={250} suffix={settings.indexBandwidthLimitMbS === 0 ? " unlimited" : " MB/s"} onChange={(value) => void persist({ indexBandwidthLimitMbS: value })} label="Index bandwidth" /></SettingRow><SettingRow id="index-temp" title="Temporary storage limit" hidden={rowHidden("index temp storage limit gb")}><Stepper value={settings.indexTempStorageLimitGb} min={1} max={64} suffix=" GB" onChange={(value) => void persist({ indexTempStorageLimitGb: value })} label="Temporary storage limit" /></SettingRow><SettingRow id="open-indexes" title="Index storage" hidden={rowHidden("open index storage folder")}><Button onClick={() => void run("open-indexes", () => invoke<string>("open_indexes_folder"))}>Open Index Storage</Button></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetUniversalScope("modIndexDefaults")}>Reset Mod Index Defaults</Button></div></>}
+
+      {active === "advanced" && <Section title="Settings File"><SettingRow id="export" title="Export Settings" hidden={rowHidden("export settings save file json")}><Button onClick={() => void exportSettings()}>Export</Button></SettingRow><SettingRow id="import" title="Import Settings" hidden={rowHidden("import settings open file json")}><Button onClick={() => void importSettings()}>Import</Button></SettingRow><SettingRow id="developer-mode" title="Developer mode" hidden={rowHidden("developer mode official profile edit debug")}><Switch checked={settings.developerMode ?? false} onChange={(value) => void persist({ developerMode: value })} /></SettingRow><SettingRow id="verbose-logging" title="Verbose logging" hidden={rowHidden("verbose logging logs debug")}><Switch checked={settings.verboseLogging} onChange={(value) => void persist({ verboseLogging: value })} /></SettingRow><SettingRow id="experimental" title="Experimental features" hidden={rowHidden("experimental features advanced")}><Switch checked={settings.experimentalFeatures} onChange={(value) => void persist({ experimentalFeatures: value })} /></SettingRow><SettingRow id="app-data" title="App data folder" hidden={rowHidden("app data folder storage settings")}><Button onClick={() => void run("app-data", () => invoke<string>("open_app_data_folder"))}>Open App Data</Button></SettingRow><SettingRow id="reset-all" title="Reset all global settings" hidden={rowHidden("reset all global settings defaults")}><Button variant="danger" onClick={() => resetUniversalScope("all")}>Reset All</Button></SettingRow></Section>}
+
+      {active === "profileOverview" && profile && <Section title="Profile Identity"><div id="setting-profile-identity" className="settings-profile-identity"><ProfileArtwork imageReference={profile.imageReference} legacySrc={profile.image} profileId={profile.profileId} alt={`${profileName} artwork`} fit={profile.artwork?.objectFit ?? "cover"} focalX={profile.artwork?.focalX ?? 50} focalY={profile.artwork?.focalY ?? 35} scale={profile.artwork?.scale ?? 1} fallback={<span className="profile-artwork-placeholder" aria-hidden="true" />} /><InfoGrid rows={[["Profile", profileName], ["Profile version", profile.profileVersion || "1.0.0"], ["Game / engine version", profile.gameVersion || "Not specified"], ["Game key", profile.gameKey], ["Profile ID", profile.profileId], ["Type", profile.profileTypeLabel], ["Status", profile.statusLabel], ["Lifecycle", profile.lifecycleState ?? "official"], ["Setup", profile.setupProgress?.label ?? profile.setupStatus ?? "Ready"], ["Runtime", isProfileActive ? profileRuntime?.ready === false ? "Needs attention" : "Active" : "Not active"]]} /></div><div className="settings-action-row profile-action-row">{profile.lifecycleState === "draft" && onOpenProfileCreator && <Button variant="primary" onClick={() => onOpenProfileCreator(profile.profileId)}>Continue Setup</Button>}{profile.lifecycleState !== "draft" && !isProfileActive && onActivateProfile && <Button variant="primary" onClick={() => onActivateProfile(profile.profileId)}>Activate Profile</Button>}<Button onClick={() => void run("profile-settings-folder", () => invoke<string>("open_profile_settings_folder"))}>Open Profile Settings Folder</Button><Button variant="danger" onClick={() => resetProfileScope("all")}>Reset Profile Settings</Button></div>{profile.lifecycleState === "draft" && <p className="settings-note">Draft profile settings are saved under this draft profile ID and do not modify a published profile.</p>}</Section>}
+
+      {active === "profileGameLaunch" && profile && <><Section title="Game & Launch"><SettingRow id="profile-root" title="Game root override" description={profileSettings.gameRootOverride || profileRuntime?.gameRoot || "No override saved."} hidden={rowHidden("profile game root override folder path")}><div className="settings-path-control"><input value={profileSettings.gameRootOverride ?? ""} onChange={(event) => void persistProfile({ gameRootOverride: event.target.value || null })} placeholder="Use profile detection" /><Button onClick={() => void chooseFolder((value) => void persistProfile({ gameRootOverride: value }))}>Choose Folder</Button></div></SettingRow><SettingRow id="profile-executable" title="Executable override" description={profileSettings.executableOverride || profileRuntime?.executable || "No override saved."} hidden={rowHidden("profile executable override launch exe")}><div className="settings-path-control"><input value={profileSettings.executableOverride ?? ""} onChange={(event) => void persistProfile({ executableOverride: event.target.value || null })} placeholder="Use profile executable" /><Button onClick={() => void chooseExecutable((value) => void persistProfile({ executableOverride: value }))}>Choose EXE</Button></div></SettingRow><SettingRow id="profile-working-dir" title="Working directory" hidden={rowHidden("profile working directory launch folder")}><div className="settings-path-control"><input value={profileSettings.workingDirectoryOverride ?? ""} onChange={(event) => void persistProfile({ workingDirectoryOverride: event.target.value || null })} placeholder="Use executable folder" /><Button onClick={() => void chooseFolder((value) => void persistProfile({ workingDirectoryOverride: value }))}>Choose Folder</Button></div></SettingRow><SettingRow id="profile-launch-action" title="Default launch action" hidden={rowHidden("profile default launch action inherit ask vanilla modded remember")}><SelectControl value={profileSettings.defaultLaunchAction} options={profileLaunchOptions} onChange={(value) => void persistProfile({ defaultLaunchAction: value })} /></SettingRow><SettingRow id="profile-launch-args" title="Launch arguments" hidden={rowHidden("profile launch arguments args command line")}><input className="settings-wide-input" value={profileSettings.launchArguments} onChange={(event) => void persistProfile({ launchArguments: event.target.value })} placeholder="Optional arguments" /></SettingRow><SettingRow id="profile-env" title="Launch environment" description="One KEY=value entry per line." hidden={rowHidden("profile launch environment variables env key value")}><textarea className="settings-textarea" rows={4} value={profileSettings.launchEnvironment.join("\n")} onChange={(event) => void persistProfile({ launchEnvironment: event.target.value.split(/\r?\n/) })} /></SettingRow><SettingRow id="profile-detect" title="Path detection" hidden={rowHidden("profile path detection runtime setup")}><Button onClick={() => void run("detect-profile", () => invoke<string>("detect_active_profile_path", { profileId }))}>Detect</Button></SettingRow></Section><Section title="Runtime"><InfoGrid rows={[["Game root", profileRuntime?.gameRoot ?? "Not set"], ["Executable", profileRuntime?.executable ?? "Not set"], ["Storage", profileRuntime?.storagePath ?? "Not active"], ["Setup state", profileRuntime?.setupStatePath ?? "Not active"]]} /></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileGameLaunch")}>Reset Game & Launch</Button></div></>}
+
+      {active === "profileBrowsing" && profile && <><Section title="Browsing"><SettingRow id="profile-browser-mode" title="Browser mode override" description={`Global default: ${settings.browserMode}`} hidden={rowHidden("profile browser mode override embedded native fallback ask global")}><SelectControl value={profileSettings.browserModeOverride} options={profileBrowserOptions} onChange={(value) => void persistProfile({ browserModeOverride: value })} /></SettingRow><SettingRow id="profile-source-preference" title="Preferred source" hidden={rowHidden("profile preferred browser source modworkshop nexus github custom auto")}><SelectControl value={profileSettings.preferredBrowserSource} options={profileSourcePreferenceOptions} onChange={(value) => void persistProfile({ preferredBrowserSource: value })} /></SettingRow><SettingRow id="profile-last-website" title="Remember last website" hidden={rowHidden("profile remember last website browsing")}><Switch checked={profileSettings.rememberLastWebsite} onChange={(value) => void persistProfile({ rememberLastWebsite: value })} /></SettingRow><SettingRow id="profile-open-browse-cache" title="Browse cache" description={profileRuntime?.browseCachePath ?? "Activate this profile to inspect live cache paths."} hidden={rowHidden("profile browse cache open folder")}><Button onClick={() => void run("open-cache", () => invoke<string>("open_cache_folder"))}>Open Cache</Button></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileBrowsing")}>Reset Browsing</Button></div></>}
+
+      {active === "profileSources" && profile && <><Section title="Sources"><div id="setting-profile-sources" className="settings-source-grid">{sourceList.map((source) => <article key={source} className="settings-source-card"><div><strong>{sourceLabels[source]}</strong><span>{profileSourceDescription(source)}</span></div><SourceToggle source={source} checked={selectedSources.includes(source)} disabled={!configuredSources.includes(source) && source !== "github" && source !== "custom"} onChange={(checked) => toggleProfileSource(source, checked)} /></article>)}</div>{configuredSources.length === 0 && <p className="settings-note">No profile sources are configured yet. Add source mappings in Profile Creator.</p>}<p className="settings-note">{explicitSourceSelection ? "This profile uses an explicit source selection." : "This profile inherits all configured sources."}</p></Section><Section title="Source Mappings"><InfoGrid rows={[["ModWorkshop", profileSourceDescription("modworkshop")], ["Nexus Mods", profileSourceDescription("nexus")], ["GitHub", profileSourceDescription("github")], ["Custom Browser", profileSourceDescription("custom")]]} /></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileSources")}>Reset Sources</Button></div></>}
+
+      {active === "profileModIndex" && profile && <><Section title="Mod Index"><SettingRow id="profile-index" title="Index behavior" description={`New profile default: ${settings.profileDefaultIndexBehavior}`} hidden={rowHidden("profile mod index behavior inherit automatic manual disabled")}><SelectControl value={profileSettings.indexBehavior} options={profileIndexOptions} onChange={(value) => void persistProfile({ indexBehavior: value })} /></SettingRow></Section><Section title="Profile Index Status" action={<Button onClick={() => void refreshIndex()}>Refresh Status</Button>}>{index ? <div className="settings-index-grid"><article><span>Records</span><strong>{index.recordCount ?? index.totalRecords ?? 0}</strong></article><article><span>Hashes</span><strong>{index.hashCacheEntries ?? index.hashEntries ?? 0}</strong></article><article><span>Manifests</span><strong>{index.fileEntryCount ?? index.archiveManifests ?? 0}</strong></article><article><span>Last Updated</span><strong>{formatDate(index.lastRefreshAt)}</strong></article><article><span>Build Status</span><strong>{index.refreshError ? "Needs Attention" : "Ready"}</strong></article><article><span>Remote</span><strong>{index.remoteEnabled === false ? "Off" : "On"}</strong></article></div> : <p className="settings-empty">No index diagnostics loaded for this profile.</p>}<div className="settings-action-row"><Button onClick={() => void run("refresh-remote", () => invoke<string>("refresh_source_index_v2_remote"), () => void refreshIndex(false))}>Refresh Remote Index</Button><Button onClick={() => void run("open-indexes", () => invoke<string>("open_indexes_folder"))}>Open Index Storage</Button></div></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileModIndex")}>Reset Mod Index</Button></div></>}
+
+      {active === "profileDependencies" && profile && <>
+        <Section title="Dependencies">
+          <SettingRow id="profile-dependency-setup" title="Dependency setup" description={`New profile default: ${settings.profileDefaultDependencySetup}`} hidden={rowHidden("profile dependency setup inherit ask auto off")}><SelectControl value={profileSettings.dependencySetup} options={profileDependencyOptions} onChange={(value) => void persistProfile({ dependencySetup: value })} /></SettingRow>
+          <SettingRow id="profile-dependency-updates" title="Dependency updates" hidden={rowHidden("profile dependency updates inherit auto ask off")}><SelectControl value={profileSettings.dependencyUpdates} options={profileDependencyUpdateOptions} onChange={(value) => void persistProfile({ dependencyUpdates: value })} /></SettingRow>
+        </Section>
+        <Section title="Dependency Status" action={<Button onClick={() => void refreshDependencyReport()}>Refresh Dependencies</Button>}>
+          <InfoGrid rows={[["Status", dependencyReport?.overallStatus ?? dependencyReport?.status ?? "Not checked"], ["Items", profileDependencies.length || dependencyReport?.items?.length || profileRuntime?.dependencies.length || 0], ["Warnings", dependencyReport?.warnings?.length ?? 0], ["Runtime rules", profileRuntime?.dependencies.length ?? 0]]} />
+          <div className="managed-list">
+            {profileDependencies.map((dependency) => {
+              const reportItem = dependencyReport?.items?.find((item) => findDependency(item.label, profileId, profile?.gameVersion)?.id === dependency.id && item.id === "pd3-ue5-pak-ready") ?? dependencyReport?.items?.find((item) => findDependency(item.label, profileId, profile?.gameVersion)?.id === dependency.id);
+              return <div className={`managed-row ${reportItem?.found ? "" : "disabled"}`} key={dependency.id}>
+                <div><DependencyName dependency={dependency} /><p>{dependencySourceLabel(dependency)} - {dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended"}</p><small>{reportItem?.details ?? (dependency.sourceUnverified ? "Source not verified" : "Not detected")}</small></div>
+                <span className={reportItem?.found ? "badge good" : "badge"}>{reportItem?.status ?? "Not detected"}</span>
+                <DependencyActions dependency={dependency} />
+              </div>;
+            })}
           </div>
+          {dependencyReport?.warnings?.length ? <div className="settings-warning-list">{dependencyReport.warnings.slice(0, 4).map((warning) => <p key={warning}>{warning}</p>)}</div> : null}
+        </Section>
+        <div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileDependencies")}>Reset Dependencies</Button></div>
+      </>}
 
-          <br />
+      {active === "profileBackups" && profile && <><Section title="Backups"><SettingRow id="profile-backup-behavior" title="Backup behavior" description={`New profile default: ${settings.profileDefaultBackupBehavior}`} hidden={rowHidden("profile backup behavior inherit before replace every install needed disabled")}><SelectControl value={profileSettings.backupBehavior} options={profileBackupOptions} onChange={(value) => void persistProfile({ backupBehavior: value })} /></SettingRow><SettingRow id="profile-backup-retention" title="Retained backups" hidden={rowHidden("profile backup retention count retained")}><Stepper value={profileSettings.backupRetentionCount} min={0} max={50} onChange={(value) => void persistProfile({ backupRetentionCount: value })} label="Retained backups" /></SettingRow><SettingRow id="profile-backup-folder" title="Backup folder" description={profileRuntime?.backupsPath ?? cache?.backupsPath ?? "Backup storage"} hidden={rowHidden("profile backup folder open storage")}><Button onClick={() => void run("open-backups", () => invoke<string>("open_backups_folder"))}>Open Backups</Button></SettingRow></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileBackups")}>Reset Backups</Button></div></>}
 
-          <div className="setting-block">
-            <label htmlFor="manualGamePath">Manual Payday 3 folder override</label>
-            <input
-              id="manualGamePath"
-              className="setting-input"
-              value={manualPath}
-              onChange={(event) => setManualPath(event.target.value)}
-              placeholder="Example: C:\Program Files (x86)\Steam\steamapps\common\PAYDAY3"
-            />
-          </div>
-
-          <br />
-
-          <div className="button-row">
-            <button className="ghost-button" type="button" onClick={detectPayday3}>
-              Detect Payday 3
-            </button>
-            <button className="ghost-button" type="button" onClick={saveManualPath}>
-              Save Manual Path
-            </button>
-            <button className="ghost-button" type="button" onClick={clearManualPath}>
-              Clear Manual Path
-            </button>
-          </div>
-
-          <br />
-          <p>{saveStatus}</p>
-        </div>
-
-        <div className="card settings-section-card">
-          <h2>Admin Access</h2>
-          <p>{adminStatus}</p>
-          <br />
-          <div className="button-row">
-            <button className="ghost-button" type="button" onClick={checkAdminState}>
-              Check Admin State
-            </button>
-            <button className="ghost-button" type="button" onClick={relaunchAsAdmin}>
-              Relaunch as Admin
-            </button>
-          </div>
-        </div>
-
-      </div>
-      </div>
-
-      <article className="card settings-section-card settings-tab-panel" id="settings-sources" hidden={settingsTab !== "sources"}>
-        <h2>Sources</h2>
-        <p>
-          ModWorkshop can use the public API for browsing. Nexus supports manual API key
-          entry now, with login flow reserved for the next real OAuth step.
-        </p>
-
-        <div className="source-card-grid settings-source-grid">
-          <div className="card settings-source-card">
-            <h3>ModWorkshop</h3>
-            <div className="source-status-line">
-              <strong>Public API</strong>
-              <span>Ready without login</span>
-            </div>
-            <p className="source-mini-note">
-              Personal key is optional/advanced. Most users should leave this empty.
-            </p>
-
-            <br />
-
-            <div className="setting-block">
-              <label htmlFor="modworkshopApiKey">ModWorkshop API Key Optional</label>
-              <input
-                id="modworkshopApiKey"
-                className="setting-input"
-                type={showKeys ? "text" : "password"}
-                value={modworkshopApiKey}
-                onChange={(event) => setModworkshopApiKey(event.target.value)}
-                placeholder="Optional"
-              />
-            </div>
-
-            <p className="source-mini-note">
-              Status: {modworkshopAdvanced ? "Advanced key saved locally." : "Using public access."}
-            </p>
-          </div>
-
-          <div className="card settings-source-card">
-            <h3>Nexus Mods</h3>
-            <div className="source-status-line">
-              <strong>{nexusConnected ? "Connected" : "Not connected"}</strong>
-              <span className="masked-key">{maskKey(nexusApiKey)}</span>
-            </div>
-
-            <br />
-
-            <div className="setting-block">
-              <label htmlFor="nexusApiKey">Nexus API Key</label>
-              <input
-                id="nexusApiKey"
-                className="setting-input"
-                type={showKeys ? "text" : "password"}
-                value={nexusApiKey}
-                onChange={(event) => setNexusApiKey(event.target.value)}
-                placeholder="Paste Nexus personal API key"
-              />
-            </div>
-
-            <label className="source-toggle-row">
-              <input
-                type="checkbox"
-                checked={showAgeRestrictedNexus}
-                onChange={(event) => setShowAgeRestrictedNexus(event.target.checked)}
-              />
-              <span>Show age-restricted Nexus mods when your Nexus account/API key allows it</span>
-            </label>
-
-            <div className="source-key-actions">
-              <button className="ghost-button compact" type="button" onClick={loginWithNexus}>
-                Open Nexus API Page
-              </button>
-              <button className="ghost-button compact" type="button" onClick={copyNexusKey}>
-                Copy Key
-              </button>
-            </div>
-
-            <p className="source-mini-note">
-              Login currently opens the Nexus account/API page. Full automatic callback
-              login needs app registration/callback support later.
-            </p>
-          </div>
-        </div>
-
-        <br />
-
-        <div className="button-row source-save-row">
-          <button className="ghost-button compact" type="button" onClick={() => setShowKeys(!showKeys)}>
-            {showKeys ? "Hide Keys" : "Show Keys"}
-          </button>
-          <button className="ghost-button install-button save-api-button" type="button" onClick={saveSourceKeys}>
-            Save API Keys
-          </button>
-          <button className="ghost-button compact" type="button" onClick={clearSourceKeys}>
-            Clear API Keys
-          </button>
-        </div>
-
-        <br />
-        <p>{sourceStatus}</p>
-      </article>
-
-
-      <article className="card settings-section-card settings-tab-panel" id="settings-cache" hidden={settingsTab !== "cache"}>
-        <h2>Cache Management</h2>
-        <p>
-          Downloads are stored for reinstall/debugging unless you turn archive retention off.
-          Temporary extraction folders are used only for archive inspection and install routing.
-        </p>
-
-        <label className="source-toggle-row">
-          <input
-            type="checkbox"
-            checked={keepDownloadedArchives}
-            onChange={(event) => saveKeepDownloadedArchives(event.target.checked)}
-          />
-          <span>Keep Downloaded Archives</span>
-        </label>
-
-        <label className="source-toggle-row">
-          <input
-            type="checkbox"
-            checked={keepUninstalledMods}
-            onChange={(event) => saveKeepUninstalledMods(event.target.checked)}
-          />
-          <span>Keep Uninstalled Mods</span>
-        </label>
-
-        <div className="source-card-grid settings-source-grid">
-          <div className="card settings-source-card">
-            <h3>Storage</h3>
-            <div className="source-status-line">
-              <strong>{formatBytes(cacheStats?.totalCacheSizeBytes ?? 0)}</strong>
-              <span>Total cache</span>
-            </div>
-            <p className="source-mini-note">Download cache: {formatBytes(cacheStats?.downloadCacheSizeBytes ?? 0)}</p>
-            <p className="source-mini-note">Extraction cache: {formatBytes(cacheStats?.extractionCacheSizeBytes ?? 0)}</p>
-            <p className="source-mini-note">Cached downloads: {cacheStats?.cachedDownloadCount ?? 0}</p>
-            <p className="source-mini-note">Temporary extraction folders: {cacheStats?.temporaryExtractionFolderCount ?? 0}</p>
-            <p className="source-mini-note">Uninstalled storage: {formatBytes(cacheStats?.uninstalledStorageSizeBytes ?? 0)}</p>
-            <p className="source-mini-note">Uninstalled entries: {cacheStats?.uninstalledEntryCount ?? 0}</p>
-          </div>
-
-          <div className="card settings-source-card">
-            <h3>Folders</h3>
-            <p className="source-mini-note">Tsuki data: {cacheStats?.appDataPath ?? "%APPDATA%/Tsuki Mod Manager"}</p>
-            <p className="source-mini-note">Cache: {cacheStats?.cachePath ?? "%APPDATA%/Tsuki Mod Manager/cache"}</p>
-            <p className="source-mini-note">Uninstalled: {cacheStats?.uninstalledPath ?? "%APPDATA%/Tsuki Mod Manager/uninstalled"}</p>
-            <div className="source-key-actions">
-              <button className="ghost-button compact" type="button" onClick={openTsukiDataFolder}>
-                Open Tsuki Data Folder
-              </button>
-              <button className="ghost-button compact" type="button" onClick={openCacheFolder}>
-                Open Cache Folder
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <br />
-
-        <div className="button-row source-save-row">
-          <button className="ghost-button compact" type="button" onClick={() => refreshCacheStats()} disabled={cacheBusy}>
-            Refresh Cache Stats
-          </button>
-          <button className="ghost-button compact" type="button" onClick={() => clearCache("clear_download_cache", "download cache")} disabled={cacheBusy}>
-            Clear Download Cache
-          </button>
-          <button className="ghost-button compact" type="button" onClick={() => clearCache("clear_extraction_cache", "extraction cache")} disabled={cacheBusy}>
-            Clear Extraction Cache
-          </button>
-          <button className="ghost-button compact danger-button" type="button" onClick={() => clearCache("clear_all_download_cache", "all download and extraction cache")} disabled={cacheBusy}>
-            Clear All Cache
-          </button>
-        </div>
-
-        <br />
-        <p>{cacheStatus}</p>
-      </article>
-
-
-      <article className="card settings-section-card settings-tab-panel" id="settings-updates" hidden={settingsTab !== "updates"}>
-        <h2>App Update</h2>
-        <p>
-          Tsuki can check a public latest.json manifest on launch. When a newer version exists,
-          an Update Available pill appears in the title bar.
-        </p>
-
-        <p className="source-mini-note">
-          Update checks now use Tsuki's built-in latest.json on GitHub. There is no custom URL to configure.
-        </p>
-
-        <div className="button-row">
-          <button className="ghost-button" type="button" onClick={checkAppUpdateFromSettings} disabled={appUpdateBusy}>
-            {appUpdateBusy ? "Checking..." : "Check for Updates"}
-          </button>
-          <button className="ghost-button install-button" type="button" onClick={downloadAndLaunchAppUpdateFromSettings} disabled={appUpdateBusy}>
-            {appUpdateBusy ? "Working..." : "Download + Launch Update"}
-          </button>
-        </div>
-
-        <p>{appUpdateStatus}</p>
-      </article>
-
-      <article className="card settings-section-card settings-tab-panel" id="settings-themes" hidden={settingsTab !== "themes"}>
-        <h2>Themes</h2>
-        <p>Pick the visual style for Tsuki. Each theme gets its own symbol and color mood.</p>
-
-        <div className="theme-grid">
-          {APP_THEMES.map((theme) => (
-            <button
-              className={`theme-card theme-preview-${theme.id} ${
-                activeThemeId === theme.id ? "active" : ""
-              }`}
-              key={theme.id}
-              type="button"
-              onClick={() => saveTheme(theme.id)}
-            >
-              <span className="theme-symbol">{theme.symbol}</span>
-              <span>
-                <strong>{theme.name}</strong>
-                <small>{theme.description}</small>
-              </span>
-            </button>
-          ))}
-        </div>
-      </article>
-
-    </section>
-  );
+      {active === "profileSetup" && profile && <><Section title="Setup"><SettingRow id="profile-setup-reminders" title="Setup reminders" hidden={rowHidden("profile setup reminders wizard checks")}><Switch checked={profileSettings.setupReminders} onChange={(value) => void persistProfile({ setupReminders: value })} /></SettingRow><SettingRow id="profile-clear-setup" title="Dismissed setup checks" description={`${profileSettings.dismissedSetupChecks.length} dismissed`} hidden={rowHidden("profile dismissed setup checks clear")}><Button disabled={profileSettings.dismissedSetupChecks.length === 0} onClick={() => void persistProfile({ dismissedSetupChecks: [] }, "Setup checks restored.")}>Clear</Button></SettingRow><SettingRow id="profile-setup-detect" title="Game path check" hidden={rowHidden("profile setup game path detection check")}><Button onClick={() => void run("setup-detect", () => invoke<string>("detect_active_profile_path", { profileId }))}>Run Check</Button></SettingRow><SettingRow id="profile-setup-sources" title="Source check" hidden={rowHidden("profile setup source check modworkshop nexus")}><Button onClick={() => void run("setup-sources", () => configuredSources.includes("modworkshop") ? invoke<string>("diagnose_modworkshop_browse_live", { profileId }) : invoke<string>("verify_source_settings"))}>Run Check</Button></SettingRow></Section><Section title="Readiness"><InfoGrid rows={[["Setup status", profile.setupProgress?.label ?? profile.setupStatus ?? "Ready"], ["Configured steps", profile.setupProgress ? `${profile.setupProgress.configured}/${profile.setupProgress.total}` : "Complete"], ["Runtime ready", profileRuntime?.ready === false ? "No" : isProfileActive ? "Yes" : "Not active"], ["Sources", configuredSources.length ? configuredSources.map((source) => sourceLabels[source]).join(", ") : "None"]]} /><div className="settings-action-row profile-action-row">{profile.lifecycleState === "draft" && onOpenProfileCreator && <Button variant="primary" onClick={() => onOpenProfileCreator(profile.profileId)}>Continue Setup</Button>}<Button onClick={() => void run("profile-settings-folder", () => invoke<string>("open_profile_settings_folder"))}>Open Profile Settings Folder</Button></div></Section><div className="settings-category-footer"><Button onClick={() => resetProfileScope("profileSetup")}>Reset Setup</Button></div></>}
+    </main></div>
+  </section>;
 }

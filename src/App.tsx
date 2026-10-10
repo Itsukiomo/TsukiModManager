@@ -1,18 +1,37 @@
 import "./App.css";
 import { invoke } from "@tauri-apps/api/core";
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { WindowTitleBar } from "./components/WindowTitleBar/WindowTitleBar";
+import { ProfileArtwork } from "./components/ProfileArtwork";
 import type { AppPage } from "./models/navigation";
-import type { AppSettings } from "./models/settings";
+import { applyAppearanceSettings, normalizeAppSettings, normalizeThemeId, type AppSettings } from "./models/settings";
+import { BUILTIN_GAME_PROFILES, BUILTIN_PAYDAY3_PROFILE_ID, getGameProfile } from "./models/gameProfiles";
+import type { GameProfile } from "./models/gameProfiles";
+import { normalizeProfileImageReference } from "./models/profileArtwork";
 import type { SourceModSummary, SourceUpdateStatus } from "./models/source";
-import type { InstallReceipt } from "./models/receipt";
+import type { ActiveProfileRuntime } from "./models/profileRuntime";
 import { HomePage } from "./pages/Home/HomePage";
-import { BrowsePage } from "./pages/Browse/BrowsePage";
-import { InstalledPage } from "./pages/Installed/InstalledPage";
-import { BackupsPage } from "./pages/Backups/BackupsPage";
-import { SettingsPage } from "./pages/Settings/SettingsPage";
+import { DragDropInstallWizard } from "./components/DragDropInstallWizard";
+import { DependencyActions, DependencyName } from "./components/DependencyActions";
+import { ManagedLoaderStatus } from "./components/ManagedLoaderStatus";
+import { dependenciesForProfile, dependencySourceLabel, dependencyToSourceSummary, findDependency, type DependencyDefinition } from "./models/dependency";
+import { repairMojibakeText } from "./utils/textEncoding";
+import { safeLocalStorageSet, safeSessionStorageSet } from "./utils/browserStorage";
+import lunarStartup from "./assets/lunar-startup-v2.webp";
+
+const BrowsePage = lazy(() => import("./pages/Browse/BrowsePage").then((module) => ({ default: module.BrowsePage })));
+const InstalledPage = lazy(() => import("./pages/Installed/InstalledPage").then((module) => ({ default: module.InstalledPage })));
+const SettingsPage = lazy(() => import("./pages/Settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+const ProfileCreatorPage = lazy(() => import("./pages/ProfileCreator/ProfileCreatorPage").then((module) => ({ default: module.ProfileCreatorPage })));
+const GameSelectorPage = lazy(() => import("./pages/GameSelector/GameSelectorPage").then((module) => ({ default: module.GameSelectorPage })));
+const BackupsPage = lazy(() => import("./pages/Backups/BackupsPage").then((module) => ({ default: module.BackupsPage })));
+const DebugCenter = lazy(() => import("./components/DebugCenter/DebugCenter").then((module) => ({ default: module.DebugCenter })));
+
+const THEME_STORAGE_KEY = "tsuki-theme-id";
+const INITIAL_THEME_ID = normalizeThemeId(window.localStorage.getItem(THEME_STORAGE_KEY) ?? "moonveil");
+document.documentElement.dataset.theme = INITIAL_THEME_ID;
 
 
 interface AppUpdateStatus {
@@ -37,11 +56,169 @@ interface TaskProgressState {
   progress?: number | null;
 }
 
-interface DebugFeatureTestResult {
-  name: string;
-  status: "passed" | "failed" | "warning";
-  detail: string;
+interface AppCapabilities {
+  isDeveloperMode: boolean;
+  canEditOfficialProfiles: boolean;
 }
+
+type GameProfileDraftRecord = Record<string, unknown>;
+
+function draftString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function draftObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function draftArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function draftSafeKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+}
+function startupPageFromSettings(settings: AppSettings): AppPage {
+  const destination = settings.startupDestination ?? "home";
+  if (destination === "last") {
+    const saved = window.localStorage.getItem("tsuki-active-page") as AppPage | null;
+    const allowed: AppPage[] = ["home", "browse", "installed", "games", "profiles", "repair", "backups", "settings"];
+    return saved && allowed.includes(saved) ? saved : "home";
+  }
+  if (destination === "browse" || destination === "installed" || destination === "games") return destination;
+  return "home";
+}
+
+function draftSetupProgress(draft: GameProfileDraftRecord) {
+  const overview = draftObject(draft.overview);
+  const artwork = draftObject(draft.artwork);
+  const sections = draftObject(draft.sections);
+  const customPaths = draftArray(draft.customPaths);
+  const customFileTypes = draftArray(draft.customFileTypes);
+  const checks = [
+    Boolean(draftString(overview.gameName)),
+    Boolean(draftString(overview.profileTitle)),
+    Boolean(draftString(overview.gameKey)),
+    Boolean(draftString(artwork.imageUrl) || draftObject(artwork.imageReference).kind && draftObject(artwork.imageReference).kind !== "none"),
+    draftArray(sections.detectionStores).length > 0,
+    customPaths.length > 0,
+    draftArray(sections.sources).length > 0,
+    draftArray(sections.modTypes).length > 0 || customFileTypes.length > 0,
+    draftArray(sections.installBehavior).length > 0 || customFileTypes.length > 0,
+    draftArray(sections.dependencies).length > 0,
+  ];
+  const configured = checks.filter(Boolean).length;
+  const total = checks.length;
+  return { configured, total, label: `${configured}/${total} configured` };
+}
+
+function gameProfileFromDraft(draft: GameProfileDraftRecord): GameProfile {
+  const overview = draftObject(draft.overview);
+  const artwork = draftObject(draft.artwork);
+  const profileId = draftString(draft.profileId) || `user.${Date.now()}`;
+  const gameName = repairMojibakeText(draftString(overview.gameName));
+  const profileTitle = repairMojibakeText(draftString(overview.profileTitle));
+  const displayName = gameName || profileTitle || "Untitled Game Profile";
+  const gameKey = draftString(overview.gameKey) || draftSafeKey(gameName || profileTitle || profileId) || profileId.replace(/^user\./, "custom-");
+  const imageReference = normalizeProfileImageReference(artwork.imageReference, draftString(artwork.imageUrl));
+  const progress = draftSetupProgress(draft);
+
+  return {
+    profileId,
+    gameKey,
+    displayName,
+    profileVersion: draftString(overview.version) || "1.0.0",
+    gameVersion: draftString(overview.gameVersion) || undefined,
+    gameVersions: draftString(overview.supportedVersions).split(",").map((version) => version.trim()).filter(Boolean),
+    profileType: "user_created",
+    profileTypeLabel: "Custom Draft",
+    statusLabel: progress.configured === 0 ? "Blank draft" : repairMojibakeText(`Setup incomplete - ${progress.label}`),
+    image: imageReference.kind === "none" ? "" : imageReference.value,
+    imageReference,
+    artwork: {
+      objectFit: artwork.objectFit === "contain" ? "contain" : "cover",
+      focalX: typeof artwork.focalX === "number" ? artwork.focalX : 50,
+      focalY: typeof artwork.focalY === "number" ? artwork.focalY : 50,
+      scale: typeof artwork.scale === "number" ? artwork.scale : 1,
+    },
+    isPermanent: false,
+    isRemovable: true,
+    editMode: "full",
+    normalUserEditMode: "full",
+    maintainerEditMode: "full",
+    allowNormalUserExport: true,
+    sourceConfig: {},
+    lifecycleState: "draft",
+    setupStatus: "incomplete",
+    setupProgress: progress,
+    draft,
+    draftStoragePath: draftString(draft.draftStoragePath),
+    createdAt: draftString(draft.createdAt),
+    updatedAt: draftString(draft.updatedAt),
+  };
+}
+
+function findProfileInList(profiles: GameProfile[], profileId?: string | null) {
+  return profiles.find((profile) => profile.profileId === profileId)
+    ?? BUILTIN_GAME_PROFILES.find((profile) => profile.profileId === profileId)
+    ?? getGameProfile(BUILTIN_PAYDAY3_PROFILE_ID);
+}
+
+function findProfileInListExact(profiles: GameProfile[], profileId?: string | null) {
+  if (!profileId) return null;
+  return profiles.find((profile) => profile.profileId === profileId) ?? BUILTIN_GAME_PROFILES.find((profile) => profile.profileId === profileId) ?? null;
+}
+
+interface GameProfileInstallationResult {
+  profileId: string;
+  installed: boolean;
+  storefront: "steam" | "manual" | null;
+  gameRoot: string | null;
+  matchedAppId: string | null;
+}
+
+async function withDetectedInstallations(profiles: GameProfile[]): Promise<GameProfile[]> {
+  const probes = profiles
+    .filter((profile) => profile.steamAppIds?.length)
+    .map((profile) => ({ profileId: profile.profileId, steamAppIds: profile.steamAppIds ?? [] }));
+  if (probes.length === 0) return profiles;
+
+  let results: GameProfileInstallationResult[];
+  try {
+    results = await invoke<GameProfileInstallationResult[]>("detect_game_profile_installations", { profiles: probes });
+  } catch (error) {
+    console.warn("Failed to detect installed games:", error);
+    return profiles;
+  }
+  const byProfileId = new Map(results.map((result) => [result.profileId, result]));
+  return profiles.map((profile) => {
+    const result = byProfileId.get(profile.profileId);
+    if (!result) return profile;
+    return {
+      ...profile,
+      installation: {
+        checked: true,
+        installed: result.installed,
+        storefront: result.storefront,
+        gameRoot: result.gameRoot,
+        matchedAppId: result.matchedAppId,
+      },
+    };
+  });
+}
+
+function draftDateLabel(value?: string | null) {
+  const raw = draftString(value);
+  if (!raw) return "Unknown";
+  const numeric = Number(raw);
+  const date = Number.isFinite(numeric) && numeric > 0 ? new Date(numeric * 1000) : new Date(raw);
+  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 
 
 class PageCrashGuard extends Component<{ pageName: string; children: ReactNode }, { error: string | null }> {
@@ -121,7 +298,7 @@ function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "la
   };
 
   try {
-    window.localStorage.setItem(TSUKI_RECEIPT_UPDATE_CACHE_KEY, JSON.stringify(payload));
+    safeLocalStorageSet(TSUKI_RECEIPT_UPDATE_CACHE_KEY, JSON.stringify(payload));
     window.dispatchEvent(new CustomEvent("tsuki-receipt-update-check", { detail: payload }));
   } catch {
     // Optional launch update cache.
@@ -131,10 +308,12 @@ function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "la
 
 interface ModProfile {
   id: string;
+  gameProfileId: string;
   name: string;
   createdUnix: number;
   enabledPakFiles: string[];
   enabledReceiptIds: string[];
+  migrationState?: string | null;
 }
 
 interface DependencyStatusItem {
@@ -179,7 +358,7 @@ interface MovieValidationItem {
   verdict: string;
 }
 
-function RepairPage() {
+function RepairPage({ profileId }: { profileId: string }) {
   const [dependencies, setDependencies] = useState<DependencyReport | null>(null);
   const [receipts, setReceipts] = useState<ReceiptRepairItem[]>([]);
   const [movies, setMovies] = useState<MovieValidationItem[]>([]);
@@ -222,9 +401,9 @@ function RepairPage() {
   const refresh = () => {
     setBusyId("refresh-repair");
     Promise.allSettled([
-      invoke<DependencyReport>("get_dependency_report"),
-      invoke<ReceiptRepairItem[]>("list_receipt_repair_items"),
-      invoke<MovieValidationItem[]>("validate_movie_replacer_receipts"),
+      invoke<DependencyReport>("get_dependency_report", { profileId }),
+      invoke<ReceiptRepairItem[]>("list_receipt_repair_items", { profileId }),
+      invoke<MovieValidationItem[]>("validate_movie_replacer_receipts", { profileId }),
     ])
       .then(([deps, receiptItems, movieItems]) => {
         if (deps.status === "fulfilled") setDependencies(deps.value);
@@ -240,11 +419,11 @@ function RepairPage() {
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [profileId]);
 
   const pruneStale = () => {
     setBusyId("prune");
-    invoke<string>("prune_stale_install_receipts")
+    invoke<string>("prune_stale_install_receipts", { profileId })
       .then((message) => {
         setStatus(message);
         refresh();
@@ -255,7 +434,7 @@ function RepairPage() {
 
   const removeReceipt = (receipt: ReceiptRepairItem) => {
     setBusyId(receipt.receiptId);
-    invoke<string>("remove_receipt_by_id", { receiptId: receipt.receiptId })
+    invoke<string>("remove_receipt_by_id", { receiptId: receipt.receiptId, profileId })
       .then((message) => {
         setStatus(message);
         refresh();
@@ -307,11 +486,12 @@ function RepairPage() {
             {dependencies?.items.map((item) => (
               <div className={`managed-row ${item.found ? "" : "disabled"}`} key={item.id}>
                 <div>
-                  <strong>{item.label}</strong>
+                  {findDependency(item.label, profileId) ? <DependencyName dependency={findDependency(item.label, profileId)!} /> : <strong>{item.label}</strong>}
                   <p>{item.details}</p>
                   <small>{item.path ?? item.recommendation}</small>
                 </div>
                 <span className={item.found ? "badge good" : "badge"}>{item.status}</span>
+                {findDependency(item.label, profileId) ? <DependencyActions dependency={findDependency(item.label, profileId)!} /> : <span className="dependency-source-unverified">Source not verified</span>}
               </div>
             ))}
             {!dependencies && <p>Loading dependency scan...</p>}
@@ -319,7 +499,7 @@ function RepairPage() {
 
           {dependencies && dependencies.warnings.length > 0 && (
             <div className="repair-warning-list">
-              {dependencies.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}
+              {dependencies.warnings.map((warning) => <p key={warning}>- {warning}</p>)}
             </div>
           )}
         </article>
@@ -339,7 +519,7 @@ function RepairPage() {
                 <div>
                   <strong>{receipt.displayName}</strong>
                   <p>
-                    {receipt.source} #{receipt.sourceModId ?? "?"} · live {receipt.liveFiles} · disabled {receipt.disabledFiles} · missing {receipt.missingFiles}
+                    {receipt.source} #{receipt.sourceModId ?? "?"} - live {receipt.liveFiles} - disabled {receipt.disabledFiles} - missing {receipt.missingFiles}
                   </p>
                   {receipt.missingPaths.slice(0, 2).map((path) => <small key={path}>{path}</small>)}
                 </div>
@@ -387,13 +567,21 @@ function RepairPage() {
 }
 
 
-function ProfilesPage() {
+interface ProfilesPageProps {
+  currentGameProfile: GameProfile;
+  draftProfiles: GameProfile[];
+  onEditDraft: (profileId: string) => void;
+  onDeleteDraft: (profileId: string) => Promise<void>;
+}
+
+function ProfilesPage({ currentGameProfile, draftProfiles, onEditDraft, onDeleteDraft }: ProfilesPageProps) {
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profileName, setProfileName] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [, setStatus] = useState("Profiles ready.");
   const [folderNotice, setFolderNotice] = useState<string | null>(null);
   const [expandedProfileId, setExpandedProfileId] = useState<string | null>(null);
+  const [activeModProfileId, setActiveModProfileId] = useState<string | null>(null);
 
   const showFolderNotice = useCallback((message: string) => {
     setFolderNotice(message);
@@ -403,22 +591,32 @@ function ProfilesPage() {
   }, []);
 
   const refresh = useCallback(() => {
-    invoke<ModProfile[]>("list_mod_profiles")
-      .then((profileList) => {
-        setProfiles(profileList);
-        setStatus(profileList.length ? `${profileList.length} saved profile${profileList.length === 1 ? "" : "s"}.` : "No profiles saved yet.");
+    Promise.all([
+      invoke<ModProfile[]>("list_mod_profiles", { gameProfileId: currentGameProfile.profileId }),
+      invoke<AppSettings>("get_app_settings").catch(() => null),
+    ])
+      .then(([profileList, settings]) => {
+        const ownedProfiles = profileList.filter((profile) => profile.gameProfileId === currentGameProfile.profileId);
+        setProfiles(ownedProfiles);
+        setActiveModProfileId(settings?.activeModProfileByGameProfileId?.[currentGameProfile.profileId] ?? null);
+        setStatus(ownedProfiles.length ? `${ownedProfiles.length} saved profile${ownedProfiles.length === 1 ? "" : "s"}.` : "No profiles saved yet.");
       })
       .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
-  }, []);
+  }, [currentGameProfile.profileId]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
+  const visibleDraftProfiles = useMemo(
+    () => draftProfiles.filter((profile) => profile.lifecycleState === "draft"),
+    [draftProfiles],
+  );
+
   const saveProfile = () => {
     const name = profileName.trim();
     setBusyId("save-profile");
-    invoke<ModProfile>("save_current_mod_profile", { name: name || `Profile ${new Date().toLocaleString()}` })
+    invoke<ModProfile>("save_current_mod_profile", { name: name || `Profile ${new Date().toLocaleString()}`, gameProfileId: currentGameProfile.profileId })
       .then((profile) => {
         setStatus(`Saved profile: ${profile.name}`);
         setProfileName("");
@@ -431,7 +629,7 @@ function ProfilesPage() {
 
   const applyProfile = (profile: ModProfile) => {
     setBusyId(`profile-${profile.id}`);
-    invoke<string>("apply_mod_profile", { profileId: profile.id })
+    invoke<string>("apply_mod_profile", { profileId: profile.id, gameProfileId: currentGameProfile.profileId })
       .then((message) => {
         setStatus(message);
         refresh();
@@ -445,7 +643,7 @@ function ProfilesPage() {
     if (!confirmed) return;
 
     setBusyId(`delete-profile-${profile.id}`);
-    invoke<string>("delete_mod_profile", { profileId: profile.id })
+    invoke<string>("delete_mod_profile", { profileId: profile.id, gameProfileId: currentGameProfile.profileId })
       .then((message) => {
         setStatus(message);
         setExpandedProfileId((current) => current === profile.id ? null : current);
@@ -458,7 +656,7 @@ function ProfilesPage() {
 
   const openProfilesFolder = () => {
     setBusyId("open-profiles-folder");
-    invoke<string>("open_mod_profiles_folder")
+    invoke<string>("open_mod_profiles_folder", { gameProfileId: currentGameProfile.profileId })
       .then(() => showFolderNotice("Profiles folder opened."))
       .catch((error) => showFolderNotice(error instanceof Error ? error.message : String(error)))
       .finally(() => setBusyId(null));
@@ -470,7 +668,7 @@ function ProfilesPage() {
         <div>
           <p className="eyebrow">Loadouts</p>
           <h1>Profiles</h1>
-          <p className="page-description">Save your current enabled mods as a loadout and apply it later.</p>
+          <p className="page-description">Save and apply mod loadouts for {currentGameProfile.displayName}.</p>
         </div>
         <div className="profile-header-actions">
           <button className="ghost-button compact" type="button" onClick={openProfilesFolder} disabled={busyId === "open-profiles-folder"}>
@@ -483,7 +681,7 @@ function ProfilesPage() {
       <div className="profiles-clean-layout">
         <article className="card profile-create-panel">
           <p className="eyebrow">Create</p>
-          <h2>Save current setup</h2>
+          <h2>Save {currentGameProfile.displayName} setup</h2>
           <p className="muted-inline">Profiles remember enabled PAK files and Tsuki-managed installs. Technical toggles live in Debug.</p>
           <div className="profile-save-controls profile-create-controls">
             <input
@@ -505,11 +703,64 @@ function ProfilesPage() {
           </div>
         )}
 
+        <article className="card profile-drafts-panel">
+          <div className="home-feed-header">
+            <div>
+              <p className="eyebrow">Drafts</p>
+              <h2>Game profile drafts</h2>
+            </div>
+            <span className="status-pill">{visibleDraftProfiles.length} draft{visibleDraftProfiles.length === 1 ? "" : "s"}</span>
+          </div>
+
+          {visibleDraftProfiles.length === 0 ? (
+            <div className="profile-empty-state">
+              <strong>No saved game profile drafts.</strong>
+              <p>Drafts created in the profile creator will appear here for every game.</p>
+            </div>
+          ) : (
+            <div className="profile-draft-grid">
+              {visibleDraftProfiles.map((profile) => {
+                const overview = draftObject(profile.draft);
+                const overviewFields = draftObject(overview.overview);
+                const profileName = draftString(overviewFields.profileTitle) || profile.displayName;
+                const selectedGame = draftString(overviewFields.gameName) || profile.displayName;
+                return (
+                  <article className="profile-draft-card" key={profile.profileId}>
+                    <div className="profile-draft-art">
+                      <ProfileArtwork
+                        imageReference={profile.imageReference}
+                        legacySrc={profile.image}
+                        profileId={profile.profileId}
+                        alt={`${profileName} artwork`}
+                        fit={profile.artwork?.objectFit ?? "cover"}
+                        focalX={profile.artwork?.focalX ?? 50}
+                        focalY={profile.artwork?.focalY ?? 35}
+                        scale={profile.artwork?.scale ?? 1}
+                        fallback={<span className="profile-artwork-placeholder" aria-hidden="true" />}
+                      />
+                      <span className="profile-draft-badge">Draft</span>
+                    </div>
+                    <div className="profile-draft-copy">
+                      <h3>{profileName}</h3>
+                      <p>{selectedGame}</p>
+                      <small>Last edited {draftDateLabel(profile.updatedAt)}</small>
+                      <div className="profile-draft-actions">
+                        <button className="ghost-button compact install-button" type="button" onClick={() => onEditDraft(profile.profileId)}>Continue Editing</button>
+                        <button className="ghost-button compact danger-button" type="button" onClick={() => void onDeleteDraft(profile.profileId)}>Delete Draft</button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </article>
+
         <article className="card profile-list-panel">
           <div className="home-feed-header">
             <div>
               <p className="eyebrow">Saved</p>
-              <h2>Saved profiles</h2>
+              <h2>{currentGameProfile.displayName} profiles</h2>
             </div>
             <span className="status-pill">{profiles.length} total</span>
           </div>
@@ -525,13 +776,14 @@ function ProfilesPage() {
                 const expanded = expandedProfileId === profile.id;
                 const profileBusy = busyId === `profile-${profile.id}`;
                 const deleteBusy = busyId === `delete-profile-${profile.id}`;
+                const activeProfile = activeModProfileId === profile.id;
 
                 return (
-                  <div className={`profile-row-clean ${expanded ? "expanded" : ""}`} key={profile.id}>
+                  <div className={`profile-row-clean ${expanded ? "expanded" : ""} ${activeProfile ? "active" : ""}`} key={profile.id}>
                     <div className="profile-row-main">
                       <div>
-                        <strong>{profile.name}</strong>
-                        <p>{profile.enabledPakFiles.length} PAK files · {profile.enabledReceiptIds.length} Tsuki installs</p>
+                        <strong className="profile-name-line">{profile.name}{activeProfile && <span className="status-pill profile-active-pill">Active</span>}</strong>
+                        <p>{profile.enabledPakFiles.length} PAK files - {profile.enabledReceiptIds.length} Tsuki installs</p>
                         <small>{profile.createdUnix ? new Date(profile.createdUnix * 1000).toLocaleString() : "Unknown date"}</small>
                       </div>
                       <div className="profile-row-actions">
@@ -619,465 +871,57 @@ function ProfilesPage() {
   );
 }
 
-function BootScreen({ message = "Loading paths, theme, source cache, installed state, and app updates..." }: { message?: string }) {
+export function BootScreen({ message = "Starting Tsuki..." }: { message?: string }) {
   return (
-    <main className="boot-screen">
-      <div className="boot-card">
-        <div className="boot-logo-orb">
-          <span>月</span>
-        </div>
-        <div>
+    <main className="boot-screen lunar-startup" style={{ backgroundImage: `url(${lunarStartup})` }}>
+      <section className="boot-card" aria-live="polite">
+        <div className="boot-brand">
           <p className="eyebrow">TSUKI MOD MANAGER</p>
-          <h1>Opening Tsuki</h1>
-          <p>{message}</p>
+          <h1>Tsuki</h1>
         </div>
-        <div className="boot-progress">
+        <div className="boot-status">
+          <span>{message}</span>
+          <strong>v2.0.0</strong>
+        </div>
+        <div className="boot-progress" role="progressbar" aria-label="Starting Tsuki">
           <div />
         </div>
-      </div>
+      </section>
     </main>
   );
 }
 
 
 
-function redactDebugValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.slice(0, 12).map(redactDebugValue);
-
-  if (value && typeof value === "object") {
-    const output: Record<string, unknown> = {};
-
-    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      const lower = key.toLowerCase();
-      if (lower.includes("apikey") || lower.includes("api_key") || lower.includes("token") || lower.includes("secret") || lower.includes("bearer")) {
-        output[key] = entry ? "[saved/redacted]" : null;
-      } else {
-        output[key] = redactDebugValue(entry);
-      }
-    }
-
-    return output;
-  }
-
-  if (typeof value === "string") {
-    return value
-      .replace(/([A-Za-z0-9+/]{24,}={0,2}--[A-Za-z0-9+/=+\-]{8,}--[A-Za-z0-9+/=+\-]{8,})/g, "[redacted-api-key]")
-      .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, "Bearer [redacted]")
-      .replace(/apikey[=:\\"]+[^\\"&\s]+/gi, "apikey=[redacted]");
-  }
-
-  return value;
-}
-
-type DebugTab = "overview" | "browse" | "installed" | "receipts" | "launcher" | "updates" | "paths" | "backups";
-
-interface DebugAction {
-  label: string;
-  command: string;
-  args: Record<string, unknown>;
-}
-
-const DEBUG_TAB_META: Record<DebugTab, { label: string; description: string; checks: string[] }> = {
-  overview: {
-    label: "Overview",
-    description: "Run a broad health check and copy safe debug output.",
-    checks: ["Settings load", "Debug report", "Feature test summary"],
-  },
-  browse: {
-    label: "Browse",
-    description: "Checks Nexus, ModWorkshop, source cache, source tags, and browse responses.",
-    checks: ["Nexus browse sample", "ModWorkshop browse sample", "Source index"],
-  },
-  installed: {
-    label: "Installed",
-    description: "Checks local PAK scan, managed installs, and installed-state records.",
-    checks: ["PAK mod scan", "Managed installs", "Installed state records"],
-  },
-  receipts: {
-    label: "Receipts",
-    description: "Inspects install receipts, tracked files, and receipt repair data.",
-    checks: ["Install receipts", "Receipt repair items", "Installed mod updates"],
-  },
-  launcher: {
-    label: "Launcher",
-    description: "Checks game path detection and launcher-facing state.",
-    checks: ["PAYDAY 3 path detection", "Vanilla/modded launch prerequisites"],
-  },
-  updates: {
-    label: "Updates",
-    description: "Checks app update manifest and update status.",
-    checks: ["App update check"],
-  },
-  paths: {
-    label: "Paths",
-    description: "Checks PAYDAY 3, AppData, cache, backups, receipts, and profiles paths.",
-    checks: ["PAYDAY 3 path detection", "Settings load", "Debug report paths"],
-  },
-  backups: {
-    label: "Backups",
-    description: "Checks backup status and backup folder access.",
-    checks: ["Backups status"],
-  },
-};
-const DEBUG_TAB_ACTIONS: Record<DebugTab, DebugAction[]> = {
-  overview: [
-    { label: "Load settings", command: "get_app_settings", args: {} },
-    { label: "Copy debug report data", command: "get_debug_report", args: {} },
-  ],
-  browse: [
-    { label: "Nexus browse sample", command: "fetch_source_mods_page", args: { source: "nexus", page: 1, sort: "updated" } },
-    { label: "ModWorkshop browse sample", command: "fetch_modworkshop_browse_live_page", args: { page: 1, sort: "recent" } },
-    { label: "Read source index", command: "list_source_index", args: { source: null, limit: 25 } },
-  ],
-  installed: [
-    { label: "Scan PAK mods", command: "scan_pak_mods", args: {} },
-    { label: "List managed installs", command: "list_managed_installs", args: {} },
-    { label: "Read installed-state", command: "list_installed_state_records", args: {} },
-  ],
-  receipts: [
-    { label: "List receipts", command: "list_install_receipts", args: {} },
-    { label: "Receipt repair data", command: "list_receipt_repair_items", args: {} },
-    { label: "Check receipt updates", command: "check_installed_source_updates", args: {} },
-  ],
-  launcher: [
-    { label: "Detect PAYDAY 3 path", command: "detect_payday3_path", args: {} },
-  ],
-  updates: [
-    { label: "Check app update", command: "check_app_update", args: { manifestUrl: null } },
-    { label: "Check installed mod updates", command: "check_installed_source_updates", args: {} },
-  ],
-  paths: [
-    { label: "Detect PAYDAY 3 path", command: "detect_payday3_path", args: {} },
-    { label: "Load settings paths", command: "get_app_settings", args: {} },
-    { label: "Generate debug report", command: "get_debug_report", args: {} },
-  ],
-  backups: [
-    { label: "Backup status", command: "get_backup_status", args: {} },
-    { label: "List backups", command: "list_pak_backups", args: {} },
-  ],
-};
-
-
-function resultBelongsToTab(result: DebugFeatureTestResult, tab: DebugTab) {
-  if (tab === "overview") return true;
-
-  const lower = result.name.toLowerCase();
-  if (tab === "browse") return lower.includes("nexus") || lower.includes("modworkshop") || lower.includes("source");
-  if (tab === "installed") return lower.includes("installed") || lower.includes("pak") || lower.includes("managed");
-  if (tab === "receipts") return lower.includes("receipt") || lower.includes("update");
-  if (tab === "launcher") return lower.includes("payday") || lower.includes("launcher");
-  if (tab === "updates") return lower.includes("update");
-  if (tab === "paths") return lower.includes("path") || lower.includes("settings") || lower.includes("debug report");
-  if (tab === "backups") return lower.includes("backup");
-  return false;
-}
-
-function DebugTestPanel({ open, onClose, onOpenSetupWizard }: { open: boolean; onClose: () => void; onOpenSetupWizard: () => void }) {
-  const [position, setPosition] = useState({ x: 190, y: 86 });
-  const [dragging, setDragging] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<DebugFeatureTestResult[]>([]);
-  const [sessionLog, setSessionLog] = useState("Tsuki debug session started: " + new Date().toISOString());
-  const [tab, setTab] = useState<DebugTab>("overview");
-  const [receipts, setReceipts] = useState<InstallReceipt[]>([]);
-  const [receiptStatus, setReceiptStatus] = useState("Receipts not loaded yet.");
-  const dragOffsetRef = useRef({ x: 0, y: 0 });
-
-  const receiptStats = useMemo(() => {
-    const fileCount = receipts.reduce((total, receipt) => total + receipt.files.length, 0);
-    return { count: receipts.length, fileCount };
-  }, [receipts]);
-
-  useEffect(() => {
-    if (!dragging) return;
-
-    const onMove = (event: MouseEvent) => {
-      setPosition({
-        x: Math.max(8, Math.min(window.innerWidth - 220, event.clientX - dragOffsetRef.current.x)),
-        y: Math.max(32, Math.min(window.innerHeight - 120, event.clientY - dragOffsetRef.current.y)),
-      });
-    };
-
-    const onUp = () => setDragging(false);
-
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [dragging]);
-
-  function startDrag(event: ReactMouseEvent<HTMLDivElement>) {
-    const target = event.target as HTMLElement;
-    if (target.closest("button, input, textarea, select")) return;
-
-    dragOffsetRef.current = {
-      x: event.clientX - position.x,
-      y: event.clientY - position.y,
-    };
-    setDragging(true);
-  }
-
-  async function loadReceipts() {
-    setReceiptStatus("Loading receipts...");
-
-    try {
-      const result = await invoke<InstallReceipt[]>("list_install_receipts");
-      setReceipts(result);
-      setReceiptStatus(result.length > 0 ? `Loaded ${result.length} receipt(s).` : "No install receipts found.");
-    } catch (error) {
-      setReceipts([]);
-      setReceiptStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  useEffect(() => {
-    if (!open || tab !== "receipts") return;
-    void loadReceipts();
-  }, [open, tab]);
-
-  async function runFeatureTests() {
-    if (running) return;
-
-    setRunning(true);
-    setProgress(0);
-    setResults([]);
-
-    const tests: Array<{ name: string; tab: DebugTab; command: string; args: Record<string, unknown>; warning?: (value: unknown) => string | null }> = [
-      { name: "Settings load", tab: "overview", command: "get_app_settings", args: {} },
-      { name: "PAYDAY 3 path detection", tab: "paths", command: "detect_payday3_path", args: {} },
-      { name: "PAK mod scan", tab: "installed", command: "scan_pak_mods", args: {} },
-      { name: "Managed installs", tab: "installed", command: "list_managed_installs", args: {} },
-      { name: "Installed state records", tab: "installed", command: "list_installed_state_records", args: {} },
-      { name: "Source index", tab: "browse", command: "list_source_index", args: { source: null, limit: 25 } },
-      { name: "Nexus browse sample", tab: "browse", command: "fetch_source_mods_page", args: { source: "nexus", page: 1, sort: "updated" } },
-      { name: "ModWorkshop browse sample", tab: "browse", command: "fetch_modworkshop_browse_live_page", args: { page: 1, sort: "recent" } },
-      { name: "Backups status", tab: "backups", command: "get_backup_status", args: {} },
-      { name: "Profiles list", tab: "overview", command: "list_mod_profiles", args: {} },
-      { name: "Install receipts", tab: "receipts", command: "list_install_receipts", args: {} },
-      { name: "Runtime lock", tab: "launcher", command: "payday3_runtime_lock_status", args: {} },
-      { name: "Last install diagnostic", tab: "installed", command: "get_last_install_diagnostic", args: {} },
-      { name: "App update check", tab: "updates", command: "check_app_update", args: { manifestUrl: null } },
-      { name: "Debug report", tab: "overview", command: "get_debug_report", args: {} },
-    ];
-
-    const nextResults: DebugFeatureTestResult[] = [];
-
-    for (let index = 0; index < tests.length; index += 1) {
-      const test = tests[index];
-      setTab(test.tab);
-      setProgress(Math.round((index / tests.length) * 100));
-
-      try {
-        const value = await Promise.race([
-          invoke<unknown>(test.command, test.args),
-          new Promise((_, reject) => window.setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000)),
-        ]);
-
-        const safeValue = redactDebugValue(value);
-        const json = typeof safeValue === "string" ? safeValue : JSON.stringify(safeValue);
-        const detail = json && json.length > 220 ? `${json.slice(0, 220)}...` : (json || "Command completed.");
-        const warning = test.warning?.(value) ?? null;
-        nextResults.push({ name: test.name, status: warning ? "warning" : "passed", detail: warning ?? detail });
-      } catch (error) {
-        nextResults.push({ name: test.name, status: "failed", detail: error instanceof Error ? error.message : String(error) });
-      }
-
-      setResults([...nextResults]);
-    }
-
-    const finalLog = [
-      "Tsuki Feature Test Log",
-      new Date().toISOString(),
-      "",
-      ...nextResults.map((result) => `[${result.status.toUpperCase()}] ${result.name}: ${result.detail}`),
-    ].join("\n");
-    setSessionLog(finalLog);
-    window.dispatchEvent(new CustomEvent("tsuki-debug-log-updated", { detail: finalLog }));
-
-    setProgress(100);
-    setRunning(false);
-  }
-
-  async function copyFeatureTestLog() {
-    const text = sessionLog || [
-      "Tsuki Feature Test Log",
-      new Date().toISOString(),
-      "",
-      ...results.map((result) => `[${result.status.toUpperCase()}] ${result.name}: ${result.detail}`),
-    ].join("\n");
-
-    await navigator.clipboard.writeText(text);
-  }
-
-  async function copyDebugReport() {
-    try {
-      const report = await invoke<string>("get_debug_report");
-      await navigator.clipboard.writeText(report);
-    } catch (error) {
-      await navigator.clipboard.writeText(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function runSingleDebugAction(action: DebugAction) {
-    if (running) return;
-
-    setRunning(true);
-    setProgress(18);
-
-    try {
-      const value = await Promise.race([
-        invoke<unknown>(action.command, action.args),
-        new Promise((_, reject) => window.setTimeout(() => reject(new Error("Timed out after 15 seconds.")), 15000)),
-      ]);
-
-      const safeValue = redactDebugValue(value);
-      const json = typeof safeValue === "string" ? safeValue : JSON.stringify(safeValue);
-      const detail = json && json.length > 320 ? `${json.slice(0, 320)}...` : (json || "Command completed.");
-      if (action.command === "list_install_receipts" && Array.isArray(value)) {
-        setReceipts(value as InstallReceipt[]);
-        setReceiptStatus(`Loaded ${(value as InstallReceipt[]).length} receipt(s).`);
-      }
-      setResults((current) => [
-        { name: action.label, status: "passed", detail },
-        ...current.filter((result) => result.name !== action.label),
-      ]);
-      setSessionLog((current) => `${current}\n[PASSED] ${action.label}: ${detail}`);
-      setProgress(100);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      setResults((current) => [
-        { name: action.label, status: "failed", detail },
-        ...current.filter((result) => result.name !== action.label),
-      ]);
-      setSessionLog((current) => `${current}\n[FAILED] ${action.label}: ${detail}`);
-      setProgress(100);
-    } finally {
-      window.setTimeout(() => {
-        setRunning(false);
-        setProgress(0);
-      }, 350);
-    }
-  }
-
-  if (!open) return null;
-
-  const activeInfo = DEBUG_TAB_META[tab];
-  const visibleResults = results.filter((result) => resultBelongsToTab(result, tab));
-
-  return (
-    <aside className="secret-debug-panel" style={{ left: position.x, top: position.y }}>
-      <div className="secret-debug-header" onMouseDown={startDrag}>
-        <div>
-          <p className="eyebrow">Secret debug</p>
-          <h2>Tsuki Diagnostics</h2>
-        </div>
-        <button className="ghost-button compact" type="button" onClick={onClose}>Close</button>
-      </div>
-
-      <div className="secret-debug-tabs">
-        {(Object.keys(DEBUG_TAB_META) as DebugTab[]).map((id) => (
-          <button className={tab === id ? "active" : ""} type="button" key={id} onClick={() => setTab(id)}>{DEBUG_TAB_META[id].label}</button>
-        ))}
-      </div>
-
-      <article className="secret-debug-tab-panel">
-        <div>
-          <p className="eyebrow">{activeInfo.label}</p>
-          <h3>{activeInfo.description}</h3>
-        </div>
-        <div className="secret-debug-tab-actions">
-          {DEBUG_TAB_ACTIONS[tab].map((action) => (
-            <button className="ghost-button compact" type="button" key={action.label} onClick={() => runSingleDebugAction(action)} disabled={running}>
-              {action.label}
-            </button>
-          ))}
-        </div>
-        <ul>
-          {activeInfo.checks.map((check) => <li key={check}>{check}</li>)}
-        </ul>
-      </article>
-
-      {tab === "receipts" && (
-        <section className="secret-debug-receipts" aria-label="Receipt diagnostics">
-          <div className="secret-debug-receipt-stats">
-            <article>
-              <span>Receipts</span>
-              <strong>{receiptStats.count}</strong>
-            </article>
-            <article>
-              <span>Tracked Files</span>
-              <strong>{receiptStats.fileCount}</strong>
-            </article>
-            <button className="ghost-button compact" type="button" onClick={loadReceipts} disabled={running}>
-              Refresh Receipts
-            </button>
-          </div>
-          <p className="muted-inline">{receiptStatus}</p>
-          {receipts.length > 0 && (
-            <div className="secret-debug-receipt-list">
-              {receipts.slice(0, 8).map((receipt) => (
-                <article className="secret-debug-receipt-row" key={receipt.id}>
-                  <strong>{receipt.displayName}</strong>
-                  <span>{receipt.source} - {receipt.files.length} files</span>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
-      <div className="secret-debug-actions">
-        <button className="ghost-button compact install-button" type="button" onClick={runFeatureTests} disabled={running}>
-          {running ? "Testing..." : "Test All Features"}
-        </button>
-        <button className="ghost-button compact" type="button" onClick={copyFeatureTestLog} disabled={results.length === 0}>Copy Test Log</button>
-        <button className="ghost-button compact" type="button" onClick={copyDebugReport}>Copy Debug Report</button>
-        <button className="ghost-button compact" type="button" onClick={onOpenSetupWizard}>Open Setup Wizard</button>
-      </div>
-
-      <div className="secret-debug-progress" aria-label="Feature test progress">
-        <span style={{ width: `${progress}%` }} />
-      </div>
-
-      <div className="secret-debug-log">
-        {visibleResults.map((result) => (
-          <article className={`secret-debug-result ${result.status}`} key={`${result.name}-${result.detail}`}>
-            <strong>{result.status === "passed" ? "✓" : result.status === "warning" ? "!" : "×"} {result.name}</strong>
-            <p>{result.detail}</p>
-          </article>
-        ))}
-        {visibleResults.length === 0 && (
-          <p className="muted-inline">No {activeInfo.label.toLowerCase()} results yet. Use one of this tab's buttons or run Test All Features.</p>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-
 const SETUP_WIZARD_DONE_KEY = "tsuki-setup-wizard-complete:v1";
 
-function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: boolean; onClose: () => void; onOpenSettings: () => void; onOpenBrowse: () => void }) {
+type SettingsRouteState =
+  | { scope: "global"; origin: "select-game" | "manager" }
+  | { scope: "profile"; profileId: string; origin: "select-game" | "manager"; initialCategory?: "profileOverview" | "profileSetup" };
+
+function SetupWizard({ open, currentGameProfile, profileRuntime, onClose, onOpenSettings, onOpenBrowse, onOpenDependency }: { open: boolean; currentGameProfile: GameProfile; profileRuntime: ActiveProfileRuntime | null; onClose: () => void; onOpenSettings: () => void; onOpenBrowse: () => void; onOpenDependency: (dependency: DependencyDefinition) => boolean | void }) {
   const [step, setStep] = useState(0);
   const [pathStatus, setPathStatus] = useState("Not checked yet.");
   const [sourceStatus, setSourceStatus] = useState("Not verified yet.");
   const [busy, setBusy] = useState(false);
+  const [dependencyReport, setDependencyReport] = useState<DependencyReport | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    invoke<DependencyReport>("get_dependency_report", { profileId: currentGameProfile.profileId }).then(setDependencyReport).catch(() => setDependencyReport(null));
+  }, [open, currentGameProfile.profileId]);
 
   if (!open) return null;
 
   const finish = () => {
-    window.localStorage.setItem(SETUP_WIZARD_DONE_KEY, "true");
+    safeLocalStorageSet(SETUP_WIZARD_DONE_KEY, "true");
     onClose();
   };
 
   const detectPath = async () => {
     setBusy(true);
     try {
-      setPathStatus(await invoke<string>("detect_payday3_path"));
+      setPathStatus(await invoke<string>("detect_active_profile_path", { profileId: currentGameProfile.profileId }));
     } catch (error) {
       setPathStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1096,13 +940,26 @@ function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: bo
     }
   };
 
+  const gameName = profileRuntime?.gameName || currentGameProfile.displayName || "this game";
+  const setupDependencies = dependenciesForProfile(currentGameProfile.profileId, currentGameProfile.gameVersion);
+  const hasSources = Boolean(
+    profileRuntime?.sources?.length ||
+    currentGameProfile.sourceConfig?.modworkshopGameId ||
+    currentGameProfile.sourceConfig?.modworkshopSlug ||
+    currentGameProfile.sourceConfig?.modworkshopGamePageUrl ||
+    currentGameProfile.sourceConfig?.modworkshopEmbeddedStartUrl ||
+    currentGameProfile.sourceConfig?.nexusDomain ||
+    currentGameProfile.sourceConfig?.nexusGameId ||
+    currentGameProfile.sourceConfig?.nexusGamePageUrl ||
+    currentGameProfile.sourceConfig?.nexusEmbeddedStartUrl
+  );
   const steps = [
-    { title: "Welcome to Tsuki", body: "This wizard checks your PAYDAY 3 paths, explains source keys, and gets you to Browse without making the normal UI noisy." },
-    { title: "Game path", body: "Tsuki can auto-detect PAYDAY 3. Manual path editing lives in Settings → Game." },
-    { title: "Sources", body: "ModWorkshop works without login. Nexus needs your personal API key for browsing/downloading." },
-    { title: "Ready", body: "You can reopen this wizard from the secret Debug panel by double-clicking the version badge." },
+    { title: "Welcome to Tsuki", body: `This wizard checks ${gameName}'s game path, source access, and profile readiness.` },
+    { title: `${gameName} game path`, body: `Tsuki can detect ${gameName} using this profile's configured paths and rules. You can also choose the game folder manually in Profile Settings.` },
+    { title: "Sources", body: hasSources ? `${gameName} sources use this profile's game mappings.` : `No sources are configured for ${gameName} yet. Add sources in Profile Creator when you want Browse support.` },
+    { title: "Set Up Modding", body: setupDependencies.length ? `Review the verified frameworks and tools used by ${gameName} mods.` : `This profile has no built-in framework requirements.` },
+    { title: "Ready", body: `${gameName} is ready to browse, install, back up files, and keep receipts tracked from this profile.` },
   ];
-
   return (
     <div className="setup-wizard-overlay" role="dialog" aria-modal="true">
       <section className="setup-wizard-panel card">
@@ -1118,9 +975,9 @@ function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: bo
 
         {step === 1 && (
           <div className="setup-wizard-action-card">
-            <strong>PAYDAY 3 detection</strong>
+            <strong>{gameName} detection</strong>
             <p>{pathStatus}</p>
-            <button className="ghost-button install-button" type="button" onClick={detectPath} disabled={busy}>{busy ? "Checking..." : "Detect PAYDAY 3"}</button>
+            <button className="ghost-button install-button" type="button" onClick={detectPath} disabled={busy}>{busy ? "Checking..." : `Detect ${gameName}`}</button>
             <button className="ghost-button compact" type="button" onClick={onOpenSettings}>Open Game Settings</button>
           </div>
         )}
@@ -1135,9 +992,30 @@ function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: bo
         )}
 
         {step === 3 && (
+          <div className="setup-wizard-action-card">
+            <strong>Frameworks and tools</strong>
+            <div className="managed-list">
+              {setupDependencies.map((dependency) => {
+                const reportItem = dependencyReport?.items.find((item) => findDependency(item.label, currentGameProfile.profileId)?.id === dependency.id);
+                return <div className={`managed-row ${reportItem?.found ? "" : "disabled"}`} key={dependency.id}>
+                  <div>
+                    <DependencyName dependency={dependency} onOpenNative={onOpenDependency} />
+                    <p>{dependencySourceLabel(dependency)} - {dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended"}</p>
+                    <small>{reportItem?.found ? reportItem.details : dependency.sourceUnverified ? "Source not verified" : reportItem?.recommendation ?? "Not detected"}</small>
+                  </div>
+                  <span className={reportItem?.found ? "badge good" : "badge"}>{reportItem?.found ? "Installed" : "Not detected"}</span>
+                  <DependencyActions dependency={dependency} onOpenNative={onOpenDependency} />
+                </div>;
+              })}
+              {setupDependencies.length === 0 && <p>No built-in dependencies for this profile.</p>}
+            </div>
+          </div>
+        )}
+
+        {step === 4 && (
           <div className="setup-wizard-action-card ready">
             <strong>Next stop: Browse</strong>
-            <p>Search, install, make backups, and keep receipts tracked from here.</p>
+            <p>{gameName} Browse will use this profile's sources, install paths, and receipt store.</p>
             <button className="ghost-button install-button" type="button" onClick={() => { finish(); onOpenBrowse(); }}>Open Browse</button>
           </div>
         )}
@@ -1157,6 +1035,7 @@ function SetupWizard({ open, onClose, onOpenSettings, onOpenBrowse }: { open: bo
 
 export default function App() {
   const [activePage, setActivePage] = useState<AppPage>("home");
+  const previousSettingsPageRef = useRef<AppPage>("home");
   const [refreshTick, setRefreshTick] = useState(0);
   const [bootReady, setBootReady] = useState(false);
   const [bootMessage, setBootMessage] = useState("Opening Tsuki...");
@@ -1164,14 +1043,177 @@ export default function App() {
   const [taskProgress, setTaskProgress] = useState<TaskProgressState>({ active: false, label: "", detail: "", progress: null });
   const taskProgressTimerRef = useRef<number | null>(null);
   const taskProgressOrphanTimerRef = useRef<number | null>(null);
-  const [activeThemeId, setActiveThemeId] = useState(() => window.localStorage.getItem("tsuki-theme-id") ?? "neon-rift");
+  const [activeThemeId, setActiveThemeId] = useState(() => INITIAL_THEME_ID);
   const [appUpdate, setAppUpdate] = useState<AppUpdateStatus | null>(null);
+  const autoUpdateChecksRef = useRef(true);
   const [appUpdateBusy, setAppUpdateBusy] = useState(false);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
+  const [appCapabilities, setAppCapabilities] = useState<AppCapabilities>({ isDeveloperMode: false, canEditOfficialProfiles: false });
+  const [gameProfiles, setGameProfiles] = useState<GameProfile[]>(BUILTIN_GAME_PROFILES);
+  const [currentGameProfile, setCurrentGameProfile] = useState<GameProfile>(() => findProfileInList(BUILTIN_GAME_PROFILES, window.localStorage.getItem("tsuki-current-game-profile-id") ?? window.localStorage.getItem("tsuki-active-game-profile-id") ?? BUILTIN_PAYDAY3_PROFILE_ID));
+  const [settingsRoute, setSettingsRoute] = useState<SettingsRouteState>(() => ({ scope: "profile", profileId: window.localStorage.getItem("tsuki-current-game-profile-id") ?? window.localStorage.getItem("tsuki-active-game-profile-id") ?? BUILTIN_PAYDAY3_PROFILE_ID, origin: "manager" }));
+  const [profileCreatorSource, setProfileCreatorSource] = useState<string | null>(null);
+  const [draftRuntimeProfileId, setDraftRuntimeProfileId] = useState<string | null>(null);
+  const [profileRuntime, setProfileRuntime] = useState<ActiveProfileRuntime | null>(null);
+  const [profileSwitching, setProfileSwitching] = useState(false);
+  const [profileRuntimeError, setProfileRuntimeError] = useState<string | null>(null);
+  const profileRuntimeRequestRef = useRef(0);
 
+  const refreshGameProfiles = useCallback(async () => {
+    try {
+      const drafts = await invoke<GameProfileDraftRecord[]>("list_game_profile_drafts");
+      const builtinIds = new Set(BUILTIN_GAME_PROFILES.map((profile) => profile.profileId));
+      const allDraftProfiles = drafts.map(gameProfileFromDraft);
+      const mergedBuiltins = BUILTIN_GAME_PROFILES;
+      const draftProfiles = allDraftProfiles.filter((profile) => !builtinIds.has(profile.profileId));
+      const versionedProfiles = await Promise.all([...mergedBuiltins, ...draftProfiles].map(async (profile) => {
+        if (!profile.gameVersions?.length) return profile;
+        const settings = await invoke<{ gameVersion?: string }>("get_profile_settings", { profileId: profile.profileId });
+        const version = settings.gameVersion && profile.gameVersions.includes(settings.gameVersion) ? settings.gameVersion : profile.gameVersion;
+        return { ...profile, gameVersion: version, sourceConfig: { ...profile.sourceConfig, sources: profile.sourceConfig.sources?.map((source) => ({ ...source, gameVersion: version })) } };
+      }));
+      const nextProfiles = await withDetectedInstallations(versionedProfiles);
+      setGameProfiles(nextProfiles);
+      return nextProfiles;
+    } catch (error) {
+      console.warn("Failed to load custom game profile drafts:", error);
+      setGameProfiles(BUILTIN_GAME_PROFILES);
+      return BUILTIN_GAME_PROFILES;
+    }
+  }, []);
+
+  const openProfileCreator = useCallback((profileId: string | null = null) => {
+    setProfileCreatorSource(profileId);
+    setActivePage("profileCreator");
+  }, []);
+
+  const deleteGameProfileDraft = useCallback(async (profileId: string) => {
+    const profile = findProfileInList(gameProfiles, profileId);
+    const confirmed = window.confirm(`Delete draft "${profile.displayName}"? This only removes the custom game profile draft.`);
+    if (!confirmed) return;
+    await invoke<string>("delete_game_profile_draft", { profileId });
+    if (profileCreatorSource === profileId) setProfileCreatorSource(null);
+    await refreshGameProfiles();
+  }, [gameProfiles, profileCreatorSource, refreshGameProfiles]);
+
+  const duplicateGameProfileDraft = useCallback(async (profileId: string) => {
+    try {
+      const profile = findProfileInList(gameProfiles, profileId);
+      const { makeDraft } = await import("./pages/ProfileCreator/ProfileCreatorPage");
+      const draft = makeDraft(profile);
+      const duplicateId = `user.${crypto.randomUUID()}`;
+      const duplicate = { ...draft, profileId: duplicateId, profileType: "user_created", status: "draft", overview: { ...draft.overview, profileTitle: `${draft.overview.profileTitle || profile.displayName} Copy` } };
+      await invoke("save_game_profile_draft", { profileId: duplicateId, draft: duplicate });
+      await refreshGameProfiles();
+      openProfileCreator(duplicateId);
+    } catch (error) {
+      window.alert(`Could not duplicate profile: ${String(error)}`);
+    }
+  }, [gameProfiles, openProfileCreator, refreshGameProfiles]);
+
+  const activateProfileRuntime = useCallback(async (profile: GameProfile, options: { page?: AppPage; previewSetup?: boolean } = {}) => {
+    const requestId = profileRuntimeRequestRef.current + 1;
+    profileRuntimeRequestRef.current = requestId;
+    setProfileSwitching(true);
+    setProfileRuntimeError(null);
+    setHomeOpenMod(null);
+    setCurrentGameProfile(profile);
+    setDraftRuntimeProfileId(profile.lifecycleState === "draft" ? profile.profileId : null);
+    window.dispatchEvent(new CustomEvent("tsuki-profile-runtime-switching", { detail: { profileId: profile.profileId } }));
+
+    try {
+      const runtime = await invoke<ActiveProfileRuntime>("activate_game_profile_runtime", { profileId: profile.profileId, profile });
+      if (profileRuntimeRequestRef.current !== requestId) return runtime;
+      setCurrentGameProfile(profile);
+      setProfileRuntime(runtime);
+      setProfileRuntimeError(runtime.error ?? null);
+      safeLocalStorageSet("tsuki-current-game-profile-id", profile.profileId);
+      safeSessionStorageSet(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, String(Date.now()));
+      window.dispatchEvent(new CustomEvent("tsuki-current-game-profile-changed", { detail: { profile, runtime } }));
+      setProfileCreatorSource(null);
+      const nextPage = options.page ?? (options.previewSetup ? "settings" : "home");
+      if (nextPage === "settings") {
+        setSettingsRoute({ scope: "profile", profileId: profile.profileId, origin: "manager", initialCategory: options.previewSetup ? "profileSetup" : "profileOverview" });
+      }
+      setActivePage(nextPage);
+      if (options.previewSetup) setSetupWizardOpen(true);
+      setRefreshTick((tick) => tick + 1);
+      return runtime;
+    } catch (error) {
+      if (profileRuntimeRequestRef.current === requestId) {
+        setProfileRuntime(null);
+        setProfileRuntimeError(errorMessage(error));
+        setActivePage("games");
+      }
+      throw error;
+    } finally {
+      if (profileRuntimeRequestRef.current === requestId) {
+        setProfileSwitching(false);
+      }
+    }
+  }, []);
+  const openDraftRuntimeProfile = useCallback(async (profileId: string, options: { previewSetup?: boolean } = {}) => {
+    const profiles = await refreshGameProfiles();
+    const nextProfile = findProfileInListExact(profiles, profileId);
+    if (!nextProfile) {
+      throw new Error(`Game profile was not found: ${profileId}`);
+    }
+    await activateProfileRuntime(nextProfile, { page: options.previewSetup ? "settings" : "home", previewSetup: options.previewSetup });
+  }, [activateProfileRuntime, refreshGameProfiles]);
+
+  const openSettingsPage = useCallback((route: SettingsRouteState) => {
+    previousSettingsPageRef.current = activePage === "settings" ? previousSettingsPageRef.current : activePage;
+    setSettingsRoute(route);
+    setActivePage("settings");
+  }, [activePage]);
+
+  const goBackFromSettings = useCallback(() => {
+    const previous = previousSettingsPageRef.current === "settings" ? "home" : previousSettingsPageRef.current;
+    setActivePage(previous);
+  }, []);
+
+  const changeProfileVersion = useCallback(async (profileId: string, version: string) => {
+    try {
+      const profile = gameProfiles.find((item) => item.profileId === profileId);
+      if (!profile?.gameVersions?.includes(version)) throw new Error("Unsupported game version.");
+      const settings = await invoke<Record<string, unknown>>("get_profile_settings", { profileId });
+      await invoke("save_profile_settings", { profileId, settings: { ...settings, gameVersion: version } });
+      const refreshed = await refreshGameProfiles();
+      const updated = refreshed.find((item) => item.profileId === profileId);
+      if (updated && currentGameProfile.profileId === profileId) {
+        const runtime = await invoke<ActiveProfileRuntime>("activate_game_profile_runtime", { profileId, profile: updated });
+        setCurrentGameProfile(updated);
+        setProfileRuntime(runtime);
+      }
+    } catch (error) {
+      window.alert(`Could not save game version: ${String(error)}`);
+    }
+  }, [gameProfiles, refreshGameProfiles, currentGameProfile.profileId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const onSettingsChanged = (event: Event) => {
+      const profileId = (event as CustomEvent<{ profileId: string }>).detail?.profileId;
+      if (!profileId) return;
+      void refreshGameProfiles().then(async (profiles) => {
+        const profile = profiles.find((item) => item.profileId === profileId);
+        if (cancelled || !profile || profileId !== currentGameProfile.profileId) return;
+        const runtime = await invoke<ActiveProfileRuntime>("activate_game_profile_runtime", { profileId, profile });
+        if (cancelled) return;
+        setCurrentGameProfile(profile);
+        setProfileRuntime(runtime);
+      }).catch((error) => setProfileRuntimeError(errorMessage(error)));
+    };
+    window.addEventListener("tsuki-profile-settings-changed", onSettingsChanged);
+    return () => { cancelled = true; window.removeEventListener("tsuki-profile-settings-changed", onSettingsChanged); };
+  }, [currentGameProfile.profileId, refreshGameProfiles]);
 
   const goToPage = (page: AppPage) => {
+    if (page === "settings") {
+      openSettingsPage({ scope: "profile", profileId: currentGameProfile.profileId, origin: "manager" });
+      return;
+    }
     setActivePage((current) => {
       if (current === page) setRefreshTick((tick) => tick + 1);
       return page;
@@ -1184,7 +1226,24 @@ export default function App() {
     setRefreshTick((tick) => tick + 1);
   };
 
+  const openDependencyNative = (dependency: DependencyDefinition) => {
+    const summary = dependencyToSourceSummary(dependency);
+    if (!summary) return false;
+    setSetupWizardOpen(false);
+    openSourceModInApp(summary);
+    return true;
+  };
 
+
+  const selectGameProfile = useCallback((profileId: string) => {
+    const nextProfile = findProfileInListExact(gameProfiles, profileId);
+    if (!nextProfile) {
+      setProfileRuntimeError(`Game profile was not found: ${profileId}`);
+      return;
+    }
+    void activateProfileRuntime(nextProfile, { page: "home" })
+      .catch((error) => console.warn("Failed to activate game profile:", error));
+  }, [activateProfileRuntime, gameProfiles]);
   async function checkAppUpdate(manual = false) {
     if (appUpdateBusy) return;
 
@@ -1240,38 +1299,94 @@ export default function App() {
   }
 
   useEffect(() => {
-    invoke<AppSettings>("get_app_settings")
-      .then((settings) => {
-        if (settings.themeId) setActiveThemeId(settings.themeId);
-      })
-      .catch(() => {
-        // Keep localStorage theme fallback.
-      });
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
-    let readyTimer: number | null = null;
     let updateTimer: number | null = null;
 
-    readyTimer = window.setTimeout(() => {
+    const finishBoot = async () => {
+      let settings: AppSettings | null = null;
+      let profiles = BUILTIN_GAME_PROFILES;
+
+      try {
+        setBootMessage("Loading settings...");
+        settings = normalizeAppSettings(await invoke<AppSettings>("get_app_settings"));
+        if (cancelled) return;
+        setActiveThemeId(settings.themeId);
+        safeLocalStorageSet(THEME_STORAGE_KEY, settings.themeId);
+        document.documentElement.dataset.theme = settings.themeId;
+        applyAppearanceSettings(settings);
+        autoUpdateChecksRef.current = settings.autoUpdateChecks;
+        setAppCapabilities({
+          isDeveloperMode: settings.developerMode ?? false,
+          canEditOfficialProfiles: settings.developerMode ?? false,
+        });
+      } catch (error) {
+        console.warn("Failed to load app settings:", error);
+      }
+
+      try {
+        setBootMessage("Loading game profiles...");
+        profiles = await refreshGameProfiles();
+        if (cancelled) return;
+      } catch (error) {
+        console.warn("Failed to load game profile drafts:", error);
+      }
+
+      const storedProfileId = settings?.currentGameProfileId
+        ?? settings?.activeGameProfileId
+        ?? window.localStorage.getItem("tsuki-current-game-profile-id");
+      const persistedProfile = findProfileInListExact(profiles, storedProfileId) ?? getGameProfile(BUILTIN_PAYDAY3_PROFILE_ID);
+
+      try {
+        setBootMessage("Restoring session...");
+        await activateProfileRuntime(persistedProfile, { page: settings ? startupPageFromSettings(settings) : "home" });
+        if (cancelled) return;
+        setBootMessage("Loading profile data...");
+      } catch (error) {
+        console.warn("Failed to activate startup game profile:", error);
+        if (cancelled) return;
+        setBootMessage("Profile runtime unavailable. Opening Tsuki...");
+      }
+
       if (cancelled) return;
       setBootMessage("Ready.");
       setBootReady(true);
       window.performance.mark?.("tsuki-boot-ready-before-background-update-check");
-
       updateTimer = window.setTimeout(() => {
-        if (!cancelled) void checkAppUpdate(false);
+        if (!cancelled && autoUpdateChecksRef.current) void checkAppUpdate(false);
       }, 8000);
-    }, 450);
+    };
+
+    void finishBoot();
 
     return () => {
       cancelled = true;
-      if (readyTimer !== null) window.clearTimeout(readyTimer);
       if (updateTimer !== null) window.clearTimeout(updateTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [activateProfileRuntime, refreshGameProfiles]);
+
+  useEffect(() => {
+    if (!bootReady) return;
+
+    const timer = window.setTimeout(() => {
+      invoke("migrate_receipts_to_v2")
+        .catch((error) => console.warn("Receipt v2 migration failed:", error));
+    }, 1800);
+
+    return () => window.clearTimeout(timer);
+  }, [bootReady]);
+
+  useEffect(() => {
+    if (!bootReady) return;
+
+    const timer = window.setTimeout(() => {
+      invoke<string>("refresh_source_index_v2_remote_if_stale")
+        .then((message) => console.info("Source Index v2:", message))
+        .catch((error) => console.warn("Source Index v2 stale refresh failed:", error));
+    }, 12000);
+
+    return () => window.clearTimeout(timer);
+  }, [bootReady]);
 
   useEffect(() => {
     if (!bootReady) return;
@@ -1282,7 +1397,7 @@ export default function App() {
     }
 
     const timer = window.setTimeout(() => {
-      invoke<SourceUpdateStatus[]>("check_installed_source_updates")
+      invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId: currentGameProfile.profileId })
         .then((updates) => writeReceiptUpdateCheckCache(updates, "launch"))
         .catch(() => {
           // Silent launch check. Manual Check Updates still reports errors in Installed.
@@ -1290,7 +1405,7 @@ export default function App() {
     }, 45000);
 
     return () => window.clearTimeout(timer);
-  }, [bootReady]);
+  }, [bootReady, currentGameProfile.profileId]);
 
   useEffect(() => {
     if (!bootReady) return;
@@ -1300,12 +1415,12 @@ export default function App() {
   }, [bootReady]);
 
   useEffect(() => {
-    window.localStorage.setItem("tsuki-active-page", activePage);
+    safeLocalStorageSet("tsuki-active-page", activePage);
   }, [activePage]);
 
   useEffect(() => {
     const invalidateInstalledCache = () => {
-      window.sessionStorage.setItem(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, String(Date.now()));
+      safeSessionStorageSet(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, String(Date.now()));
     };
 
     window.addEventListener("tsuki-data-refresh", invalidateInstalledCache);
@@ -1336,7 +1451,7 @@ export default function App() {
         return;
       }
 
-      const progress = typeof detail.progress === "number" ? Math.max(0, Math.min(100, detail.progress)) : null;
+      const progress = typeof detail.progress === "number" && Number.isFinite(detail.progress) ? Math.max(0, Math.min(100, detail.progress)) : null;
       const next = {
         active: true,
         label: detail.label || "Working",
@@ -1355,12 +1470,8 @@ export default function App() {
         // Safety net for any task that stops reporting before it sends a final clear event.
         taskProgressOrphanTimerRef.current = window.setTimeout(() => {
           setTaskProgress((current) => current.active
-            ? { ...current, detail: current.detail ? `${current.detail} (stopped reporting)` : "Task stopped reporting.", progress: 100 }
+            ? { ...current, detail: current.detail ? `${current.detail} (waiting for an update)` : "Waiting for a task update.", progress: null }
             : current);
-          taskProgressTimerRef.current = window.setTimeout(() => {
-            setTaskProgress({ active: false, label: "", detail: "", progress: null });
-            taskProgressTimerRef.current = null;
-          }, 1200);
           taskProgressOrphanTimerRef.current = null;
         }, 30000);
       }
@@ -1389,7 +1500,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("tsuki-theme-id", activeThemeId);
+    safeLocalStorageSet(THEME_STORAGE_KEY, activeThemeId);
     document.documentElement.dataset.theme = activeThemeId;
   }, [activeThemeId]);
 
@@ -1398,25 +1509,44 @@ export default function App() {
     setDebugPanelOpen(true);
   }, []);
 
+  const profileRuntimeKey = `${profileRuntime?.profileId ?? currentGameProfile.profileId}:${profileRuntime?.definitionRevision ?? 0}:${currentGameProfile.gameVersion ?? "default"}`;
+  const profileRuntimeReady = Boolean(profileRuntime && profileRuntime.profileId === currentGameProfile.profileId && profileRuntime.ready !== false && !profileSwitching && !profileRuntimeError);
+
   const page = useMemo(() => {
     switch (activePage) {
       case "browse":
-        return <BrowsePage initialMod={homeOpenMod} onInitialModConsumed={() => setHomeOpenMod(null)} />;
+        return <BrowsePage key={`browse-${profileRuntimeKey}`} initialMod={homeOpenMod} onInitialModConsumed={() => setHomeOpenMod(null)} currentGameProfile={currentGameProfile} profileRuntime={profileRuntime} profileSwitching={profileSwitching || !profileRuntimeReady} />;
       case "installed":
-        return <InstalledPage />;
+        return <InstalledPage key={`installed-${profileRuntimeKey}`} currentGameProfile={currentGameProfile} profileRuntime={profileRuntime} profileSwitching={profileSwitching || !profileRuntimeReady} />;
       case "profiles":
-        return <ProfilesPage />;
+        return <ProfilesPage currentGameProfile={currentGameProfile} draftProfiles={gameProfiles.filter((profile) => profile.lifecycleState === "draft")} onEditDraft={openProfileCreator} onDeleteDraft={deleteGameProfileDraft} />;
+      case "games":
+        return <GameSelectorPage profiles={gameProfiles} currentProfile={currentGameProfile} appCapabilities={appCapabilities} onSelectProfile={selectGameProfile} onVersionChange={(profileId, version) => void changeProfileVersion(profileId, version)} onCreateProfile={() => openProfileCreator(null)} onEditProfile={(profileId) => { void refreshGameProfiles().then(() => openProfileCreator(profileId)); }} onDeleteDraft={deleteGameProfileDraft} onDuplicateProfile={duplicateGameProfileDraft} onOpenSettings={() => openSettingsPage({ scope: "global", origin: "select-game" })} onOpenProfileSettings={(profileId: string) => openSettingsPage({ scope: "profile", profileId, origin: "select-game", initialCategory: "profileOverview" })} />;
+      case "profileCreator":
+        return <ProfileCreatorPage key={profileCreatorSource ?? "new-profile"} sourceProfile={profileCreatorSource ? findProfileInList(gameProfiles, profileCreatorSource) : null} canEditOfficialProfiles={appCapabilities.canEditOfficialProfiles} onDraftSaved={async () => { await refreshGameProfiles(); }} onOpenProfile={async (profileId, options) => { await openDraftRuntimeProfile(profileId, { previewSetup: options.previewSetup }); }} onBack={() => { void refreshGameProfiles(); setProfileCreatorSource(null); setActivePage("games"); }} />;
       case "repair":
-        return <RepairPage />;
+        return <RepairPage profileId={currentGameProfile.profileId} />;
       case "backups":
         return <BackupsPage />;
-      case "settings":
-        return <SettingsPage activeThemeId={activeThemeId} onThemeChange={setActiveThemeId} />;
+      case "settings": {
+        const settingsProfile = settingsRoute.scope === "profile"
+          ? findProfileInListExact(gameProfiles, settingsRoute.profileId) ?? currentGameProfile
+          : null;
+        const settingsProfileActive = Boolean(settingsProfile && settingsProfile.profileId === currentGameProfile.profileId);
+        return <SettingsPage activeThemeId={activeThemeId} onThemeChange={setActiveThemeId} profile={settingsProfile} profileRuntime={settingsProfileActive ? profileRuntime : null} isProfileActive={settingsProfileActive && profileRuntimeReady} openedFrom={settingsRoute.origin} initialCategory={settingsRoute.scope === "profile" ? settingsRoute.initialCategory : undefined} onBack={goBackFromSettings} onBackToGames={() => setActivePage("games")} onOpenProfileCreator={(profileId) => openProfileCreator(profileId)} onActivateProfile={selectGameProfile} />;
+      }
       case "home":
       default:
-        return <HomePage onOpenPage={goToPage} onOpenModInApp={openSourceModInApp} refreshTick={refreshTick} />;
+        return <HomePage key={`home-${profileRuntimeKey}`} onOpenPage={goToPage} onOpenModInApp={openSourceModInApp} refreshTick={refreshTick} currentGameProfile={currentGameProfile} profileRuntime={profileRuntime} profileSwitching={profileSwitching || !profileRuntimeReady} />;
     }
-  }, [activePage, activeThemeId, refreshTick, homeOpenMod]);
+  }, [activePage, activeThemeId, refreshTick, homeOpenMod, currentGameProfile, profileRuntime, profileRuntimeKey, profileRuntimeReady, profileSwitching, selectGameProfile, appCapabilities, profileCreatorSource, gameProfiles, settingsRoute, openProfileCreator, deleteGameProfileDraft, duplicateGameProfileDraft, refreshGameProfiles, openDraftRuntimeProfile, openSettingsPage, goBackFromSettings]);
+
+  const specialFlowPages: AppPage[] = ["games", "profileCreator"];
+  const settingsSpecialFlow = activePage === "settings" && settingsRoute.origin === "select-game";
+  const specialFlow = specialFlowPages.includes(activePage) || settingsSpecialFlow;
+  const draftRuntimeOpen = draftRuntimeProfileId === currentGameProfile.profileId && currentGameProfile.lifecycleState === "draft";
+  const profileRuntimeBlocked = !specialFlow && !profileRuntimeReady;
+  const profileRuntimeStatus = profileRuntimeError ?? (profileSwitching ? "Switching profile runtime..." : "Loading profile runtime...");
 
   if (!bootReady) {
     return <BootScreen message={bootMessage} />;
@@ -1424,19 +1554,56 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <WindowTitleBar activePage={activePage} appUpdate={appUpdate} updateBusy={appUpdateBusy} onCheckUpdate={() => checkAppUpdate(true)} onInstallUpdate={installAppUpdate} />
-      <div className="app-body">
-        <Sidebar activePage={activePage} onChangePage={goToPage} taskProgress={taskProgress} onOpenDebug={openSecretDebugPanel} />
-        <main className="app-main">
-          <div className="page-scroll"><PageCrashGuard pageName={activePage}>{page}</PageCrashGuard></div>
-          <DebugTestPanel open={debugPanelOpen} onClose={() => setDebugPanelOpen(false)} onOpenSetupWizard={() => setSetupWizardOpen(true)} />
+      <WindowTitleBar activePage={activePage} appUpdate={appUpdate} updateBusy={appUpdateBusy} onCheckUpdate={() => checkAppUpdate(true)} onInstallUpdate={installAppUpdate} currentGameProfile={currentGameProfile} profileRuntime={profileRuntime} profileSwitching={profileSwitching || !profileRuntimeReady} specialFlow={specialFlow} />
+      {specialFlow ? (
+        <main className="special-flow-shell">
+          <PageCrashGuard pageName={activePage}><Suspense fallback={<div className="page-loading-state" role="status">Loading {activePage === "profileCreator" ? "Profile Creator" : activePage}...</div>}>{page}</Suspense></PageCrashGuard>
         </main>
-      </div>
+      ) : (
+        <div className="app-body">
+          <Sidebar activePage={activePage} currentGameProfile={currentGameProfile} onChangePage={goToPage} taskProgress={taskProgress} onOpenDebug={openSecretDebugPanel} />
+          <main className="app-main">
+            {!profileRuntimeBlocked && <ManagedLoaderStatus profileId={currentGameProfile.profileId} />}
+            {draftRuntimeOpen && <div className="draft-runtime-banner" role="status"><div><strong>Draft Profile</strong><span>Changes made in Profile Creator are not published.</span></div><button type="button" onClick={() => openProfileCreator(currentGameProfile.profileId)}>Return to Profile Creator</button><button type="button" onClick={() => setSetupWizardOpen(true)}>Preview Setup</button></div>}
+            <div className="page-scroll">
+              {profileRuntimeBlocked ? (
+                <section className="profile-runtime-state" role={profileRuntimeError ? "alert" : "status"}>
+                  <strong>{profileRuntimeError ? "Profile failed to initialize" : "Loading profile runtime"}</strong>
+                  <span>{profileRuntimeStatus}</span>
+                  {profileRuntimeError && <button type="button" onClick={() => setActivePage("games")}>Select Game</button>}
+                </section>
+              ) : (
+                <PageCrashGuard pageName={activePage}><Suspense fallback={<div className="page-loading-state" role="status">Loading {activePage}...</div>}>{page}</Suspense></PageCrashGuard>
+              )}
+            </div>
+            {debugPanelOpen && profileRuntime && !specialFlow && (
+              <aside className="profile-runtime-debug-panel" aria-label="Active profile runtime diagnostics">
+                <strong>Active Runtime</strong>
+                <span>Profile: {profileRuntime.profileId}</span>
+                <span>Game: {profileRuntime.gameId}</span>
+                <span>Installed state: {profileRuntime.installedStatePath}</span>
+                <span>Receipts: {profileRuntime.receiptsPath}</span>
+                <span>Index: {profileRuntime.sourceIndexPath}</span>
+                <span>Browse cache: {profileRuntime.browseCachePath}</span>
+                <span>Game root: {profileRuntime.gameRoot ?? "Not set"}</span>
+                <span>Executable: {profileRuntime.executable ?? "Not set"}</span>
+                <span>Receipts loaded: {profileRuntime.loadedReceiptCount}</span>
+                <span>Installed loaded: {profileRuntime.loadedInstalledModCount}</span>
+              </aside>
+            )}
+            {debugPanelOpen && <Suspense fallback={null}><DebugCenter open={debugPanelOpen} activeProfileId={currentGameProfile.profileId} onClose={() => setDebugPanelOpen(false)} onOpenSetupWizard={() => setSetupWizardOpen(true)} /></Suspense>}
+          </main>
+        </div>
+      )}
+      <DragDropInstallWizard currentGameProfile={currentGameProfile} gameProfiles={gameProfiles} requireGameChoice={activePage === "games"} onInstalled={() => setActivePage("installed")} />
       <SetupWizard
         open={setupWizardOpen}
+        currentGameProfile={currentGameProfile}
+        profileRuntime={profileRuntime}
         onClose={() => setSetupWizardOpen(false)}
-        onOpenSettings={() => { setSetupWizardOpen(false); setActivePage("settings"); }}
+        onOpenSettings={() => { setSetupWizardOpen(false); openSettingsPage({ scope: "profile", profileId: currentGameProfile.profileId, origin: "manager", initialCategory: "profileSetup" }); }}
         onOpenBrowse={() => { setActivePage("browse"); }}
+        onOpenDependency={openDependencyNative}
       />
     </div>
   );

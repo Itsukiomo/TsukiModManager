@@ -1,10 +1,22 @@
 import "./InstalledPage.css";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
-import { CardMoreMenu } from "../../components/CardMoreMenu";
+import { ChevronDown } from "lucide-react";
+import { InstalledModCard } from "../../components/InstalledModCard";
+import { ModToggleButton } from "../../components/ModToggleButton";
+import { UnifiedModPage } from "../../components/UnifiedModPage";
+import type { UnifiedAction, UnifiedDependencyItem, UnifiedFileGroup, UnifiedInfoItem, UnifiedTimelineItem } from "../../components/UnifiedModPage";
+import { DependencyActions, DependencyName } from "../../components/DependencyActions";
+import { dependencySourceLabel, enrichDependency, type DependencySourceKind } from "../../models/dependency";
+import type { GameProfile, GameProfileSourceConfig } from "../../models/gameProfiles";
 import type { PakModFile, PakScanResult } from "../../models/mod";
+import { profileHasConfiguredSources, type ActiveProfileRuntime } from "../../models/profileRuntime";
 import type { InstalledSourceMatch, ModSourceKind, SourceModDetail, SourceModSummary, SourceModFile, StagedDownloadResult, InstallApplyResult, SourceUpdateStatus } from "../../models/source";
+import type { TagDefinition, TagSource, TagType } from "../../utils/tagRegistry";
+import { customTagDefinition, isSystemBadgeTag, mergeTagDefinitions, normalizeGameId, normalizeTagName, rankTags, rejectedTaxonomyLabelReason, seedTagCatalog, tagColorClass, tagColorStyle, tagDisplayLabel, tagGroupLabel, tagMatchesQuery } from "../../utils/tagRegistry";
+import { readThumbnailFailures, thumbnailRecentlyFailed, writeThumbnailFailures } from "../../utils/thumbnailFailures";
+import { applyKnownSourceAuthor, displaySourceAuthor, displaySourceTitle, rememberSourceAuthorMetadata } from "../../utils/sourceAuthorCache";
+import { installedSourceFallbackLabel, resolveInstalledThumbnailUrl } from "../../utils/installedThumbnail";
 
 type InstalledView = "all" | "matched" | "updates" | "unmatched" | "raw";
 type SortMode = "name" | "modified" | "size";
@@ -19,14 +31,29 @@ interface CachedSourceMods {
 }
 
 const INSTALLED_ENRICH_CACHE_KEY = "tsuki-source-cache:v0.44:installed:index";
+const INSTALLED_METADATA_HYDRATION_BATCH_SIZE = 8;
+const INSTALLED_METADATA_HYDRATION_CONCURRENCY = 2;
 
 const UNPAIRABLE_GROUPS_KEY = "tsuki-installed-unpairable-groups:v0.90-state-first";
 
 const REJECTED_PAIRINGS_KEY = "tsuki-rejected-pairings:v0.90-state-first";
 const CUSTOM_GROUPS_KEY = "tsuki-custom-installed-groups:v0.90-state-first";
+const CRASH_TEST_EXCLUSION_OVERRIDES_KEY = "tsuki-crash-test-exclusions:v2";
 const PAIR_STATE_CACHE_KEY = "tsuki-installed-pair-ledger:v1";
 
 const TSUKI_RECEIPT_UPDATE_CACHE_KEY = "tsuki-receipt-update-check:v1";
+
+function profileLocalStorageKey(base: string, profileId: string) {
+  return `${base}:${profileId || "unknown-profile"}`;
+}
+
+function installedEnrichCacheKey(profileId: string) {
+  return profileLocalStorageKey(INSTALLED_ENRICH_CACHE_KEY, profileId);
+}
+
+function sourceCacheKeyBelongsToProfile(key: string, profileId: string) {
+  return key === installedEnrichCacheKey(profileId) || key.startsWith(`tsuki-source-cache:${profileId}:`);
+}
 
 interface ReceiptUpdateCheckCache {
   savedAt: number;
@@ -36,9 +63,9 @@ interface ReceiptUpdateCheckCache {
   source: "launch" | "manual";
 }
 
-function readReceiptUpdateCheckCache(): ReceiptUpdateCheckCache | null {
+function readReceiptUpdateCheckCache(profileId: string): ReceiptUpdateCheckCache | null {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(TSUKI_RECEIPT_UPDATE_CACHE_KEY) ?? "null");
+    const parsed = JSON.parse(window.localStorage.getItem(profileLocalStorageKey(TSUKI_RECEIPT_UPDATE_CACHE_KEY, profileId)) ?? "null");
     if (!parsed || typeof parsed !== "object") return null;
 
     return {
@@ -53,7 +80,7 @@ function readReceiptUpdateCheckCache(): ReceiptUpdateCheckCache | null {
   }
 }
 
-function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "launch" | "manual") {
+function writeReceiptUpdateCheckCache(profileId: string, updates: SourceUpdateStatus[], source: "launch" | "manual") {
   const payload: ReceiptUpdateCheckCache = {
     savedAt: Date.now(),
     updates,
@@ -63,8 +90,8 @@ function writeReceiptUpdateCheckCache(updates: SourceUpdateStatus[], source: "la
   };
 
   try {
-    window.localStorage.setItem(TSUKI_RECEIPT_UPDATE_CACHE_KEY, JSON.stringify(payload));
-    window.dispatchEvent(new CustomEvent("tsuki-receipt-update-check", { detail: payload }));
+    window.localStorage.setItem(profileLocalStorageKey(TSUKI_RECEIPT_UPDATE_CACHE_KEY, profileId), JSON.stringify(payload));
+    window.dispatchEvent(new CustomEvent("tsuki-receipt-update-check", { detail: { ...payload, profileId } }));
   } catch {
     // Optional cache.
   }
@@ -126,12 +153,35 @@ function saveStringList(key: string, values: string[]) {
   }
 }
 
-function loadUnpairableGroups() {
-  return loadStringList(UNPAIRABLE_GROUPS_KEY);
+function loadCrashTestExclusionOverrides(): Record<string, boolean> {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CRASH_TEST_EXCLUSION_OVERRIDES_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([, value]) => typeof value === "boolean")
+        .map(([key, value]) => [key, value as boolean]),
+    );
+  } catch {
+    return {};
+  }
 }
 
-function saveUnpairableGroups(keys: string[]) {
-  saveStringList(UNPAIRABLE_GROUPS_KEY, keys);
+function saveCrashTestExclusionOverrides(overrides: Record<string, boolean>) {
+  try {
+    window.localStorage.setItem(CRASH_TEST_EXCLUSION_OVERRIDES_KEY, JSON.stringify(overrides));
+  } catch {
+    // Optional cache.
+  }
+}
+
+function loadUnpairableGroups(profileId: string) {
+  return loadStringList(profileLocalStorageKey(UNPAIRABLE_GROUPS_KEY, profileId));
+}
+
+function saveUnpairableGroups(profileId: string, keys: string[]) {
+  saveStringList(profileLocalStorageKey(UNPAIRABLE_GROUPS_KEY, profileId), keys);
 }
 
 function pruneMissingSkippedGroups(keys: string[], groups: InstalledGroup[]) {
@@ -140,10 +190,10 @@ function pruneMissingSkippedGroups(keys: string[], groups: InstalledGroup[]) {
 }
 
 
-function saveInstalledEnrichedSourceCache(mods: SourceModSummary[]) {
+function saveInstalledEnrichedSourceCache(profileId: string, mods: SourceModSummary[]) {
   try {
     window.localStorage.setItem(
-      INSTALLED_ENRICH_CACHE_KEY,
+      installedEnrichCacheKey(profileId),
       JSON.stringify({
         version: "v0.44",
         savedAt: Date.now(),
@@ -158,6 +208,107 @@ function saveInstalledEnrichedSourceCache(mods: SourceModSummary[]) {
 }
 
 
+interface ManualEditTarget {
+  sourceMod: SourceModSummary;
+  match: InstalledSourceMatch;
+}
+
+interface ManualSourceMatchPayload {
+  source: ModSourceKind;
+  sourceId: string;
+  fileId?: string | null;
+  gameId?: string | null;
+  modName: string;
+  fileName: string;
+  version?: string | null;
+  author?: string | null;
+  thumbnailUrl?: string | null;
+  pageUrl?: string | null;
+  sha256?: string | null;
+  confidence: number;
+  confidenceLevel: string;
+  matchKind: string;
+  reason: string;
+}
+
+function sourceGameRawIdFromConfig(sourceConfig: GameProfileSourceConfig | null | undefined, profileId: string, source: ModSourceKind, fallback?: string | null) {
+  const configured = source === "modworkshop"
+    ? sourceConfig?.modworkshopGameId || sourceConfig?.modworkshopSlug
+    : source === "nexus"
+      ? sourceConfig?.nexusGameId || sourceConfig?.nexusDomain
+      : null;
+  const raw = String(configured ?? fallback ?? profileId ?? "").trim();
+  return raw || null;
+}
+function parseManualSourceUrl(input: string): { source: ModSourceKind; modId: string; pageUrl: string; gameDomain?: string | null } | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname;
+
+    if (host.includes("modworkshop.net")) {
+      const match = path.match(/\/mod\/(\d+)/i) ?? path.match(/\/mods?\/(\d+)/i);
+      if (match?.[1]) return { source: "modworkshop", modId: match[1], pageUrl: url.toString() };
+    }
+
+    if (host.includes("nexusmods.com")) {
+      const withDomain = path.match(/^\/([^/?#]+)\/mods\/(\d+)/i);
+      const withoutDomain = path.match(/^\/mods\/(\d+)/i);
+      const modId = withDomain?.[2] ?? withoutDomain?.[1];
+      const gameDomain = withDomain?.[1] ?? null;
+      if (modId) return { source: "nexus", modId, pageUrl: url.toString(), gameDomain };
+    }
+  } catch {
+    const modworkshop = trimmed.match(/modworkshop\.net\/mod\/(\d+)/i);
+    if (modworkshop?.[1]) return { source: "modworkshop", modId: modworkshop[1], pageUrl: `https://modworkshop.net/mod/${modworkshop[1]}` };
+
+    const nexus = trimmed.match(/nexusmods\.com\/([^/?#]+)\/mods\/(\d+)/i);
+    if (nexus?.[1] && nexus?.[2]) return { source: "nexus", modId: nexus[2], pageUrl: `https://www.nexusmods.com/${nexus[1]}/mods/${nexus[2]}`, gameDomain: nexus[1] };
+  }
+
+  return null;
+}
+
+function sourceMatchPayloadFromDetail(detail: SourceModDetail, pageUrl: string, sourceConfig: GameProfileSourceConfig | null | undefined, profileId: string): ManualSourceMatchPayload {
+  const primaryFile = Array.isArray(detail.files) ? detail.files[0] : null;
+
+  return {
+    source: detail.source,
+    sourceId: detail.sourceId,
+    fileId: primaryFile?.id ?? null,
+    gameId: sourceGameRawIdFromConfig(sourceConfig, profileId, detail.source, detail.gameId ?? detail.nexus?.gameId),
+    modName: detail.name,
+    fileName: primaryFile?.name ?? detail.name,
+    version: detail.version ?? primaryFile?.version ?? null,
+    author: detail.author ?? null,
+    thumbnailUrl: detail.thumbnailUrl ?? detail.bannerUrl ?? null,
+    pageUrl: detail.pageUrl ?? pageUrl,
+    sha256: null,
+    confidence: 100,
+    confidenceLevel: "manual",
+    matchKind: "manual",
+    reason: "User-confirmed manual source match from pasted URL.",
+  };
+}
+
+function manualMatchEditable(match: InstalledSourceMatch | null | undefined) {
+  if (!match?.receiptId) return false;
+  return ["unknown", "suggestion", "filename-suggestion", "proof-filename", "source-id", "manual", "manual-cleared", "skipped"].includes(match.matchKind)
+    || match.ownershipClassification === "unknown_local"
+    || (match.source as string) === "local";
+}
+interface InstalledHydrationDiagnostics {
+  checked: number;
+  hydratedCount: number;
+  missingCount: number;
+  thumbnailSource: string;
+  metadataSource: string;
+  missingReason: string;
+  running: boolean;
+}
 interface InstalledStateFile {
   relativePath: string;
   location: string;
@@ -188,9 +339,14 @@ interface InstalledStateRecord {
   sourceFileCategory?: string | null;
   sourceFileUploadedAt?: string | null;
   sourceFileVersion?: string | null;
+  matchKind?: string | null;
+  matchConfidence?: number | null;
+  matchReason?: string | null;
   pageUrl?: string | null;
   thumbnailUrl?: string | null;
   bannerUrl?: string | null;
+  notes?: string | null;
+  tags?: string[];
   enabled: boolean;
   installedAtUnix?: number | null;
   files: InstalledStateFile[];
@@ -200,12 +356,14 @@ function sourceSummaryFromInstalledState(record: InstalledStateRecord): SourceMo
   if (!record.source || !record.sourceModId && !record.id) return null;
 
   const sourceId = record.sourceModId ?? record.id;
+  const recordMatchKind = record.matchKind ?? (record.receiptId ? "receipt" : "unknown");
+  const tsukiOwnedRecord = (["receipt", "receipt-hash", "manual", "user-confirmed", "user-confirmed-sha256"].includes(recordMatchKind)) && Boolean(record.receiptId);
   const fileAliases = (record.files ?? [])
     .map((file) => file.fileName)
     .filter((fileName) => fileName && fileName.trim().length > 0);
   const receiptTags = [
     "PAYDAY 3",
-    "Tsuki-installed",
+    tsukiOwnedRecord ? "Tsuki-installed" : "Local",
     record.enabled ? "Enabled" : "Disabled",
     record.location,
     record.fileType,
@@ -227,7 +385,12 @@ function sourceSummaryFromInstalledState(record: InstalledStateRecord): SourceMo
     updatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
     downloads: null,
     likes: null,
-    shortDescription: [`Installed by Tsuki receipt ${record.receiptId ?? record.uid}`, record.enabled ? "Enabled" : "Disabled", ...fileAliases].join(" "),
+    views: null,
+    shortDescription: [
+      tsukiOwnedRecord ? `Installed by Tsuki receipt ${record.receiptId ?? record.uid}` : "Local mod",
+      record.enabled ? "Enabled" : "Disabled",
+      ...fileAliases,
+    ].join(" "),
     tags: [...new Set(receiptTags.filter(Boolean) as string[])],
   };
 }
@@ -236,29 +399,49 @@ function receiptMatchFromInstalledState(record: InstalledStateRecord): Installed
   if (!record.source || !record.sourceModId && !record.id) return null;
 
   const sourceId = record.sourceModId ?? record.id;
+  const files = record.files ?? [];
+  const hasTrackedFiles = files.length > 0;
+  const hasLiveFile = files.some((file) => file.live);
+  const disabledPresent = hasLiveFile && record.enabled === false;
+  const missing = hasTrackedFiles && !hasLiveFile && !disabledPresent;
   const matchedFiles = [...new Set([
     record.filename,
     ...(record.files ?? []).flatMap((file) => [file.fileName, file.relativePath]),
   ].filter((value): value is string => Boolean(value && value.trim().length > 0)))];
 
+  const matchKind = record.matchKind ?? "receipt";
+  const tsukiOwnedRecord = (["receipt", "receipt-hash", "manual", "user-confirmed", "user-confirmed-sha256"].includes(matchKind)) && Boolean(record.receiptId);
+
   return {
     source: record.source as ModSourceKind,
     sourceId,
-    installed: true,
-    enabled: record.enabled,
+    installed: !missing,
+    missing,
+    broken: missing,
+    enabled: missing ? false : record.enabled,
     updateAvailable: false,
-    confidence: 100,
-    reason: `Tsuki install receipt/state record ${record.receiptId ?? record.uid}`,
+    confidence: record.matchConfidence ?? 100,
+    ownershipClassification: tsukiOwnedRecord ? "tsuki_installed" : (matchKind === "unknown" ? "unknown_local" : "local_detected"),
+    reason: missing ? "Tracked receipt exists, but all files are missing from disk." : (disabledPresent ? "Tracked receipt files are disabled in Tsuki storage." : (record.matchReason ?? `Tsuki install receipt/state record ${record.receiptId ?? record.uid}`)),
     matchedFiles,
+    receiptId: record.receiptId ?? record.uid,
     installedModifiedUnix: record.installedAtUnix ?? null,
     sourceUpdatedAt: record.installedAtUnix ? String(record.installedAtUnix) : null,
     sourceUpdatedUnix: record.installedAtUnix ?? null,
-    matchKind: "receipt",
+    matchKind,
     sourceFileId: record.sourceFileId ?? record.fileId ?? null,
     sourceFileName: record.sourceFileName ?? record.filename ?? null,
     sourceFileCategory: record.sourceFileCategory ?? null,
     sourceFileUploadedAt: record.sourceFileUploadedAt ?? null,
     sourceFileVersion: record.sourceFileVersion ?? record.version ?? null,
+    displayName: record.name ?? record.filename ?? null,
+    author: record.author ?? null,
+    thumbnailUrl: record.thumbnailUrl ?? null,
+    bannerUrl: record.bannerUrl ?? null,
+    pageUrl: record.pageUrl ?? null,
+    notes: record.notes ?? null,
+    thumbnailSource: record.thumbnailUrl || record.bannerUrl ? "receipt" : "fallback",
+    thumbnailMissingReason: record.thumbnailUrl || record.bannerUrl ? null : "Installed-state record has no thumbnail or banner URL.",
   };
 }
 
@@ -270,11 +453,13 @@ interface CachedPairState {
 }
 
 interface InstalledSessionCache {
+  profileId: string;
   savedAt: number;
   invalidatedAt: number;
   scanResult: PakScanResult | null;
   sourceMods: SourceModSummary[];
   matches: Record<string, InstalledSourceMatch>;
+  installedState: InstalledStateRecord[];
   status: string;
   pairingStatus: string;
   sourceCacheAge: string;
@@ -286,29 +471,40 @@ const INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY = "tsuki-installed-session-cach
 const INSTALLED_SESSION_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 let installedSessionCache: InstalledSessionCache | null = null;
 
-function installedSessionInvalidatedAt() {
-  const raw = Number(window.sessionStorage.getItem(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY) ?? "0");
+function installedSessionInvalidatedAt(profileId: string) {
+  const raw = Number(window.sessionStorage.getItem(profileLocalStorageKey(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, profileId)) ?? "0");
   return Number.isFinite(raw) ? raw : 0;
 }
 
-function readInstalledSessionCache(): InstalledSessionCache | null {
+function readInstalledSessionCache(profileId: string): InstalledSessionCache | null {
   if (!installedSessionCache) return null;
+  if (installedSessionCache.profileId !== profileId) return null;
   if (Date.now() - installedSessionCache.savedAt > INSTALLED_SESSION_CACHE_MAX_AGE_MS) return null;
-  if (installedSessionCache.invalidatedAt < installedSessionInvalidatedAt()) return null;
+  if (installedSessionCache.invalidatedAt < installedSessionInvalidatedAt(profileId)) return null;
   if (!installedSessionCache.scanResult) return null;
   return installedSessionCache;
 }
 
-function writeInstalledSessionCache(cache: Omit<InstalledSessionCache, "savedAt" | "invalidatedAt">) {
+function writeInstalledSessionCache(profileId: string, cache: Omit<InstalledSessionCache, "profileId" | "savedAt" | "invalidatedAt">) {
   installedSessionCache = {
     ...cache,
+    profileId,
     savedAt: Date.now(),
-    invalidatedAt: installedSessionInvalidatedAt(),
+    invalidatedAt: installedSessionInvalidatedAt(profileId),
   };
 }
 
-function clearInstalledSessionCache() {
-  installedSessionCache = null;
+function clearInstalledSessionCache(profileId?: string) {
+  if (!profileId || installedSessionCache?.profileId === profileId) installedSessionCache = null;
+}
+
+function invalidateInstalledSessionCache(profileId?: string) {
+  clearInstalledSessionCache(profileId);
+  try {
+    window.sessionStorage.setItem(profileLocalStorageKey(INSTALLED_SESSION_CACHE_INVALIDATED_AT_KEY, profileId ?? "global"), String(Date.now()));
+  } catch {
+    // Session cache is optional.
+  }
 }
 
 function installedFileSignature(files: PakModFile[]) {
@@ -322,12 +518,12 @@ function stablePairMatches(matches: Record<string, InstalledSourceMatch>) {
   return Object.fromEntries(
     Object.entries(matches).filter(([, match]) => {
       if (!match.installed) return false;
-      return ["receipt", "receipt-hash", "source-id", "proof-filename"].includes(match.matchKind);
+      return ["receipt", "receipt-hash", "sha256", "manifest", "persistent", "manual", "user-confirmed", "user-confirmed-sha256"].includes(match.matchKind);
     }),
   ) as Record<string, InstalledSourceMatch>;
 }
 
-function savePairState(sourceMods: SourceModSummary[], matches: Record<string, InstalledSourceMatch>, files: PakModFile[]) {
+function savePairState(profileId: string, sourceMods: SourceModSummary[], matches: Record<string, InstalledSourceMatch>, files: PakModFile[]) {
   try {
     const payload: CachedPairState = {
       savedAt: Date.now(),
@@ -336,15 +532,15 @@ function savePairState(sourceMods: SourceModSummary[], matches: Record<string, I
       matches: stablePairMatches(matches),
     };
 
-    window.localStorage.setItem(PAIR_STATE_CACHE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(profileLocalStorageKey(PAIR_STATE_CACHE_KEY, profileId), JSON.stringify(payload));
   } catch {
     // Optional cache.
   }
 }
 
-function loadPairState(files: PakModFile[]): CachedPairState | null {
+function loadPairState(profileId: string, files: PakModFile[]): CachedPairState | null {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(PAIR_STATE_CACHE_KEY) ?? "{}") as CachedPairState;
+    const parsed = JSON.parse(window.localStorage.getItem(profileLocalStorageKey(PAIR_STATE_CACHE_KEY, profileId)) ?? "{}") as CachedPairState;
 
     if (!Array.isArray(parsed.sourceMods) || !parsed.matches) return null;
 
@@ -407,6 +603,62 @@ interface RuntimeLockStatus {
   toggleLocked: boolean;
   message: string;
 }
+type CrashTestAnswer = "yes" | "no" | "unsure";
+
+interface CrashTestState {
+  active: boolean;
+  originalEnabled: Record<string, boolean>;
+  suspects: string[];
+  currentGroup: string[];
+  likelySuspects: string[];
+  status: string;
+  history: string[];
+  totalEnabled: number;
+  disabledGroupCount: number;
+  round: number;
+  excludedCount: number;
+  testableCount: number;
+  attemptedDisables: number;
+  successfulDisables: number;
+  failedDisables: number;
+  skippedMods: string[];
+  disabledStoragePaths: string[];
+  testableKeys: string[];
+  testedGroups: string[];
+  lastResult: string | null;
+  nextAction: string;
+  noProgressReason: string | null;
+}
+
+interface CrashTestCandidate {
+  key: string;
+  title: string;
+  enabled: boolean;
+  excluded: boolean;
+  exclusionReason: string | null;
+  autoExcludeReason: string | null;
+  manuallyOverridden: boolean;
+  item?: PairedInstalledMod;
+  group?: InstalledGroup;
+}
+
+interface CrashToggleResult {
+  key: string;
+  title: string;
+  attempted: boolean;
+  success: boolean;
+  skippedReason?: string;
+  error?: string;
+  message?: string;
+  disabledStoragePaths?: string[];
+  batchSize?: number;
+  fileCount?: number;
+  elapsedMs?: number;
+}
+interface InstalledSourceIndexIdentity {
+  sourceMod: SourceModSummary;
+  matchInfo: InstalledSourceMatch;
+}
 
 interface PairedInstalledMod {
   sourceMod: SourceModSummary;
@@ -416,29 +668,53 @@ interface PairedInstalledMod {
 }
 
 function sourceLabel(source: string) {
+  if (source === "local") return "Local";
   return source === "modworkshop" ? "ModWorkshop" : "Nexus";
 }
 
-function inferAuthorFromModName(name?: string | null) {
-  const value = String(name ?? "").trim();
-  const match = value.match(/\s+by\s+([^()\[\]{}|•·]+)$/i);
-  const author = match?.[1]?.trim();
-  return author && author.length <= 48 ? author : null;
+function matchKindLabel(matchKind?: string | null) {
+  if (matchKind === "receipt") return "Matched by receipt";
+  if (matchKind === "receipt-hash") return "Matched by receipt hash";
+  if (matchKind === "sha256") return "Matched by SHA256";
+  if (matchKind === "manifest") return "Matched by archive manifest";
+  if (matchKind === "manual") return "Manual match";
+  if (matchKind === "manual-cleared") return "Manual match cleared";
+  if (matchKind === "unknown") return "Unknown Mod";
+  if (matchKind === "source-id") return "Matched by source ID";
+  if (matchKind === "proof-filename") return "Matched by filename";
+  if (matchKind === "filename-suggestion") return "Filename suggestion";
+  if (matchKind === "sha256-conflict") return "SHA256 needs review";
+  if (matchKind === "suggestion") return "Fuzzy match";
+  return matchKind ? `Match: ${matchKind}` : null;
+}
+
+function pairingReportText(matches: InstalledSourceMatch[], foundMods: number) {
+  const installed = matches.filter((match) => match.installed);
+  const receiptMatches = installed.filter((match) => match.matchKind === "receipt" || match.matchKind === "receipt-hash").length;
+  const exactHashMatches = installed.filter((match) => match.matchKind === "sha256").length;
+  const archiveManifestMatches = installed.filter((match) => match.matchKind === "manifest").length;
+  const filenameMatches = matches.filter((match) => match.matchKind === "filename-suggestion" || match.matchKind === "source-id" || match.matchKind === "proof-filename").length;
+  const fuzzyFilenameMatches = matches.filter((match) => match.matchKind === "suggestion").length;
+  const unknownMods = Math.max(0, foundMods - receiptMatches - exactHashMatches - archiveManifestMatches - filenameMatches);
+
+  return `Found Mods: ${foundMods}. Receipt Matches: ${receiptMatches}. Exact Hash Matches: ${exactHashMatches}. Archive Manifest Matches: ${archiveManifestMatches}. Filename Matches: ${filenameMatches}. Fuzzy Filename Matches: ${fuzzyFilenameMatches}. Unknown Mods: ${unknownMods}.`;
+}
+
+function isReceiptBackedInstalledItem(item: PairedInstalledMod) {
+  return item.match.ownershipClassification === "tsuki_installed"
+    || item.match.ownershipClassification === "tsuki_imported";
 }
 
 function displayAuthor(mod: SourceModSummary | SourceModDetail) {
-  return (mod.author && mod.author.trim()) || inferAuthorFromModName(mod.name) || null;
+  return displaySourceAuthor(mod);
 }
 
 function displayModTitle(mod: SourceModSummary | SourceModDetail) {
-  const author = displayAuthor(mod);
-  if (!author) return mod.name;
-  const escapedAuthor = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return mod.name.replace(new RegExp(`\\s+by\\s+${escapedAuthor}\\s*$`, "i"), "").trim() || mod.name;
+  return displaySourceTitle(mod);
 }
 
 function sourceAccent(source: string) {
-  return source === "modworkshop" ? "MW" : "NX";
+  return installedSourceFallbackLabel(source);
 }
 
 function sourceKey(mod: SourceModSummary) {
@@ -450,24 +726,87 @@ function sourceImageUrl(mod?: SourceModSummary | SourceModDetail | null) {
 }
 
 function mergeSourceSummary(existing: SourceModSummary | undefined, incoming: SourceModSummary) {
-  if (!existing) return incoming;
+  if (!existing) {
+    rememberSourceAuthorMetadata(incoming);
+    return applyKnownSourceAuthor(incoming);
+  }
 
-  return {
+  const merged = {
     ...existing,
     ...incoming,
     thumbnailUrl: incoming.thumbnailUrl || existing.thumbnailUrl,
     bannerUrl: incoming.bannerUrl || existing.bannerUrl,
     author: incoming.author || existing.author,
+    authorUsername: incoming.authorUsername || existing.authorUsername,
+    authorUserId: incoming.authorUserId || existing.authorUserId,
+    authorProfileUrl: incoming.authorProfileUrl || existing.authorProfileUrl,
+    authorAvatarUrl: incoming.authorAvatarUrl || existing.authorAvatarUrl,
     version: incoming.version || existing.version,
     pageUrl: incoming.pageUrl || existing.pageUrl,
     updatedAt: incoming.updatedAt || existing.updatedAt,
+    downloads: incoming.downloads ?? existing.downloads,
+    likes: incoming.likes ?? existing.likes,
+    views: incoming.views ?? existing.views,
     shortDescription: incoming.shortDescription || existing.shortDescription,
     tags: [...new Set([...(existing.tags ?? []), ...(incoming.tags ?? [])])],
   };
+
+  rememberSourceAuthorMetadata(merged);
+  return applyKnownSourceAuthor(merged);
 }
 
 
 
+function metadataAuthorAvailable(author?: string | null) {
+  const value = String(author ?? "").trim();
+  return Boolean(value && !/^unknown author$/i.test(value) && !/^community mod$/i.test(value));
+}
+
+function summaryNeedsInstalledHydration(summary: SourceModSummary) {
+  return !sourceImageUrl(summary) || !metadataAuthorAvailable(summary.author) || !summary.pageUrl;
+}
+
+function summaryAddsHydrationValue(existing: SourceModSummary | undefined, incoming: SourceModSummary) {
+  if (!existing) return true;
+  if (!sourceImageUrl(existing) && sourceImageUrl(incoming)) return true;
+  if (!metadataAuthorAvailable(existing.author) && metadataAuthorAvailable(incoming.author)) return true;
+  if (!existing.pageUrl && incoming.pageUrl) return true;
+  if (!existing.version && incoming.version) return true;
+  if (!existing.updatedAt && incoming.updatedAt) return true;
+  if ((incoming.tags ?? []).some((tag) => !(existing.tags ?? []).some((existingTag) => existingTag.toLowerCase() === tag.toLowerCase()))) return true;
+  return false;
+}
+
+function installedSummaryFromMatchMetadata(item: PairedInstalledMod): SourceModSummary {
+  const match = item.match;
+  return applyKnownSourceAuthor({
+    ...item.sourceMod,
+    name: match.displayName || item.sourceMod.name,
+    author: match.author || item.sourceMod.author,
+    authorUsername: item.sourceMod.authorUsername,
+    authorUserId: item.sourceMod.authorUserId,
+    authorProfileUrl: item.sourceMod.authorProfileUrl,
+    authorAvatarUrl: item.sourceMod.authorAvatarUrl,
+    version: match.sourceFileVersion || item.sourceMod.version,
+    thumbnailUrl: match.thumbnailUrl || item.sourceMod.thumbnailUrl,
+    bannerUrl: match.bannerUrl || item.sourceMod.bannerUrl,
+    pageUrl: match.pageUrl || item.sourceMod.pageUrl,
+    updatedAt: match.sourceUpdatedAt || item.sourceMod.updatedAt,
+    tags: [...new Set([
+      ...(item.sourceMod.tags ?? []),
+      match.sourceFileCategory ?? null,
+      match.sourceFileName ?? null,
+      matchKindLabel(match.matchKind),
+    ].filter(Boolean) as string[])],
+  });
+}
+
+function installedHydrationMissingReason(summary: SourceModSummary) {
+  if (!sourceImageUrl(summary)) return "No thumbnail or banner URL in receipt, Source Index, cache, or live detail.";
+  if (!metadataAuthorAvailable(summary.author)) return "Author metadata unavailable from receipt, Source Index, cache, or live detail.";
+  if (!summary.pageUrl) return "Source page URL unavailable from receipt, Source Index, cache, or live detail.";
+  return "Metadata complete.";
+}
 function yieldToUi(ms = 25) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -507,7 +846,7 @@ function shouldKeepExistingPairMatch(existing: InstalledSourceMatch | undefined,
   if (!existing?.installed) return false;
   if (incoming.installed) return false;
 
-  return ["receipt", "receipt-hash", "source-id", "proof-filename"].includes(existing.matchKind);
+  return ["receipt", "receipt-hash", "sha256", "manifest", "persistent", "manual", "user-confirmed", "user-confirmed-sha256"].includes(existing.matchKind);
 }
 
 function mergePairResultsSafely(
@@ -541,7 +880,7 @@ function pruneNumericMismatchPairMatches(
 
   for (const [key, match] of Object.entries(previous)) {
     const mod = modMap.get(key);
-    const isProofPair = match.installed && ["proof-filename", "source-id"].includes(match.matchKind);
+    const isProofPair = match.installed && ["sha256", "manifest", "persistent"].includes(match.matchKind);
 
     if (mod && isProofPair && sourceNumbersConflictFiles(mod, match.matchedFiles ?? [])) {
       removed += 1;
@@ -735,11 +1074,15 @@ function sourceSummaryFromDetail(detail: SourceModDetail): SourceModSummary {
   const tags = [...new Set([...(detail.tags ?? []), ...fileNames])];
   const fileAliasText = fileNames.slice(0, 12).join(" ");
 
-  return {
+  const summary = applyKnownSourceAuthor({
     source: detail.source,
     sourceId: detail.sourceId,
     name: detail.name,
     author: detail.author,
+    authorUsername: detail.authorUsername,
+    authorUserId: detail.authorUserId,
+    authorProfileUrl: detail.authorProfileUrl,
+    authorAvatarUrl: detail.authorAvatarUrl,
     version: detail.version,
     thumbnailUrl: detail.thumbnailUrl,
     bannerUrl: detail.bannerUrl,
@@ -747,9 +1090,13 @@ function sourceSummaryFromDetail(detail: SourceModDetail): SourceModSummary {
     updatedAt: detail.updatedAt,
     downloads: detail.downloads,
     likes: detail.likes,
+    views: detail.views,
     shortDescription: [detail.shortDescription, fileAliasText].filter(Boolean).join(" "),
     tags,
-  };
+  });
+
+  rememberSourceAuthorMetadata(summary);
+  return summary;
 }
 
 function cacheAge(savedAt?: number) {
@@ -762,13 +1109,27 @@ function cacheAge(savedAt?: number) {
   return `${Math.floor(minutes / 60)}h`;
 }
 
+function installedUpdatedLabel(match: InstalledSourceMatch) {
+  const raw = Number(match.sourceUpdatedUnix ?? match.installedModifiedUnix ?? 0);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+
+  const timestamp = raw < 4_000_000_000 ? raw * 1000 : raw;
+  const seconds = Math.max(1, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "Updated just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Updated ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Updated ${hours}h ago`;
+  return `Updated ${Math.floor(hours / 24)}d ago`;
+}
+
 function cachedSourcePriority(mod: SourceModSummary) {
   const hasImage = mod.thumbnailUrl || mod.bannerUrl ? 1000 : 0;
   const updated = Number(mod.updatedAt ?? 0) || 0;
   return hasImage + updated;
 }
 
-function loadSourceModsFromCache(limit = 550) {
+function loadSourceModsFromCache(profileId: string, limit = 550) {
   const mods = new Map<string, SourceModSummary>();
   let newestCache = 0;
   let cacheBuckets = 0;
@@ -776,10 +1137,11 @@ function loadSourceModsFromCache(limit = 550) {
   for (let index = 0; index < window.localStorage.length; index += 1) {
     const key = window.localStorage.key(index);
     if (!key?.startsWith("tsuki-source-cache:")) continue;
+    if (!sourceCacheKeyBelongsToProfile(key, profileId)) continue;
 
     // Ignore older auto-installed source indexes. They may contain experimental aliases
     // from previous builds that caused false positives. Normal Browse caches still load.
-    if (key.includes(":installed:index") && key !== INSTALLED_ENRICH_CACHE_KEY) continue;
+    if (key.includes(":installed:index") && key !== installedEnrichCacheKey(profileId)) continue;
 
     try {
       const parsed = JSON.parse(window.localStorage.getItem(key) ?? "{}") as CachedSourceMods;
@@ -798,7 +1160,7 @@ function loadSourceModsFromCache(limit = 550) {
   }
 
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(PAIR_STATE_CACHE_KEY) ?? "{}") as CachedPairState;
+    const parsed = JSON.parse(window.localStorage.getItem(profileLocalStorageKey(PAIR_STATE_CACHE_KEY, profileId)) ?? "{}") as CachedPairState;
 
     if (Array.isArray(parsed.sourceMods)) {
       cacheBuckets += 1;
@@ -1045,23 +1407,23 @@ function directPairMatchesFromGroups(
   const matches: InstalledSourceMatch[] = [];
 
   for (const item of grouped.values()) {
-    const files = item.groups.flatMap((group) => group.files.map((file) => file.fileName));
     const newestModified = Math.max(...item.groups.map((group) => group.modifiedUnix).filter(Boolean), 0);
     const enabled = item.groups.some((group) => group.enabled);
 
     matches.push({
       source: item.mod.source,
       sourceId: item.mod.sourceId,
-      installed: true,
+      installed: false,
       enabled,
       updateAvailable: false,
-      confidence: item.score,
-      reason: `${item.reason}; frontend direct local proof grouped ${files.length} installed file(s)`,
-      matchedFiles: files,
+      confidence: Math.min(item.score, 85),
+      ownershipClassification: "local_detected",
+      reason: `${item.reason}; filename/stem similarity is a suggestion only and requires user confirmation`,
+      matchedFiles: [],
       installedModifiedUnix: newestModified || null,
       sourceUpdatedAt: item.mod.updatedAt ?? null,
       sourceUpdatedUnix: Number(item.mod.updatedAt) || null,
-      matchKind: "proof-filename",
+      matchKind: "filename-suggestion",
     });
   }
 
@@ -1071,7 +1433,7 @@ function directPairMatchesFromGroups(
 
 
 
-function pairFilesFromMatch(match: InstalledSourceMatch, groups: InstalledGroup[]) {
+function pairFilesFromMatch(match: InstalledSourceMatch, groups: InstalledGroup[], sourceMod?: SourceModSummary) {
   const matched = new Set(match.matchedFiles.flatMap(fileNameKeys));
 
   const directGroups = groups.filter((group) => {
@@ -1086,6 +1448,12 @@ function pairFilesFromMatch(match: InstalledSourceMatch, groups: InstalledGroup[
   }
 
   if (directGroups.length === 1) return directGroups[0];
+
+  if (sourceMod && strongInstalledMatch(match)) {
+    const win64Groups = groups.filter((group) => strongMatchClaimsWin64Group(sourceMod, match, group));
+    if (win64Groups.length > 1) return mergeInstalledGroups(win64Groups, `${match.source}-${match.sourceId}:win64`);
+    if (win64Groups.length === 1) return win64Groups[0];
+  }
 
   const compactMatched = match.matchedFiles.map((file) => compact(normalizeInstalledName(file)));
   const fuzzyGroups = groups.filter((group) => {
@@ -1108,9 +1476,236 @@ function pairingGuardKey(sourceMod: SourceModSummary, match: InstalledSourceMatc
 }
 
 function itemEnabled(item: PairedInstalledMod) {
-  if (item.match.matchKind === "receipt") return item.match.enabled !== false;
+  if (item.match.missing || item.match.broken) return false;
+  if (isReceiptBackedInstalledItem(item) || strongInstalledMatch(item.match)) return item.match.enabled !== false;
   if (item.group) return item.group.enabled;
-  return item.files.some((file) => file.enabled) ?? true;
+  return item.files.length > 0 ? item.files.some((file) => file.enabled) : item.match.enabled !== false;
+}
+
+function installedPathLooksWin64OrUe4ss(value?: string | null) {
+  const text = String(value ?? "").replace(/\//g, "\\").toLowerCase();
+  return text.includes("\\binaries\\win64\\mods\\")
+    || text.includes("\\binaries\\win64\\disabled_ue4ss_mods\\")
+    || text.includes("\\binaries\\win64\\ue4ss")
+    || text.includes("\\binaries\\win64\\") && (
+      text.includes("ue4ss")
+      || text.includes("modloader")
+      || text.includes("mod_loader")
+      || text.includes("logicmods")
+      || text.includes("moolah")
+      || text.endsWith("\\xinput1_3.dll")
+      || text.endsWith("\\xinput1_4.dll")
+      || text.endsWith("\\dwmapi.dll")
+      || text.endsWith("\\dsound.dll")
+      || text.endsWith("\\winhttp.dll")
+      || text.endsWith("\\version.dll")
+      || text.endsWith("\\mods.txt")
+      || text.endsWith("\\enabled.txt")
+    );
+}
+
+function strongInstalledMatch(match: InstalledSourceMatch) {
+  return Boolean(match.installed && ["receipt", "receipt-hash", "sha256", "manifest", "persistent", "manual", "user-confirmed", "user-confirmed-sha256"].includes(match.matchKind));
+}
+
+function pluginIdentityKey(value?: string | null) {
+  return compact(normalizeInstalledName(String(value ?? "").replace(/\.[a-z0-9]{2,8}$/i, "")));
+}
+
+function pluginRootKeyFromPath(value?: string | null) {
+  const parts = String(value ?? "").replace(/\//g, "\\").split("\\").filter(Boolean);
+  const lower = parts.map((part) => part.toLowerCase());
+  const win64 = lower.lastIndexOf("win64");
+  if (win64 < 0) return null;
+
+  const mods = lower.indexOf("mods", win64 + 1);
+  if (mods >= 0 && parts[mods + 1]) return pluginIdentityKey(parts[mods + 1]);
+
+  const disabled = lower.indexOf("disabled_ue4ss_mods", win64 + 1);
+  if (disabled >= 0 && parts[disabled + 1]) return pluginIdentityKey(parts[disabled + 1]);
+
+  const ue4ss = lower.findIndex((part, index) => index > win64 && part.includes("ue4ss"));
+  if (ue4ss >= 0 && parts[ue4ss + 1]) return pluginIdentityKey(parts[ue4ss + 1]);
+
+  const last = parts[parts.length - 1] ?? "";
+  const parent = parts[parts.length - 2] ?? "";
+  const text = `${parent} ${last}`.toLowerCase();
+  if (text.includes("ue4ss") || text.includes("modloader") || text.includes("logicmods") || text.includes("moolah")) {
+    return pluginIdentityKey(parent || last);
+  }
+
+  return null;
+}
+
+function win64GroupIdentityKeys(group: InstalledGroup) {
+  const keys = new Set<string>();
+
+  for (const file of group.files) {
+    const root = pluginRootKeyFromPath(file.fullPath) ?? pluginRootKeyFromPath(file.fileName);
+    if (root && root.length >= 3) keys.add(root);
+  }
+
+  if (keys.size === 0 && group.files.some((file) => installedPathLooksWin64OrUe4ss(file.fullPath) || installedPathLooksWin64OrUe4ss(file.fileName))) {
+    const fallback = pluginIdentityKey(group.label || group.key);
+    if (fallback.length >= 3) keys.add(fallback);
+  }
+
+  return keys;
+}
+
+function looseWin64GroupIdentityKeys(group: InstalledGroup) {
+  const looksWin64 = group.files.some((file) => installedPathLooksWin64OrUe4ss(file.fullPath) || installedPathLooksWin64OrUe4ss(file.fileName));
+  const keys = win64GroupIdentityKeys(group);
+  if (!looksWin64) return keys;
+
+  const values = [
+    group.key,
+    group.label,
+    ...group.files.flatMap((file) => {
+      const pathParts = String(file.fullPath ?? "").replace(/\//g, "\\").split("\\").filter(Boolean);
+      const fileName = enabledFileName(file.fileName);
+      const pathFileName = pathParts[pathParts.length - 1] ?? "";
+      const parentFolder = pathParts[pathParts.length - 2] ?? "";
+
+      return [
+        fileName,
+        fileName.replace(/\.[a-z0-9]{2,8}$/i, ""),
+        pathFileName,
+        pathFileName.replace(/\.[a-z0-9]{2,8}$/i, ""),
+        parentFolder,
+      ];
+    }),
+  ];
+
+  for (const value of values) {
+    const key = pluginIdentityKey(value);
+    if (key.length >= 3) keys.add(key);
+  }
+
+  return keys;
+}
+
+function sourceIdentityKeysForMatch(sourceMod: SourceModSummary, match: InstalledSourceMatch) {
+  const values = [
+    sourceMod.name,
+    sourceMod.sourceId,
+    match.sourceId,
+    match.sourceFileId ?? "",
+    match.sourceFileName ?? "",
+    match.displayName ?? "",
+    ...(match.matchedFiles ?? []),
+  ];
+
+  return values
+    .flatMap((value) => {
+      const raw = String(value ?? "");
+      return [
+        compact(normalizeInstalledName(raw)),
+        pluginIdentityKey(raw),
+      ];
+    })
+    .filter((value, index, all) => value.length >= 3 && all.indexOf(value) === index);
+}
+
+function strongMatchClaimsWin64Group(sourceMod: SourceModSummary, match: InstalledSourceMatch, group: InstalledGroup) {
+  if (!strongInstalledMatch(match)) return false;
+  const groupKeys = [...looseWin64GroupIdentityKeys(group)];
+  if (groupKeys.length === 0) return false;
+  if (sourceIdAppearsInGroup(sourceMod, group)) return true;
+
+  const sourceKeys = sourceIdentityKeysForMatch(sourceMod, match);
+  return groupKeys.some((groupKey) => sourceKeys.some((sourceKey) => (
+    sourceKey === groupKey
+    || sourceKey.includes(groupKey)
+    || groupKey.includes(sourceKey)
+  )));
+}
+
+function installedSurfaceLabel(item: PairedInstalledMod) {
+  if (sourceFileCategoryLooksWin64OrUe4ss(item.match.sourceFileCategory)) return "Win64/UE4SS";
+
+  const paths = [
+    ...(item.match.matchedFiles ?? []),
+    ...(item.group?.files ?? []).flatMap((file) => [file.fileName, file.fullPath]),
+  ];
+
+  return paths.some(installedPathLooksWin64OrUe4ss) ? "Win64/UE4SS" : null;
+}
+
+function groupLooksWin64OrUe4ss(group: InstalledGroup) {
+  return group.files.some((file) => installedPathLooksWin64OrUe4ss(file.fullPath) || installedPathLooksWin64OrUe4ss(file.fileName));
+}
+
+function installedPathLooksPakFamily(value?: string | null) {
+  const text = String(value ?? "").toLowerCase().split("?")[0];
+  return /\.(pak|ucas|utoc)(?:\.disabled)?$/i.test(text)
+    || text.includes(".pak.disabled")
+    || text.includes(".ucas.disabled")
+    || text.includes(".utoc.disabled");
+}
+
+function installedPathLooksDisabledStorage(value?: string | null) {
+  const text = String(value ?? "").replace(/\//g, "\\").toLowerCase();
+  return text.includes("\\disabled_ue4ss_mods\\")
+    || text.includes("\\disabled_pak_mods\\")
+    || text.includes("\\_local_matched\\")
+    || text.includes("tsuki_disabled")
+    || text.includes("tsuki-disabled")
+    || /\.disabled$/i.test(text);
+}
+
+function installedPathLooksManageableWin64(value?: string | null) {
+  const text = String(value ?? "").replace(/\//g, "\\").toLowerCase();
+  return installedPathLooksWin64OrUe4ss(value)
+    || text.includes("\\disabled_ue4ss_mods\\")
+    || text.includes("\\_local_matched\\")
+    || /\.(dll|lua|ini|json|txt)(?:\.disabled)?$/i.test(text);
+}
+
+function sourceFileCategoryLooksWin64OrUe4ss(category?: string | null) {
+  const text = String(category ?? "").toLowerCase();
+  return text.includes("ue4ss")
+    || text.includes("win64")
+    || text.includes("plugin")
+    || text.includes("dll")
+    || text.includes("lua");
+}
+
+function sourceFileCategoryLooksManageable(category?: string | null) {
+  const text = String(category ?? "").toLowerCase();
+  return text.includes("pak")
+    || text.includes("ue4ss")
+    || text.includes("win64")
+    || text.includes("plugin")
+    || text.includes("mod");
+}
+
+function itemHasManageableInstalledFiles(item: PairedInstalledMod) {
+  if (item.group) return true;
+  if (isReceiptBackedInstalledItem(item)) return true;
+  if (!strongInstalledMatch(item.match)) return false;
+
+  const matchedFiles = (item.match.matchedFiles ?? []).filter((value): value is string => Boolean(value && value.trim().length > 0));
+  if (matchedFiles.length === 0) return false;
+
+  const win64OrUe4ss = installedSurfaceLabel(item) === "Win64/UE4SS"
+    || sourceFileCategoryLooksWin64OrUe4ss(item.match.sourceFileCategory);
+  if (win64OrUe4ss) {
+    return matchedFiles.some(installedPathLooksManageableWin64)
+      || (item.match.enabled === false && sourceFileCategoryLooksManageable(item.match.sourceFileCategory));
+  }
+
+  if (matchedFiles.some(installedPathLooksPakFamily)) return true;
+
+  return item.match.enabled === false && sourceFileCategoryLooksManageable(item.match.sourceFileCategory);
+}
+
+function ownershipBadgeLabel(match: InstalledSourceMatch) {
+  if (match.missing || match.broken) return "Missing/Broken";
+  if (match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported") return "Installed by Tsuki";
+  if (match.ownershipClassification === "local_detected") return "Local detected";
+  if (match.ownershipClassification === "unknown_local") return "Unknown local";
+  return null;
 }
 
 function newestSourceFiles(files: SourceModFile[]) {
@@ -1182,34 +1777,6 @@ function cleanSourceDescription(text?: string | null) {
     .trim();
 }
 
-function descriptionParagraphs(text?: string | null) {
-  const cleaned = cleanSourceDescription(text);
-  if (!cleaned) return ["No description loaded."];
-  return cleaned.split(/\n{2,}/).map((line) => line.trim()).filter(Boolean).slice(0, 10);
-}
-
-function renderLinkedText(text: string, openUrl: (url?: string | null) => void) {
-  const parts: ReactNode[] = [];
-  const pattern = /<a\s+[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>(.*?)<\/a>|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<)]+)/gi;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
-    const url = match[1] || match[4] || match[5];
-    const label = (match[2] || match[3] || url).replace(/<[^>]+>/g, "").trim() || url;
-    parts.push(
-      <button className="inline-description-link" type="button" key={`${url}-${match.index}`} onClick={() => openUrl(url)}>
-        {label}
-      </button>,
-    );
-    lastIndex = pattern.lastIndex;
-  }
-
-  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
-  return parts.length ? parts : text;
-}
-
 function sourceFileTypeLabel(file: SourceModFile) {
   const name = file.name.toLowerCase();
   if (name.endsWith(".pak")) return "PAK";
@@ -1264,7 +1831,7 @@ function sourceFileMetaLine(file: SourceModFile) {
     file.sizeLabel ?? "Unknown size",
     typeof file.downloadCount === "number" ? `${file.downloadCount.toLocaleString()} downloads` : null,
     `Uploaded ${formatSourceFileDate(file.uploadedAt)}`,
-  ].join(" · ");
+  ].filter(Boolean).join(" - ");
 }
 
 type SourceFileBucket = "main" | "optional" | "old";
@@ -1435,9 +2002,6 @@ function reinstallPickerFiles(detail: SourceModDetail) {
     .flatMap(([bucket, label]) => groups[bucket].map((file) => ({ file, bucket, label })));
 }
 
-function limitList<T>(items: T[], limit: number) {
-  return items.length > limit ? items.slice(0, limit) : items;
-}
 
 function fileNameKey(value: string) {
   const parts = value.split(/[\\/]/).filter(Boolean);
@@ -1450,13 +2014,115 @@ function fileNameKeys(value: string) {
   return key === canonical ? [key] : [key, canonical];
 }
 
+function fileKeySetForPakFiles(files: PakModFile[]) {
+  const keys = new Set<string>();
+
+  for (const file of files) {
+    for (const key of fileNameKeys(file.fileName)) keys.add(key);
+    for (const key of fileNameKeys(file.fullPath)) keys.add(key);
+  }
+
+  return keys;
+}
+
+function recordMatchesSourceMatch(record: InstalledStateRecord, sourceMod: SourceModSummary, match: InstalledSourceMatch) {
+  if (match.receiptId && record.receiptId && record.receiptId === match.receiptId) return true;
+
+  const sourceMatches = record.source === sourceMod.source || record.source === match.source;
+  if (!sourceMatches) return false;
+
+  const sourceIds = [sourceMod.sourceId, match.sourceId].filter(Boolean).map((value) => String(value).toLowerCase());
+  const recordModIds = [record.sourceModId, record.id, record.uid].filter(Boolean).map((value) => String(value).toLowerCase());
+  if (sourceIds.some((id) => recordModIds.includes(id))) return true;
+
+  const matchFileIds = [match.sourceFileId, match.sourceFileName].filter(Boolean).map((value) => String(value).toLowerCase());
+  const recordFileIds = [record.sourceFileId, record.fileId, record.filename].filter(Boolean).map((value) => String(value).toLowerCase());
+  return matchFileIds.some((id) => recordFileIds.includes(id));
+}
+
+function installedStateFilesForMatch(match: InstalledSourceMatch, sourceMod: SourceModSummary, records: InstalledStateRecord[]) {
+  return records
+    .filter((record) => recordMatchesSourceMatch(record, sourceMod, match))
+    .flatMap((record) => (record.files ?? [])
+      .filter((file) => file.live !== false)
+      .flatMap((file) => [file.relativePath, file.fileName])
+      .concat(record.filename)
+      .filter((value): value is string => Boolean(value && value.trim().length > 0)));
+}
+
+function matchWithLocalFiles(match: InstalledSourceMatch, group: InstalledGroup | null, sourceMod: SourceModSummary, records: InstalledStateRecord[]) {
+  const matchedFiles = [...new Set([
+    ...(match.matchedFiles ?? []),
+    ...(group?.files ?? []).flatMap((file) => [file.fileName, file.fullPath]),
+    ...installedStateFilesForMatch(match, sourceMod, records),
+  ].filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+
+  if (matchedFiles.length === match.matchedFiles.length) return match;
+  return { ...match, matchedFiles };
+}
+
+function localIdentityTokensFromFile(file: PakModFile) {
+  const tokens = new Set<string>();
+  const paths = [file.fullPath, file.fileName].filter(Boolean);
+
+  for (const value of paths) {
+    const clean = enabledFileName(String(value)).replace(/\//g, "\\").toLowerCase();
+    if (clean) tokens.add(`path:${clean}`);
+    const root = pluginRootKeyFromPath(value);
+    if (root) tokens.add(`plugin:${root}`);
+  }
+
+  if (file.sha256) tokens.add(`sha:${file.sha256.toLowerCase()}`);
+  return tokens;
+}
+
+function localIdentityTokensFromPath(value: string) {
+  const tokens = new Set<string>();
+  const clean = enabledFileName(value).replace(/\//g, "\\").toLowerCase();
+  if (clean) tokens.add(`path:${clean}`);
+  const root = pluginRootKeyFromPath(value);
+  if (root) tokens.add(`plugin:${root}`);
+  return tokens;
+}
+
+function localIdentityTokensForGroup(group: InstalledGroup) {
+  const tokens = new Set<string>();
+  for (const file of group.files) {
+    for (const token of localIdentityTokensFromFile(file)) tokens.add(token);
+  }
+  return tokens;
+}
+
+function localIdentityTokensForPairedItem(item: PairedInstalledMod) {
+  const tokens = new Set<string>();
+  for (const file of item.files) {
+    for (const token of localIdentityTokensFromFile(file)) tokens.add(token);
+  }
+  for (const path of item.match.matchedFiles ?? []) {
+    for (const token of localIdentityTokensFromPath(path)) tokens.add(token);
+  }
+  if (strongInstalledMatch(item.match)) {
+    for (const key of sourceIdentityKeysForMatch(item.sourceMod, item.match)) {
+      tokens.add(`plugin:${key}`);
+    }
+  }
+  return tokens;
+}
+
+function groupConsumedByPairedIdentity(group: InstalledGroup, consumedTokens: Set<string>) {
+  for (const token of localIdentityTokensForGroup(group)) {
+    if (consumedTokens.has(token)) return true;
+  }
+  return false;
+}
+
 function installedFileChipLabel(value: string) {
   const parts = enabledFileName(value).split(/[\\/]/).filter(Boolean);
   const clean = parts.length > 0 ? parts[parts.length - 1] : enabledFileName(value);
   if (clean.length <= 16) return clean;
   const extension = clean.match(/\.[a-z0-9]{2,6}$/i)?.[0] ?? "";
   const body = extension ? clean.slice(0, -extension.length) : clean;
-  return `${body.slice(0, 8)}…${extension}`;
+  return `${body.slice(0, 8)}...${extension}`;
 }
 
 
@@ -1496,8 +2162,13 @@ function isPayday3SourceCandidate(mod: SourceModSummary) {
   return true;
 }
 
-function filterPayday3SourceMods(mods: SourceModSummary[]) {
-  return mods.filter(isPayday3SourceCandidate);
+function isProfileSourceCandidate(profileId: string, mod: SourceModSummary) {
+  if (profileId !== "builtin.payday3") return Boolean(mod?.source && mod?.sourceId && mod?.name);
+  return isPayday3SourceCandidate(mod);
+}
+
+function filterProfileSourceMods(profileId: string, mods: SourceModSummary[]) {
+  return mods.filter((mod) => isProfileSourceCandidate(profileId, mod));
 }
 
 function installedFileBaseName(value: string) {
@@ -1535,11 +2206,27 @@ function sortPaired(items: PairedInstalledMod[], sortMode: SortMode) {
 
 
 
-export function InstalledPage() {
-  const sessionCache = useMemo(() => readInstalledSessionCache(), []);
+interface InstalledPageProps {
+  currentGameProfile: GameProfile;
+  profileRuntime?: ActiveProfileRuntime | null;
+  profileSwitching?: boolean;
+}
+
+export function InstalledPage({ currentGameProfile, profileRuntime, profileSwitching = false }: InstalledPageProps) {
+  const profileId = currentGameProfile.profileId;
+  const runtimeSourceConfig = profileRuntime?.sourceConfig ?? currentGameProfile.sourceConfig ?? {};
+  const hasModWorkshopSource = Boolean(runtimeSourceConfig.modworkshopGameId || runtimeSourceConfig.modworkshopSlug);
+  const hasNexusSource = Boolean(runtimeSourceConfig.nexusDomain || runtimeSourceConfig.nexusGameId);
+  const nexusGameDomain = runtimeSourceConfig.nexusDomain ?? null;
+  const hasConfiguredSources = profileHasConfiguredSources(currentGameProfile) || hasModWorkshopSource || hasNexusSource || Boolean(runtimeSourceConfig.customBrowser);
+  const gameName = profileRuntime?.gameName || currentGameProfile.displayName || "Current game";
+  const modWorkshopGameKey = runtimeSourceConfig.modworkshopGameId || runtimeSourceConfig.modworkshopSlug || currentGameProfile.gameKey || profileId;
+  const runtimeReady = !profileSwitching && profileRuntime?.profileId === profileId;
+  const sessionCache = useMemo(() => readInstalledSessionCache(profileId), [profileId]);
   const [scanResult, setScanResult] = useState<PakScanResult | null>(() => sessionCache?.scanResult ?? null);
   const [sourceMods, setSourceMods] = useState<SourceModSummary[]>(() => sessionCache?.sourceMods ?? []);
   const [matches, setMatches] = useState<Record<string, InstalledSourceMatch>>(() => sessionCache?.matches ?? {});
+  const [installedState, setInstalledState] = useState<InstalledStateRecord[]>(() => sessionCache?.installedState ?? []);
   const [status, setStatus] = useState(() => sessionCache?.status ?? "Ready to scan installed mods.");
   const [runtimeLock, setRuntimeLock] = useState<RuntimeLockStatus | null>(() => sessionCache?.runtimeLock ?? null);
   const [pairingStatus, setPairingStatus] = useState(() => sessionCache?.pairingStatus ?? "Open Browse first so Tsuki has source cards to pair.");
@@ -1549,61 +2236,153 @@ export function InstalledPage() {
   const [view] = useState<InstalledView>("all");
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>("all");
+  const [renderLimit, setRenderLimit] = useState(48);
+  useEffect(() => { setRenderLimit(48); }, [profileId, searchQuery, sortMode, enabledFilter, view]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [enriching, setEnriching] = useState(false);
   const [selectedSourceMod, setSelectedSourceMod] = useState<SourceModDetail | null>(null);
   const [selectedSourceMatch, setSelectedSourceMatch] = useState<InstalledSourceMatch | null>(null);
+  const [manualEditTarget, setManualEditTarget] = useState<ManualEditTarget | null>(null);
   const [detailLoadingKey, setDetailLoadingKey] = useState<string | null>(null);
   const [searchPairLimit, setSearchPairLimit] = useState(10);
   const [nexusIndexing, setNexusIndexing] = useState(false);
   const [backgroundPairing, setBackgroundPairing] = useState(false);
   const [autoPairEnabled] = useState(false);
   const [autoPairStatus, setAutoPairStatus] = useState("Pair Ledger v1 active. Broad Auto Pair is disabled; use Try Pair on a selected mod.");
-  const [sourceUpdates, setSourceUpdates] = useState<SourceUpdateStatus[]>(() => readReceiptUpdateCheckCache()?.updates ?? []);
+  const [sourceUpdates, setSourceUpdates] = useState<SourceUpdateStatus[]>(() => readReceiptUpdateCheckCache(profileId)?.updates ?? []);
+  const [failedImages, setFailedImages] = useState<Record<string, number>>(() => readThumbnailFailures());
+  const [metadataHydrationStatus, setMetadataHydrationStatus] = useState<InstalledHydrationDiagnostics>({
+    checked: 0,
+    hydratedCount: 0,
+    missingCount: 0,
+    thumbnailSource: "idle",
+    metadataSource: "idle",
+    missingReason: "Installed scan has not run yet.",
+    running: false,
+  });
   const [updatesBusy, setUpdatesBusy] = useState(false);
-  const [receiptUpdateCache, setReceiptUpdateCache] = useState<ReceiptUpdateCheckCache | null>(() => readReceiptUpdateCheckCache());
-  const [unpairableGroups, setUnpairableGroups] = useState<string[]>(() => loadUnpairableGroups());
-  const [rejectedPairings, setRejectedPairings] = useState<string[]>(() => loadStringList(REJECTED_PAIRINGS_KEY));
-  const [customGroups, setCustomGroups] = useState<string[]>(() => loadStringList(CUSTOM_GROUPS_KEY));
+  const [receiptUpdateCache, setReceiptUpdateCache] = useState<ReceiptUpdateCheckCache | null>(() => readReceiptUpdateCheckCache(profileId));
+  const [unpairableGroups, setUnpairableGroups] = useState<string[]>(() => loadUnpairableGroups(profileId));
+  const [rejectedPairings, setRejectedPairings] = useState<string[]>(() => loadStringList(profileLocalStorageKey(REJECTED_PAIRINGS_KEY, profileId)));
+  const [customGroups, setCustomGroups] = useState<string[]>(() => loadStringList(profileLocalStorageKey(CUSTOM_GROUPS_KEY, profileId)));
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [reinstallPicker, setReinstallPicker] = useState<ReinstallPickerState | null>(null);
   const [reinstallPickerSelectedIds, setReinstallPickerSelectedIds] = useState<string[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [crashTestOpen, setCrashTestOpen] = useState(false);
+  const [crashTestBusy, setCrashTestBusy] = useState(false);
+  const [crashTestExclusionOverrides, setCrashTestExclusionOverrides] = useState<Record<string, boolean>>(() => loadCrashTestExclusionOverrides());
+  const [crashTest, setCrashTest] = useState<CrashTestState>({
+    active: false,
+    originalEnabled: {},
+    suspects: [],
+    currentGroup: [],
+    likelySuspects: [],
+    status: "Crash Test is idle.",
+    history: [],
+    totalEnabled: 0,
+    disabledGroupCount: 0,
+    round: 0,
+    excludedCount: 0,
+    testableCount: 0,
+    attemptedDisables: 0,
+    successfulDisables: 0,
+    failedDisables: 0,
+    skippedMods: [],
+    disabledStoragePaths: [],
+    testableKeys: [],
+    testedGroups: [],
+    lastResult: null,
+    nextAction: "Start by disabling half of the testable enabled mods.",
+    noProgressReason: null,
+  });
   const autoPairTimerRef = useRef<number | null>(null);
   const pairingBusyRef = useRef(false);
   const pairingLoadBusyRef = useRef(false);
   const installedRefreshBusyRef = useRef(false);
+  const installedPageActiveRef = useRef(true);
+  useEffect(() => {
+    installedPageActiveRef.current = true;
+    return () => { installedPageActiveRef.current = false; };
+  }, []);
   const initialRefreshTimerRef = useRef<number | null>(null);
+  const thumbnailHydrationAttemptsRef = useRef<Set<string>>(new Set());
+  const metadataHydrationBusyRef = useRef(false);
+  const crashTestCancelRef = useRef(false);
+  const installedProfileRef = useRef(profileId);
+
+  useEffect(() => {
+    if (installedProfileRef.current === profileId) {
+      if (profileSwitching) setStatus("Switching profile...");
+      return;
+    }
+
+    installedProfileRef.current = profileId;
+    installedRefreshBusyRef.current = false;
+    pairingBusyRef.current = false;
+    pairingLoadBusyRef.current = false;
+    metadataHydrationBusyRef.current = false;
+    crashTestCancelRef.current = true;
+    if (autoPairTimerRef.current) {
+      window.clearTimeout(autoPairTimerRef.current);
+      autoPairTimerRef.current = null;
+    }
+
+    clearInstalledSessionCache();
+    setScanResult(null);
+    setSourceMods([]);
+    setMatches({});
+    setInstalledState([]);
+    setRuntimeLock(null);
+    setSourceUpdates(readReceiptUpdateCheckCache(profileId)?.updates ?? []);
+    setReceiptUpdateCache(readReceiptUpdateCheckCache(profileId));
+    setUnpairableGroups(loadUnpairableGroups(profileId));
+    setRejectedPairings(loadStringList(profileLocalStorageKey(REJECTED_PAIRINGS_KEY, profileId)));
+    setCustomGroups(loadStringList(profileLocalStorageKey(CUSTOM_GROUPS_KEY, profileId)));
+    setSelectedSourceMod(null);
+    setSelectedSourceMatch(null);
+    setManualEditTarget(null);
+    setBusyKey(null);
+    setEnriching(false);
+    setBackgroundPairing(false);
+    setNexusIndexing(false);
+    setUpdatesBusy(false);
+    setSourceCacheAge("unknown");
+    setSourceCacheBuckets(0);
+    setPairingStatus(hasConfiguredSources ? "Open Browse first so Tsuki has source cards to pair." : "No browse sources configured for this profile.");
+    setStatus(profileSwitching ? "Switching profile..." : "No mods installed for this profile.");
+  }, [hasConfiguredSources, profileId, profileSwitching]);
 
   const rawFiles = scanResult?.pakMods ?? [];
   const groups = useMemo(() => groupInstalledFiles(rawFiles), [rawFiles]);
 
   useEffect(() => {
     if (!scanResult) return;
-    writeInstalledSessionCache({
+    writeInstalledSessionCache(profileId, {
       scanResult,
       sourceMods,
       matches,
+      installedState,
       status,
       pairingStatus,
       sourceCacheAge,
       sourceCacheBuckets,
       runtimeLock,
     });
-  }, [matches, pairingStatus, runtimeLock, scanResult, sourceCacheAge, sourceCacheBuckets, sourceMods, status]);
+  }, [installedState, matches, pairingStatus, profileId, runtimeLock, scanResult, sourceCacheAge, sourceCacheBuckets, sourceMods, status]);
 
   useEffect(() => {
     const pruned = pruneMissingSkippedGroups(unpairableGroups, groups);
     if (pruned.length !== unpairableGroups.length) {
       setUnpairableGroups(pruned);
-      saveUnpairableGroups(pruned);
+      saveUnpairableGroups(profileId, pruned);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groups.length]);
 
   useEffect(() => {
     const onReceiptUpdateCheck = () => {
-      const cached = readReceiptUpdateCheckCache();
+      const cached = readReceiptUpdateCheckCache(profileId);
       setReceiptUpdateCache(cached);
       setSourceUpdates(cached?.updates ?? []);
     };
@@ -1612,7 +2391,7 @@ export function InstalledPage() {
     onReceiptUpdateCheck();
 
     return () => window.removeEventListener("tsuki-receipt-update-check", onReceiptUpdateCheck);
-  }, []);
+  }, [profileId]);
 
   const updateStatusBySourceKey = useMemo(() => {
     const map = new Map<string, SourceUpdateStatus>();
@@ -1627,11 +2406,11 @@ export function InstalledPage() {
   const allPairedMods = useMemo(() => {
     const items: PairedInstalledMod[] = [];
 
-    for (const sourceMod of filterPayday3SourceMods(sourceMods)) {
+    for (const sourceMod of filterProfileSourceMods(profileId, sourceMods)) {
       const match = matches[`${sourceMod.source}-${sourceMod.sourceId}`];
-      if (!match?.installed) continue;
+      if (!match || (!match.installed && !match.missing)) continue;
 
-      const group = pairFilesFromMatch(match, groups);
+      const group = pairFilesFromMatch(match, groups, sourceMod);
       const guardKey = pairingGuardKey(sourceMod, match, group);
 
       if (rejectedPairings.includes(guardKey)) continue;
@@ -1639,7 +2418,7 @@ export function InstalledPage() {
 
       // Low-confidence token overlaps created obvious false positives.
       // They can become suggestions later, but they should not count as paired.
-      if (match.matchKind !== "receipt" && match.confidence < 86) continue;
+      if (!["receipt", "unknown"].includes(match.matchKind) && match.confidence < 86) continue;
 
       const updateStatus = updateStatusBySourceKey.get(`${sourceMod.source}-${sourceMod.sourceId}`);
       const matchWithUpdates = updateStatus
@@ -1649,23 +2428,24 @@ export function InstalledPage() {
             sourceUpdatedAt: updateStatus.latestVersion ?? match.sourceUpdatedAt,
           }
         : match;
+      const hydratedMatch = matchWithLocalFiles(matchWithUpdates, group, sourceMod, installedState);
 
       items.push({
         sourceMod,
-        match: matchWithUpdates,
+        match: hydratedMatch,
         group,
         files: group?.files ?? [],
       });
     }
 
     return sortPaired(items, sortMode);
-  }, [customGroups, groups, matches, rejectedPairings, sortMode, sourceMods, updateStatusBySourceKey]);
+  }, [customGroups, groups, installedState, matches, rejectedPairings, sortMode, sourceMods, updateStatusBySourceKey]);
 
   const pairedMods = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const filtered = allPairedMods.filter((item) => {
       if (enabledFilter === "on" && !itemEnabled(item)) return false;
-      if (enabledFilter === "off" && itemEnabled(item)) return false;
+      if (enabledFilter === "off" && (itemEnabled(item) || item.match.missing)) return false;
       if (!query) return true;
 
       return (
@@ -1699,15 +2479,38 @@ export function InstalledPage() {
     return new Set(allPairedMods.map((item) => item.group?.key).filter((key): key is string => Boolean(key)));
   }, [allPairedMods]);
 
+  const consumedLocalIdentityTokens = useMemo(() => {
+    const tokens = new Set<string>();
+    for (const item of allPairedMods) {
+      for (const token of localIdentityTokensForPairedItem(item)) tokens.add(token);
+    }
+    return tokens;
+  }, [allPairedMods]);
+
+  const strongClaimedGroupKeys = useMemo(() => {
+    const claimed = new Set<string>();
+
+    for (const sourceMod of filterProfileSourceMods(profileId, sourceMods)) {
+      const match = matches[`${sourceMod.source}-${sourceMod.sourceId}`];
+      if (!match || (!match.installed && !match.missing) || !strongInstalledMatch(match)) continue;
+
+      for (const group of groups) {
+        if (strongMatchClaimsWin64Group(sourceMod, match, group)) claimed.add(group.key);
+      }
+    }
+
+    return claimed;
+  }, [groups, matches, sourceMods]);
+
   const allUnmatchedGroups = useMemo(() => {
     return groups.filter((group) => {
-      if (pairedGroupKeys.has(group.key)) return false;
+      if (pairedGroupKeys.has(group.key) || strongClaimedGroupKeys.has(group.key) || groupConsumedByPairedIdentity(group, consumedLocalIdentityTokens)) return false;
       return !group.files.some((file) => (
         fileNameKeys(file.fileName).some((key) => pairedFileNames.has(key))
         || fileNameKeys(file.fullPath).some((key) => pairedFileNames.has(key))
       ));
     });
-  }, [groups, pairedFileNames, pairedGroupKeys]);
+  }, [consumedLocalIdentityTokens, groups, pairedFileNames, pairedGroupKeys, strongClaimedGroupKeys]);
 
   const unmatchedGroups = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -1739,6 +2542,7 @@ export function InstalledPage() {
   }, [pairedMods, view]);
 
   const selectedSet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
+  const massSelectionMode = selectedKeys.length > 0;
 
   function pairedSelectionKey(item: PairedInstalledMod) {
     return `pair:${item.sourceMod.source}-${item.sourceMod.sourceId}`;
@@ -1790,10 +2594,125 @@ export function InstalledPage() {
     setSelectedKeys([]);
   }
 
-  const updateCount = pairedMods.filter((item) => item.match.updateAvailable).length;
-  const enabledGroups = groups.filter((group) => group.enabled).length;
-  const disabledGroups = groups.length - enabledGroups;
+  function possibleNewerLocalVersionDetected(item: PairedInstalledMod) {
+    if (!item.match.missing && !item.match.broken) return false;
 
+    const sourceNames = [
+      item.match.sourceFileName,
+      item.match.displayName,
+      item.sourceMod.name,
+      ...item.match.matchedFiles,
+    ]
+      .map((value) => compact(normalizeInstalledName(String(value ?? ""))))
+      .filter((value) => value.length >= 6);
+
+    if (sourceNames.length === 0) return false;
+
+    return allUnmatchedGroups.some((group) => {
+      const groupNames = [
+        group.label,
+        ...group.files.flatMap((file) => [file.fileName, file.fullPath]),
+      ]
+        .map((value) => compact(normalizeInstalledName(value)))
+        .filter((value) => value.length >= 6);
+
+      return sourceNames.some((sourceName) => groupNames.some((groupName) => {
+        const shortest = Math.min(sourceName.length, groupName.length);
+        if (shortest < 6) return false;
+        return sourceName.includes(groupName.slice(0, Math.min(groupName.length, 14)))
+          || groupName.includes(sourceName.slice(0, Math.min(sourceName.length, 14)));
+      }));
+    });
+  }
+
+  const pairedActiveMods = allPairedMods.filter((item) => !item.match.missing && !item.match.broken);
+  const enabledPairedCount = pairedActiveMods.filter(itemEnabled).length;
+  const disabledPairedCount = pairedActiveMods.filter((item) => !itemEnabled(item)).length;
+  const enabledLocalCount = allUnmatchedGroups.filter((group) => group.enabled).length;
+  const disabledLocalCount = allUnmatchedGroups.length - enabledLocalCount;
+  const totalInstalledLocalMods = allPairedMods.length + allUnmatchedGroups.length;
+  const totalEnabledMods = enabledPairedCount + enabledLocalCount;
+  const totalDisabledMods = disabledPairedCount + disabledLocalCount;
+
+  function crashTestAutoExcludeReason(title: string, item?: PairedInstalledMod, group?: InstalledGroup) {
+    const text = [
+      title,
+      item?.sourceMod.name,
+      item?.sourceMod.author,
+      item?.sourceMod.shortDescription,
+      ...(item?.sourceMod.tags ?? []),
+      item?.match.sourceFileName,
+      item?.match.sourceFileCategory,
+      item?.match.reason,
+      ...(item?.match.matchedFiles ?? []),
+      ...(item?.files ?? []).flatMap((file) => [file.fileName, file.fullPath]),
+      group?.label,
+      ...(group?.files ?? []).flatMap((file) => [file.fileName, file.fullPath]),
+    ].filter(Boolean).join(" ").toLowerCase();
+
+    if (/logic\s*mod\s*loader|\bmod\s*loader\b|loader/.test(text)) return "required loader";
+    if (/\bue4ss\b|xinput1?_|dinput8|winhttp|dsound|framework|hook/.test(text)) return "framework/runtime";
+    if (/dependency|dependencies|required|library|lib\b/.test(text)) return "required dependency";
+    return null;
+  }
+
+  function applyCrashTestExclusion(base: Omit<CrashTestCandidate, "excluded" | "exclusionReason" | "autoExcludeReason" | "manuallyOverridden">): CrashTestCandidate {
+    const autoExcludeReason = crashTestAutoExcludeReason(base.title, base.item, base.group);
+    const manualOverride = crashTestExclusionOverrides[base.key];
+    const manuallyOverridden = typeof manualOverride === "boolean";
+    const excluded = manualOverride === false ? false : (manualOverride === true || Boolean(autoExcludeReason));
+    const exclusionReason = manualOverride === true
+      ? "manually excluded"
+      : (excluded ? autoExcludeReason : null);
+
+    return {
+      ...base,
+      excluded,
+      exclusionReason,
+      autoExcludeReason,
+      manuallyOverridden,
+    };
+  }
+
+  const crashTestCandidates = useMemo<CrashTestCandidate[]>(() => {
+    const paired = allPairedMods
+      .filter((item) => !item.match.missing && !item.match.broken)
+      .map((item) => applyCrashTestExclusion({
+        key: pairedSelectionKey(item),
+        title: displayModTitle({ ...item.sourceMod, name: item.match.displayName ?? item.sourceMod.name }),
+        enabled: itemEnabled(item),
+        item,
+      }));
+
+    const local = allUnmatchedGroups.map((group) => applyCrashTestExclusion({
+      key: groupSelectionKey(group),
+      title: group.label,
+      enabled: group.enabled,
+      group,
+    }));
+
+    return [...paired, ...local];
+  }, [allPairedMods, allUnmatchedGroups, crashTestExclusionOverrides]);
+
+  const crashCandidateMap = useMemo(() => new Map(crashTestCandidates.map((candidate) => [candidate.key, candidate])), [crashTestCandidates]);
+  const selectedToggleKeys = useMemo(() => selectedKeys.filter((key) => crashCandidateMap.has(key)), [crashCandidateMap, selectedKeys]);
+  const crashTestExcludedCandidates = useMemo(() => crashTestCandidates.filter((candidate) => candidate.excluded), [crashTestCandidates]);
+
+  function setCrashTestCandidateExcluded(key: string, excluded: boolean) {
+    setCrashTestExclusionOverrides((current) => {
+      const next = { ...current, [key]: excluded };
+      saveCrashTestExclusionOverrides(next);
+      return next;
+    });
+    const title = crashCandidateTitle(key);
+    setCrashTest((current) => ({ ...current, status: `${title} is now ${excluded ? "excluded from" : "included in"} Crash Test.` }));
+  }
+
+  function clearManualCrashTestExclusions() {
+    setCrashTestExclusionOverrides({});
+    saveCrashTestExclusionOverrides({});
+    setCrashTest((current) => ({ ...current, status: "Manual Crash Test exclusions cleared. Auto-excluded loaders/frameworks still stay protected." }));
+  }
   function sourceImageForCard(mod: SourceModSummary) {
     const direct = sourceImageUrl(mod);
     if (direct) return direct;
@@ -1820,6 +2739,17 @@ export function InstalledPage() {
     return null;
   }
 
+  function rememberInstalledThumbnailFailure(url: string | null | undefined) {
+    if (!url) return;
+    const next = { ...readThumbnailFailures(), [url]: Date.now() };
+    writeThumbnailFailures(next);
+    setFailedImages(next);
+  }
+
+  function canUseInstalledThumbnail(url: string | null | undefined) {
+    return Boolean(url && !thumbnailRecentlyFailed(url, failedImages));
+  }
+
   function mergeSourceCards(incoming: SourceModSummary[]) {
     if (incoming.length === 0) return;
 
@@ -1831,7 +2761,7 @@ export function InstalledPage() {
       }
 
       const next = [...map.values()];
-      saveInstalledEnrichedSourceCache(next);
+      saveInstalledEnrichedSourceCache(profileId, next);
       return next;
     });
   }
@@ -1868,8 +2798,8 @@ export function InstalledPage() {
         try {
           const detail =
             item.sourceMod.source === "nexus"
-              ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: item.sourceMod.sourceId })
-              : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: item.sourceMod.sourceId });
+              ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: item.sourceMod.sourceId, profileId, gameDomain: nexusGameDomain })
+              : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: item.sourceMod.sourceId, profileId });
 
           const summary = sourceSummaryFromDetail(detail);
           if (sourceImageUrl(summary)) repaired.push(summary);
@@ -1887,6 +2817,161 @@ export function InstalledPage() {
     }
   }
 
+  useEffect(() => {
+    if (allPairedMods.length === 0) return;
+
+    const currentByKey = new Map(sourceMods.map((mod) => [sourceKey(mod), mod]));
+    const localSummaries = allPairedMods
+      .map(installedSummaryFromMatchMetadata)
+      .filter((summary) => summaryAddsHydrationValue(currentByKey.get(sourceKey(summary)), summary));
+
+    if (localSummaries.length > 0) {
+      mergeSourceCards(localSummaries);
+    }
+
+    const missingCount = allPairedMods.filter((item) => {
+      const summary = mergeSourceSummary(currentByKey.get(sourceKey(item.sourceMod)), installedSummaryFromMatchMetadata(item));
+      return summaryNeedsInstalledHydration(summary);
+    }).length;
+
+    setMetadataHydrationStatus((current) => current.running ? current : {
+      checked: allPairedMods.length,
+      hydratedCount: localSummaries.length,
+      missingCount,
+      thumbnailSource: localSummaries.some(sourceImageUrl) ? "receipt/source-index/cache" : current.thumbnailSource,
+      metadataSource: localSummaries.length > 0 ? "receipt/source-index/cache" : current.metadataSource,
+      missingReason: missingCount > 0 ? "Some installed cards still need live detail metadata." : "Installed card metadata is hydrated from receipt, Source Index, or cache.",
+      running: false,
+    });
+  }, [allPairedMods, sourceMods]);
+
+  const installedHydrationTargets = useMemo(() => {
+    const currentByKey = new Map(sourceMods.map((mod) => [sourceKey(mod), mod]));
+
+    return visiblePaired.slice(0, renderLimit)
+      .filter((item) => !item.match.missing && !item.match.broken)
+      .filter((item) => ["receipt", "receipt-hash", "sha256", "manifest", "persistent", "manual", "user-confirmed", "user-confirmed-sha256"].includes(item.match.matchKind))
+      .filter((item) => {
+        const key = sourceKey(item.sourceMod);
+        if (thumbnailHydrationAttemptsRef.current.has(key)) return false;
+        const summary = mergeSourceSummary(currentByKey.get(key), installedSummaryFromMatchMetadata(item));
+        return summaryNeedsInstalledHydration(summary);
+      })
+      .slice(0, INSTALLED_METADATA_HYDRATION_BATCH_SIZE);
+  }, [visiblePaired, renderLimit, sourceMods]);
+
+  const installedHydrationTargetKey = installedHydrationTargets.map((item) => sourceKey(item.sourceMod)).join("|");
+
+  useEffect(() => {
+    if (!installedHydrationTargetKey || installedHydrationTargets.length === 0 || metadataHydrationBusyRef.current) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        metadataHydrationBusyRef.current = true;
+        setMetadataHydrationStatus({
+          checked: installedHydrationTargets.length,
+          hydratedCount: 0,
+          missingCount: installedHydrationTargets.length,
+          thumbnailSource: "live detail pending",
+          metadataSource: "live detail pending",
+          missingReason: "Hydrating installed cards in the background.",
+          running: true,
+        });
+
+        const existingByKey = new Map(sourceMods.map((mod) => [sourceKey(mod), mod]));
+        const repaired: SourceModSummary[] = [];
+        const failures: string[] = [];
+        let hydratedCount = 0;
+        let missingCount = 0;
+        let thumbnailSource = "fallback";
+        let metadataSource = "live detail";
+        let missingReason = "Metadata complete.";
+        let cursor = 0;
+
+        async function hydrateOne(item: PairedInstalledMod) {
+          const key = sourceKey(item.sourceMod);
+          thumbnailHydrationAttemptsRef.current.add(key);
+
+          try {
+            const detail = item.sourceMod.source === "nexus"
+              ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: item.sourceMod.sourceId, profileId, gameDomain: nexusGameDomain })
+              : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: item.sourceMod.sourceId, profileId });
+
+            if (cancelled) return;
+
+            const summary = sourceSummaryFromDetail(detail);
+            const existing = existingByKey.get(key);
+            const merged = mergeSourceSummary(existing, summary);
+            const improved = summaryAddsHydrationValue(existing, summary);
+
+            if (improved) {
+              repaired.push(summary);
+              hydratedCount += 1;
+            }
+
+            if (sourceImageUrl(summary)) thumbnailSource = "live detail";
+            if (metadataAuthorAvailable(summary.author) || summary.pageUrl) metadataSource = "live detail";
+
+            if (summaryNeedsInstalledHydration(merged)) {
+              missingCount += 1;
+              missingReason = installedHydrationMissingReason(merged);
+            }
+          } catch (error) {
+            failures.push(`${item.sourceMod.source}:${item.sourceMod.sourceId}`);
+            missingCount += 1;
+            missingReason = error instanceof Error ? error.message : String(error);
+          }
+        }
+
+        async function worker() {
+          while (!cancelled) {
+            const item = installedHydrationTargets[cursor];
+            cursor += 1;
+            if (!item) return;
+            await hydrateOne(item);
+            await yieldToUi(40);
+          }
+        }
+
+        try {
+          await Promise.all(Array.from({ length: Math.min(INSTALLED_METADATA_HYDRATION_CONCURRENCY, installedHydrationTargets.length) }, worker));
+
+          if (!cancelled && repaired.length > 0) {
+            mergeSourceCards(repaired);
+          }
+
+          if (!cancelled) {
+            setMetadataHydrationStatus({
+              checked: installedHydrationTargets.length,
+              hydratedCount,
+              missingCount,
+              thumbnailSource,
+              metadataSource,
+              missingReason: missingCount > 0 ? missingReason : "Metadata complete.",
+              running: false,
+            });
+            recordRuntimeDiagnostic("Installed metadata hydration", failures.length > 0 ? "warning" : "completed", missingCount > 0 ? missingReason : "Installed card metadata hydrated.", [
+              `checked=${installedHydrationTargets.length}`,
+              `hydrated=${hydratedCount}`,
+              `missing=${missingCount}`,
+              `thumbnailSource=${thumbnailSource}`,
+              `metadataSource=${metadataSource}`,
+              failures.length > 0 ? `failed=${failures.slice(0, 8).join(", ")}` : "failed=0",
+            ]);
+          }
+        } finally {
+          metadataHydrationBusyRef.current = false;
+        }
+      })();
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [installedHydrationTargetKey]);
+
 
   async function checkStateFirstUpdates() {
     if (updatesBusy) return;
@@ -1894,9 +2979,9 @@ export function InstalledPage() {
     setStatus("Checking updates for Tsuki-downloaded receipt mods only...");
     reportTaskProgress("Check Updates", 12, "Checking receipt-backed source files...");
     try {
-      const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates");
-      writeReceiptUpdateCheckCache(updates, "manual");
-      setReceiptUpdateCache(readReceiptUpdateCheckCache());
+      const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId });
+      writeReceiptUpdateCheckCache(profileId, updates, "manual");
+      setReceiptUpdateCache(readReceiptUpdateCheckCache(profileId));
       setSourceUpdates(updates);
       const count = updates.filter((update) => update.updateAvailable).length;
       setStatus(`Receipt update check complete: ${count}/${updates.length} Tsuki-downloaded mod(s) have updates.`);
@@ -1913,9 +2998,9 @@ export function InstalledPage() {
 
   async function refreshUpdateStateAfterMutation(source: string, sourceId: string) {
     try {
-      const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates");
-      writeReceiptUpdateCheckCache(updates, "manual");
-      setReceiptUpdateCache(readReceiptUpdateCheckCache());
+      const updates = await invoke<SourceUpdateStatus[]>("check_installed_source_updates", { profileId });
+      writeReceiptUpdateCheckCache(profileId, updates, "manual");
+      setReceiptUpdateCache(readReceiptUpdateCheckCache(profileId));
       setSourceUpdates(updates);
 
       const current = updates.find((update) => update.source === source && update.modId === sourceId);
@@ -1929,7 +3014,6 @@ export function InstalledPage() {
             [key]: {
               ...match,
               updateAvailable: false,
-              canUpdate: false,
             },
           };
         });
@@ -1941,6 +3025,17 @@ export function InstalledPage() {
 
   async function refreshRuntimeLock() {
     try {
+      if (profileId !== "builtin.payday3") {
+        const lock: RuntimeLockStatus = {
+          payday3Running: false,
+          vanillaSessionActive: false,
+          toggleLocked: false,
+          message: `${gameName} is not using the PAYDAY 3 runtime lock.`,
+        };
+        setRuntimeLock(lock);
+        return lock;
+      }
+
       const lock = await invoke<RuntimeLockStatus>("payday3_runtime_lock_status");
       setRuntimeLock(lock);
       return lock;
@@ -1949,7 +3044,6 @@ export function InstalledPage() {
       return null;
     }
   }
-
   async function ensureRuntimeMutationAllowed() {
     const lock = await refreshRuntimeLock();
     if (lock?.toggleLocked) {
@@ -1960,37 +3054,46 @@ export function InstalledPage() {
   }
 
   async function refreshInstalled(clearWhenDone = true): Promise<PakModFile[]> {
+    if (!runtimeReady) {
+      setStatus(profileSwitching ? "Switching profile..." : "Profile runtime is not ready yet.");
+      return [];
+    }
+
     if (installedRefreshBusyRef.current) {
       setStatus("Installed refresh is already running.");
       return rawFiles;
     }
 
     installedRefreshBusyRef.current = true;
-    clearInstalledSessionCache();
+    clearInstalledSessionCache(profileId);
     void refreshRuntimeLock();
     setStatus("Scanning installed pak files...");
     reportTaskProgress("Scan Installed", 12, "Scanning installed files...");
     let loaded = false;
 
     try {
-      const prunePromise = invoke<string>("prune_stale_install_receipts").catch(() => "");
-      const scan = await invoke<PakScanResult>("scan_pak_mods");
-      reportTaskProgress("Scan Installed", 45, `Found ${scan.pakFileCount} PAK-family file(s).`);
-
-      const pairState = loadPairState(scan.pakMods);
-      const cache = loadSourceModsFromCache();
-      reportTaskProgress("Scan Installed", 72, "Loading source/state records...");
-      const [backendIndex, installedState] = await Promise.all([
-        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 600 }).catch(() => []),
-        invoke<InstalledStateRecord[]>("list_installed_state_records").catch(() => []),
+      const prunePromise = invoke<string>("prune_stale_install_receipts", { profileId }).catch(() => "");
+      const [scan, nextInstalledState] = await Promise.all([
+        invoke<PakScanResult>("scan_pak_mods", { profileId }),
+        invoke<InstalledStateRecord[]>("list_installed_state_records", { profileId }),
       ]);
+      if (!installedPageActiveRef.current) return [];
+      reportTaskProgress("Scan Installed", 45, `Found ${scan.foundMods || scan.pakFileCount} mod group(s). Hash ${scan.exactHashMatches}, receipts ${scan.receiptMatches}, unknown ${scan.unknownMods}.`);
+
+      const pairState = loadPairState(profileId, scan.pakMods);
+      const cache = loadSourceModsFromCache(profileId);
+      reportTaskProgress("Scan Installed", 72, "Loading source/state records...");
       const sourceMap = new Map<string, SourceModSummary>();
 
       // State-first: Tsuki-installed mods come from receipts/installed-state first.
       // Browse/source caches are only extra context, not the identity source of truth.
       const receiptMatches: Record<string, InstalledSourceMatch> = {};
+      const sourceIndexMatches: Record<string, InstalledSourceMatch> = {};
 
-      for (const record of installedState) {
+      setInstalledState(nextInstalledState);
+
+      for (const record of nextInstalledState) {
+        if (!(record.files ?? []).some((file) => file.live)) continue;
         const summary = sourceSummaryFromInstalledState(record);
         if (summary) {
           sourceMap.set(sourceKey(summary), summary);
@@ -1999,41 +3102,66 @@ export function InstalledPage() {
         }
       }
 
-      for (const mod of cache.mods) {
-        if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
+      // Show disk-validated receipts immediately; exact source identification can finish later.
+      setScanResult(scan);
+      setSourceMods([...sourceMap.values()]);
+      setMatches(receiptMatches);
+      reportTaskProgress("Scan Installed", 78, "Installed files loaded. Identifying indexed files...");
+      const sourceIndexIdentities = await invoke<InstalledSourceIndexIdentity[]>("match_installed_source_index_v2", { profileId });
+      if (!installedPageActiveRef.current) return [];
+
+      for (const identity of sourceIndexIdentities) {
+        if (!identity?.sourceMod || !identity.matchInfo) continue;
+        sourceMap.set(sourceKey(identity.sourceMod), identity.sourceMod);
+        sourceIndexMatches[sourceKey(identity.sourceMod)] = identity.matchInfo;
       }
 
-      for (const mod of backendIndex) {
-        if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
+      const liveReceiptIds = new Set(nextInstalledState.filter((record) => (record.files ?? []).some((file) => file.live)).flatMap((record) => [record.receiptId, record.uid]).filter((value): value is string => Boolean(value)));
+      const liveFileKeys = fileKeySetForPakFiles(scan.pakMods);
+      const cachedMatches = pairState
+        ? Object.fromEntries(Object.entries(pairState.matches).filter(([key, match]) => {
+            if (receiptMatches[key] || sourceIndexMatches[key]) return true;
+            if (match.receiptId && !liveReceiptIds.has(match.receiptId)) return false;
+            if (match.missing || match.broken) return Boolean(match.receiptId && liveReceiptIds.has(match.receiptId));
+            if (!match.installed) return true;
+            return (match.matchedFiles ?? []).some((fileName) => fileNameKeys(fileName).some((fileKey) => liveFileKeys.has(fileKey)));
+          })) as Record<string, InstalledSourceMatch>
+        : {};
+
+      const installedSourceKeys = new Set([
+        ...Object.keys(receiptMatches),
+        ...Object.keys(sourceIndexMatches),
+        ...Object.entries(cachedMatches).filter(([, match]) => match.installed).map(([key]) => key),
+      ]);
+      for (const mod of cache.mods.filter((mod) => installedSourceKeys.has(sourceKey(mod)))) {
+        sourceMap.set(sourceKey(mod), mergeSourceSummary(sourceMap.get(sourceKey(mod)), mod));
       }
 
       if (pairState?.sourceMods?.length) {
-        for (const mod of pairState.sourceMods) {
-          if (!sourceMap.has(sourceKey(mod))) sourceMap.set(sourceKey(mod), mod);
+        for (const mod of pairState.sourceMods.filter((mod) => installedSourceKeys.has(sourceKey(mod)))) {
+          sourceMap.set(sourceKey(mod), mergeSourceSummary(sourceMap.get(sourceKey(mod)), mod));
         }
       }
 
-      const indexedSources = filterPayday3SourceMods([...sourceMap.values()]);
+      const indexedSources = filterProfileSourceMods(profileId, [...sourceMap.values()]);
 
       if (pairState) {
-        const hydratedSources = indexedSources.length > 0
-          ? indexedSources
-          : filterPayday3SourceMods(pairState.sourceMods);
+        const hydratedSources = indexedSources;
 
-        const mergedReceiptFirst = { ...pairState.matches, ...receiptMatches };
+        const mergedReceiptFirst = { ...cachedMatches, ...sourceIndexMatches, ...receiptMatches };
         setScanResult(scan);
         setSourceMods(hydratedSources);
         setMatches(mergedReceiptFirst);
         setSourceCacheAge(cacheAge(pairState.savedAt));
         setSourceCacheBuckets(cache.cacheBuckets + 1);
-        setPairingStatus(`Loaded cached pair state from ${cacheAge(pairState.savedAt)} ago and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). No background re-pairing was started.`);
+        setPairingStatus(`Loaded cached pair state from ${cacheAge(pairState.savedAt)} ago, applied ${Object.values(sourceIndexMatches).length} Source Index identity match(es), and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s).`);
       } else if (indexedSources.length > 0) {
         setScanResult(scan);
-        setSourceMods(filterPayday3SourceMods(indexedSources));
-        setMatches(receiptMatches);
+        setSourceMods(filterProfileSourceMods(profileId, indexedSources));
+        setMatches({ ...sourceIndexMatches, ...receiptMatches });
         setSourceCacheAge(cacheAge(cache.newestCache));
-        setSourceCacheBuckets(cache.cacheBuckets + (backendIndex.length > 0 ? 1 : 0));
-        setPairingStatus(`Loaded ${indexedSources.length} source/state records and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s). Press Re-pair/Search Pair only when you want manual matching work.`);
+        setSourceCacheBuckets(cache.cacheBuckets + (sourceIndexIdentities.length > 0 ? 1 : 0));
+        setPairingStatus(`Loaded ${indexedSources.length} source/state records, applied ${Object.values(sourceIndexMatches).length} Source Index identity match(es), and anchored ${Object.values(receiptMatches).length} Tsuki receipt/state pair(s).`);
       } else {
         setScanResult(scan);
         setPairingStatus("No source cache found yet. Browse mods first, or use Auto Pair manually.");
@@ -2041,17 +3169,18 @@ export function InstalledPage() {
 
       await prunePromise;
       reportTaskProgress("Scan Installed", 100, "Installed library loaded.");
-      setStatus(`Found ${scan.pakFileCount} pak-related files. UI loaded without background pairing.`);
+      setStatus(`Found ${scan.pakFileCount} pak-related files across ${scan.foundMods || scan.pakFileCount} group(s). Receipt Matches: ${scan.receiptMatches}. Exact Hash Matches: ${scan.exactHashMatches}. Unknown Mods: ${scan.unknownMods}. UI loaded without background pairing.`);
       loaded = true;
       return scan.pakMods;
     } catch (error) {
+      if (!installedPageActiveRef.current) return [];
       const message = error instanceof Error ? error.message : String(error);
       setStatus(message);
       reportTaskProgress("Refresh failed", 100, message);
       return rawFiles;
     } finally {
       installedRefreshBusyRef.current = false;
-      if (clearWhenDone) {
+      if (clearWhenDone && installedPageActiveRef.current) {
         if (loaded) finishTaskProgress("Scan Installed", "Installed library loaded.");
         else clearTaskProgressSoon(1200);
       }
@@ -2066,7 +3195,7 @@ export function InstalledPage() {
 
     pairingBusyRef.current = true;
 
-    const cachedPairState = loadPairState(filesForStatus);
+    const cachedPairState = loadPairState(profileId, filesForStatus);
 
     if (cachedPairState) {
       const sourceMap = new Map(nextSourceMods.map((mod) => [sourceKey(mod), mod]));
@@ -2099,7 +3228,7 @@ export function InstalledPage() {
       return {};
     }
 
-    const cappedSourceMods = nextSourceMods.slice(0, 550);
+    const cappedSourceMods = nextSourceMods;
 
     if (nextSourceMods.length > cappedSourceMods.length) {
       setPairingStatus(`Pairing first ${cappedSourceMods.length}/${nextSourceMods.length} cached source cards for speed. Auto Pair can search missing mods later.`);
@@ -2113,6 +3242,7 @@ export function InstalledPage() {
     try {
       const result = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
         sourceMods: cappedSourceMods,
+        profileId,
       });
 
       reportTaskProgress("Pair Installed", 62, "Running direct local filename proof pass...");
@@ -2124,14 +3254,15 @@ export function InstalledPage() {
 
       reportTaskProgress("Pair Installed", 78, "Saving matched pair state...");
       setMatches(next);
-      savePairState(cappedSourceMods, next, filesForStatus);
-      saveInstalledEnrichedSourceCache(cappedSourceMods);
+      savePairState(profileId, cappedSourceMods, next, filesForStatus);
+      saveInstalledEnrichedSourceCache(profileId, cappedSourceMods);
 
       const installed = Object.values(next).filter((match) => match.installed).length;
       const updates = Object.values(next).filter((match) => match.updateAvailable).length;
+      const report = pairingReportText(combinedResult, groups.length || filesForStatus.length);
 
       reportTaskProgress("Pair Installed", 100, `Paired ${installed} source card(s).`);
-      setPairingStatus(`Proof-paired ${installed}/${cappedSourceMods.length} source cards. Direct local proof added ${directResult.length} source pair(s). Removed ${cleanedExisting.removed} numeric mismatch pair(s). ${updates} possible updates. Preserved ${keptExisting} proven old pair(s).`);
+      setPairingStatus(`${report} Proof-paired ${installed}/${cappedSourceMods.length} source cards. Direct local proof added ${directResult.length} source pair(s). Removed ${cleanedExisting.removed} numeric mismatch pair(s). ${updates} possible updates. Preserved ${keptExisting} proven old pair(s).`);
       pairingBusyRef.current = false;
       clearTaskProgressSoon();
       return next;
@@ -2148,7 +3279,7 @@ export function InstalledPage() {
 
   function repairPairingCache() {
     try {
-      removeLocalStorageKeys(PAIR_REPAIR_CACHE_KEYS);
+      removeLocalStorageKeys(PAIR_REPAIR_CACHE_KEYS.map((key) => profileLocalStorageKey(key, profileId)));
       setMatches({});
       setRejectedPairings([]);
       setCustomGroups([]);
@@ -2197,7 +3328,7 @@ export function InstalledPage() {
 
     setBusyKey("sync-installed");
     setStatus("Syncing installed library...");
-    setPairingStatus("Sync Installed: scan files → load source records → repair safe pairs.");
+    setPairingStatus("Sync Installed: scan files -> repair receipts -> refresh cards.");
     reportTaskProgress("Sync Installed", 8, "Starting installed sync...");
 
     try {
@@ -2224,15 +3355,17 @@ export function InstalledPage() {
     pairingLoadBusyRef.current = true;
     reportTaskProgress("Pair Installed", 12, "Loading source index, cache, and state records...");
     try {
-      const cache = loadSourceModsFromCache();
-      const pairState = loadPairState(filesForStatus);
-      const [backendIndex, installedState] = await Promise.all([
-        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 900 }).catch(() => []),
-        invoke<InstalledStateRecord[]>("list_installed_state_records").catch(() => []),
+      const cache = loadSourceModsFromCache(profileId);
+      const pairState = loadPairState(profileId, filesForStatus);
+      const [backendIndex, nextInstalledState] = await Promise.all([
+        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 100000, profileId }).catch(() => []),
+        invoke<InstalledStateRecord[]>("list_installed_state_records", { profileId }).catch(() => []),
       ]);
       const sourceMap = new Map<string, SourceModSummary>();
 
-      for (const record of installedState) {
+      setInstalledState(nextInstalledState);
+
+      for (const record of nextInstalledState) {
         const summary = sourceSummaryFromInstalledState(record);
         if (summary) sourceMap.set(sourceKey(summary), summary);
       }
@@ -2258,7 +3391,7 @@ export function InstalledPage() {
         await liveSearchGroupsIntoSourceMap(liveSearch, sourceMap, limit, liveSearch === "all" ? "Pair All" : `Pair ${liveSearch === "modworkshop" ? "Workshop" : "Nexus"}`);
       }
 
-      const nextMods = filterPayday3SourceMods([...sourceMap.values()]);
+      const nextMods = filterProfileSourceMods(profileId, [...sourceMap.values()]);
       setSourceMods(nextMods);
       setSourceCacheAge(cacheAge(Math.max(cache.newestCache, pairState?.savedAt ?? 0)));
       setSourceCacheBuckets(cache.cacheBuckets + (pairState ? 1 : 0) + (backendIndex.length > 0 ? 1 : 0));
@@ -2290,16 +3423,18 @@ export function InstalledPage() {
     try {
       const files = rawFiles.length > 0 ? rawFiles : await refreshInstalled(false);
       reportTaskProgress(`Pair ${label}`, 22, "Loading source index...");
-      const cache = loadSourceModsFromCache();
-      const pairState = loadPairState(files);
-      const [backendIndex, installedState] = await Promise.all([
-        invoke<SourceModSummary[]>("list_source_index", { source, limit: 900 }).catch(() => []),
-        invoke<InstalledStateRecord[]>("list_installed_state_records").catch(() => []),
+      const cache = loadSourceModsFromCache(profileId);
+      const pairState = loadPairState(profileId, files);
+      const [backendIndex, nextInstalledState] = await Promise.all([
+        invoke<SourceModSummary[]>("list_source_index", { source, limit: 100000, profileId }).catch(() => []),
+        invoke<InstalledStateRecord[]>("list_installed_state_records", { profileId }).catch(() => []),
       ]);
 
       const sourceMap = new Map<string, SourceModSummary>();
 
-      for (const record of installedState) {
+      setInstalledState(nextInstalledState);
+
+      for (const record of nextInstalledState) {
         const summary = sourceSummaryFromInstalledState(record);
         if (summary?.source === source) sourceMap.set(sourceKey(summary), summary);
       }
@@ -2320,8 +3455,8 @@ export function InstalledPage() {
 
       const liveStats = await liveSearchGroupsIntoSourceMap(source, sourceMap, Math.max(searchPairLimit, source === "modworkshop" ? 42 : 24), `Pair ${label}`);
 
-      const sourceOnly = filterPayday3SourceMods([...sourceMap.values()]).filter((mod) => mod.source === source);
-      const mergedSources = filterPayday3SourceMods([...sourceMods, ...sourceOnly]);
+      const sourceOnly = filterProfileSourceMods(profileId, [...sourceMap.values()]).filter((mod) => mod.source === source);
+      const mergedSources = filterProfileSourceMods(profileId, [...sourceMods, ...sourceOnly]);
       const dedupedSources = [...new Map(mergedSources.map((mod) => [sourceKey(mod), mod])).values()];
 
       setSourceMods(dedupedSources);
@@ -2338,7 +3473,8 @@ export function InstalledPage() {
       reportTaskProgress(`Pair ${label}`, 48, `Matching ${sourceOnly.length} ${label} card(s)...`);
 
       const result = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
-        sourceMods: sourceOnly.slice(0, 900),
+        sourceMods: sourceOnly,
+        profileId,
       });
 
       reportTaskProgress(`Pair ${label}`, 70, "Running direct local filename proof pass...");
@@ -2350,13 +3486,14 @@ export function InstalledPage() {
       const { next: nextMatches, keptExisting } = mergePairResultsSafely(cleanedExisting.next, combinedResult);
 
       setMatches(nextMatches);
-      savePairState(dedupedSources, nextMatches, files);
-      saveInstalledEnrichedSourceCache(dedupedSources);
+      savePairState(profileId, dedupedSources, nextMatches, files);
+      saveInstalledEnrichedSourceCache(profileId, dedupedSources);
 
       const paired = result.filter((match) => match.installed).length;
       const candidates = result.filter((match) => !match.installed && match.confidence >= 60).length;
+      const report = pairingReportText(combinedResult, groups.length || files.length);
       reportTaskProgress(`Pair ${label}`, 100, `Paired ${paired}/${result.length}.`);
-      setPairingStatus(`Pair ${label} complete: paired ${paired}/${combinedResult.length}. Direct local proof added ${directResult.length} source pair(s). Removed ${cleanedExisting.removed} numeric mismatch pair(s). Live searched ${liveStats.checked} file group(s), found ${liveStats.foundById + liveStats.foundBySearch} source hit(s). Preserved ${keptExisting} proven old pair(s). ${candidates} manual candidate(s) stayed unpaired.`);
+      setPairingStatus(`${report} Pair ${label} complete: paired ${paired}/${combinedResult.length}. Direct local proof added ${directResult.length} source pair(s). Removed ${cleanedExisting.removed} numeric mismatch pair(s). Live searched ${liveStats.checked} file group(s), found ${liveStats.foundById + liveStats.foundBySearch} source hit(s). Preserved ${keptExisting} proven old pair(s). ${candidates} manual candidate(s) stayed unpaired.`);
       if (source === "modworkshop") {
         void invoke<string>("diagnose_modworkshop_pairing").catch(() => "");
       }
@@ -2383,7 +3520,6 @@ export function InstalledPage() {
       reportTaskProgress("Pair All", 28, "Loading Nexus + ModWorkshop source index...");
       await refreshPairing(files, "all");
       reportTaskProgress("Pair All", 100, "All-source live pairing complete.");
-      setPairingStatus("Pair All complete. Use Pair All Workshop or Pair All Nexus if one source still needs a targeted pass.");
       void invoke<string>("diagnose_modworkshop_pairing").catch(() => "");
     } catch (error) {
       setPairingStatus(error instanceof Error ? error.message : String(error));
@@ -2399,10 +3535,24 @@ export function InstalledPage() {
 
 
   async function fetchSourceDetailForSummary(sourceMod: SourceModSummary) {
+    if ((sourceMod.source as string) === "local") {
+      return {
+        ...sourceMod,
+        description: sourceMod.shortDescription ?? "Managed local mod. No live source page is paired yet.",
+        changelog: null,
+        files: [],
+        images: [],
+        comments: [],
+        bugs: [],
+        logs: ["Managed Unknown Mod"],
+        stats: [{ label: "Match", value: "Unknown Mod" }],
+      };
+    }
+
     const detail =
       sourceMod.source === "nexus"
-        ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId })
-        : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId });
+        ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId, profileId, gameDomain: nexusGameDomain })
+        : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId, profileId });
 
     return {
       ...detail,
@@ -2467,7 +3617,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     let failed = 0;
 
     try {
-      const indexed = filterPayday3SourceMods(await invoke<SourceModSummary[]>("list_source_index", { source: sourceFilter === "all" ? null : sourceFilter, limit: 900 }));
+      const indexed = filterProfileSourceMods(profileId, await invoke<SourceModSummary[]>("list_source_index", { source: sourceFilter === "all" ? null : sourceFilter, limit: 100000, profileId }));
       const scored = indexed
         .map((mod) => ({ mod, score: scoreSourceForGroup(mod, group) }))
         .filter((item) => item.score >= 80)
@@ -2487,7 +3637,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
     if (id && !sourceMap.has(`modworkshop-${id}`)) {
       try {
-        const detail = await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: id });
+        const detail = await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: id, profileId });
         const summary = sourceSummaryFromDetail(detail);
         const labelCompact = compact(group.label);
         const summaryCompact = compact(normalizeInstalledName(summary.name));
@@ -2512,9 +3662,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     for (const query of queries) {
       let queryFound = 0;
 
-      if (sourceFilter !== "nexus") {
+      if (hasModWorkshopSource && sourceFilter !== "nexus") {
         try {
-          const results = filterPayday3SourceMods(await invoke<SourceModSummary[]>("search_modworkshop_mods_for_query", { query }));
+          const results = filterProfileSourceMods(profileId, await invoke<SourceModSummary[]>("search_modworkshop_mods_for_query", { query, profileId, gameId: modWorkshopGameKey }));
 
           for (const result of results.slice(0, 25)) {
             sourceMap.set(sourceKey(result), result);
@@ -2528,9 +3678,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         await yieldToUi();
       }
 
-      if (sourceFilter !== "modworkshop") {
+      if (hasNexusSource && sourceFilter !== "modworkshop") {
         try {
-          const nexusResults = filterPayday3SourceMods(await invoke<SourceModSummary[]>("search_nexus_mods_for_query", { query }));
+          const nexusResults = filterProfileSourceMods(profileId, await invoke<SourceModSummary[]>("search_nexus_mods_for_query", { query, profileId }));
 
           for (const result of nexusResults.slice(0, 25)) {
             sourceMap.set(sourceKey(result), result);
@@ -2599,9 +3749,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       failed += result.failed;
 
       if ((index + 1) % 4 === 0 || index === targets.length - 1) {
-        const nextMods = filterPayday3SourceMods([...sourceMap.values()]);
+        const nextMods = filterProfileSourceMods(profileId, [...sourceMap.values()]);
         setSourceMods(nextMods);
-        saveInstalledEnrichedSourceCache(nextMods);
+        saveInstalledEnrichedSourceCache(profileId, nextMods);
         await yieldToUi(35);
       }
     }
@@ -2612,7 +3762,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
 
   async function enrichUnmatchedFromFilenames() {
-    const sourceMap = new Map(filterPayday3SourceMods(sourceMods).map((mod) => [sourceKey(mod), mod]));
+    const sourceMap = new Map(filterProfileSourceMods(profileId, sourceMods).map((mod) => [sourceKey(mod), mod]));
     const targetGroups = (allUnmatchedGroups.length > 0 ? allUnmatchedGroups : groups)
       .filter((group) => !unpairableGroups.includes(group.key))
       .slice(0, searchPairLimit);
@@ -2650,7 +3800,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
         const nextMods = [...sourceMap.values()];
         setSourceMods(nextMods);
-        saveInstalledEnrichedSourceCache(nextMods);
+        saveInstalledEnrichedSourceCache(profileId, nextMods);
 
         if ((index + 1) % 2 === 0 || index === targetGroups.length - 1) {
           await runPairing(nextMods, rawFiles);
@@ -2660,11 +3810,11 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       const skipped = [...newlyUnpairable];
       setUnpairableGroups(skipped);
-      saveUnpairableGroups(skipped);
+      saveUnpairableGroups(profileId, skipped);
 
       const nextMods = [...sourceMap.values()];
       setSourceMods(nextMods);
-      saveInstalledEnrichedSourceCache(nextMods);
+      saveInstalledEnrichedSourceCache(profileId, nextMods);
       setSourceCacheAge("just now");
       setSourceCacheBuckets((current) => Math.max(current, 1));
 
@@ -2691,21 +3841,26 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     const nextSkipped = [...new Set([...unpairableGroups, group.key])];
 
     setCustomGroups(nextCustom);
-    saveStringList(CUSTOM_GROUPS_KEY, nextCustom);
+    saveStringList(profileLocalStorageKey(CUSTOM_GROUPS_KEY, profileId), nextCustom);
     setUnpairableGroups(nextSkipped);
-    saveUnpairableGroups(nextSkipped);
+    saveUnpairableGroups(profileId, nextSkipped);
     setStatus(`${group.label} marked as Custom/Local. It will not auto-pair.`);
   }
 
   function clearPairingGuards() {
     setRejectedPairings([]);
     setCustomGroups([]);
-    saveStringList(REJECTED_PAIRINGS_KEY, []);
-    saveStringList(CUSTOM_GROUPS_KEY, []);
+    saveStringList(profileLocalStorageKey(REJECTED_PAIRINGS_KEY, profileId), []);
+    saveStringList(profileLocalStorageKey(CUSTOM_GROUPS_KEY, profileId), []);
     setStatus("Cleared rejected pairings and custom/local marks.");
   }
 
   async function buildNexusIndex() {
+    if (profileId !== "builtin.payday3") {
+      setPairingStatus("The legacy Nexus PAYDAY 3 index builder is only available for the built-in PAYDAY 3 profile.");
+      return;
+    }
+
     setNexusIndexing(true);
     setBusyKey("nexus-index");
     reportTaskProgress("Rebuild Nexus", 8, "Loading ordered Nexus feeds...");
@@ -2714,7 +3869,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     try {
       const nexusMods = await invoke<SourceModSummary[]>("build_nexus_payday3_index", { maxId: 0 });
       reportTaskProgress("Rebuild Nexus", 72, `Loaded ${nexusMods.length} cards; merging cache...`);
-      const sourceMap = new Map(filterPayday3SourceMods(sourceMods).map((mod) => [sourceKey(mod), mod]));
+      const sourceMap = new Map(filterProfileSourceMods(profileId, sourceMods).map((mod) => [sourceKey(mod), mod]));
 
       for (const mod of nexusMods) {
         sourceMap.set(sourceKey(mod), mod);
@@ -2722,11 +3877,11 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       const nextMods = [...sourceMap.values()];
       setSourceMods(nextMods);
-      saveInstalledEnrichedSourceCache(nextMods);
+      saveInstalledEnrichedSourceCache(profileId, nextMods);
       setSourceCacheAge("just now");
       setSourceCacheBuckets((current) => Math.max(current, 1));
 
-      savePairState(nextMods, matches, rawFiles);
+      savePairState(profileId, nextMods, matches, rawFiles);
 
       setPairingStatus(`Rebuilt Nexus cache with ${nexusMods.length} ordered source cards. Existing matches were preserved; use Try Pair/Search Pair for targeted pairing.`);
     } catch (error) {
@@ -2747,7 +3902,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
 
     setMatches(next);
-    savePairState(sourceMods, next, rawFiles);
+    savePairState(profileId, sourceMods, next, rawFiles);
     return next;
   }
 
@@ -2775,7 +3930,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     if (candidates.length === 0) {
       const skipped = [...new Set([...unpairableGroups, group.key])];
       setUnpairableGroups(skipped);
-      saveUnpairableGroups(skipped);
+      saveUnpairableGroups(profileId, skipped);
       setAutoPairStatus(`${reason}: no cached proof candidates for ${group.label}. Saved as skipped so it will not retry on relaunch.`);
       return;
     }
@@ -2789,6 +3944,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       const result = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
         sourceMods: candidates,
+        profileId,
       });
 
       const nextMatches = mergeMatchArray(result);
@@ -2797,12 +3953,12 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       if (pairedNow) {
         const skipped = unpairableGroups.filter((key) => key !== group.key);
         setUnpairableGroups(skipped);
-        saveUnpairableGroups(skipped);
+        saveUnpairableGroups(profileId, skipped);
         setAutoPairStatus(`${reason}: paired ${group.label} from cache.`);
       } else {
         const skipped = [...new Set([...unpairableGroups, group.key])];
         setUnpairableGroups(skipped);
-        saveUnpairableGroups(skipped);
+        saveUnpairableGroups(profileId, skipped);
         setAutoPairStatus(`${reason}: candidates failed proof matching for ${group.label}. Saved as skipped.`);
       }
     } catch (error) {
@@ -2814,10 +3970,10 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   }
 
   async function tryPairGroup(group: InstalledGroup) {
-    const sourceMap = new Map(filterPayday3SourceMods(sourceMods).map((mod) => [sourceKey(mod), mod]));
+    const sourceMap = new Map(filterProfileSourceMods(profileId, sourceMods).map((mod) => [sourceKey(mod), mod]));
     const withoutCurrentSkip = unpairableGroups.filter((key) => key !== group.key);
     setUnpairableGroups(withoutCurrentSkip);
-    saveUnpairableGroups(withoutCurrentSkip);
+    saveUnpairableGroups(profileId, withoutCurrentSkip);
     setBusyKey(`try-pair-${group.key}`);
     reportTaskProgress("Try Pair", 10, group.label);
     setPairingStatus(`Trying selected pair for ${group.label}...`);
@@ -2837,12 +3993,12 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       const enrichedCandidates = candidatesForGroup(group, enrichedMods, 25, 50);
 
       setSourceMods(enrichedMods);
-      saveInstalledEnrichedSourceCache(enrichedMods);
+      saveInstalledEnrichedSourceCache(profileId, enrichedMods);
 
       if (enrichedCandidates.length === 0 && result.found === 0) {
         const skipped = [...new Set([...unpairableGroups, group.key])];
         setUnpairableGroups(skipped);
-        saveUnpairableGroups(skipped);
+        saveUnpairableGroups(profileId, skipped);
         setPairingStatus(`${group.label}: no source candidates found. Saved as skipped.`);
         return;
       }
@@ -2851,6 +4007,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       reportTaskProgress("Try Pair", 72, "Matching local file proof...");
       const matched = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
         sourceMods: enrichedCandidates.length > 0 ? enrichedCandidates : enrichedMods.slice(0, 30),
+        profileId,
       });
       const nextMatches = mergeMatchArray(matched);
       const pairedNow = Boolean(bestProofMatchForGroup(group, matched, enrichedCandidates)) || groupIsPairedByMatches(group, nextMatches, enrichedCandidates.length > 0 ? enrichedCandidates : enrichedMods);
@@ -2858,12 +4015,12 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       if (pairedNow) {
         const skipped = unpairableGroups.filter((key) => key !== group.key);
         setUnpairableGroups(skipped);
-        saveUnpairableGroups(skipped);
+        saveUnpairableGroups(profileId, skipped);
         setPairingStatus(`${group.label}: paired from selected Try Pair.`);
       } else {
         const skipped = [...new Set([...unpairableGroups, group.key])];
         setUnpairableGroups(skipped);
-        saveUnpairableGroups(skipped);
+        saveUnpairableGroups(profileId, skipped);
         setPairingStatus(`${group.label}: no proof match. Saved as skipped so it will not loop.`);
       }
     } catch (error) {
@@ -2875,7 +4032,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   }
 
   async function reinstallGroupFromTsuki(group: InstalledGroup) {
-    const sourceMap = new Map(filterPayday3SourceMods(sourceMods).map((mod) => [sourceKey(mod), mod]));
+    const sourceMap = new Map(filterProfileSourceMods(profileId, sourceMods).map((mod) => [sourceKey(mod), mod]));
     const replaceFileNames = group.files.map((file) => file.fileName);
     const busyId = `reinstall-${group.key}`;
 
@@ -2901,6 +4058,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       const matched = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
         sourceMods: candidates.length > 0 ? candidates : candidatePool.slice(0, 30),
+        profileId,
       });
 
       const candidateList = candidates.length > 0 ? candidates : candidatePool;
@@ -3039,6 +4197,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       downloadUrl: file.downloadUrl ?? null,
       modName: detail.name,
       description: detail.description,
+      gameDomain: detail.source === "nexus" ? detail.gameId ?? null : null,
+      profileId,
     });
 
     if (!staged.canInstallLater) {
@@ -3068,9 +4228,10 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       pageUrl: detail.pageUrl ?? null,
       description: detail.description,
       replaceFileNames,
+      profileId,
     });
 
-    saveInstalledEnrichedSourceCache(candidatePool);
+    saveInstalledEnrichedSourceCache(profileId, candidatePool);
     recordRuntimeDiagnostic("Reinstall from Tsuki", "success", "Reinstall completed and receipt/state should be available.", [detail.name, `${detail.source}:${detail.sourceId}`, file.name, `Installed: ${applied.installedFiles.length}`, `Replaced: ${applied.replacedFiles.length}`]);
     return applied;
   }
@@ -3116,7 +4277,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
   function clearUnpairableGroups() {
     setUnpairableGroups([]);
-    saveUnpairableGroups([]);
+    saveUnpairableGroups(profileId, []);
     setPairingStatus("Cleared skipped/unpairable groups. Light Auto Pair and selected Try Pair can retry them.");
   }
 
@@ -3190,15 +4351,17 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     setBusyKey(group.key);
 
     try {
-      const result = await invoke<string>("set_pak_mod_files_enabled", {
-        fileNames: group.files.map((file) => file.fileName),
-        enabled,
-      });
+      const win64 = groupLooksWin64OrUe4ss(group);
+      const fileNames = group.files.map((file) => file.fileName);
+      const filePaths = [...new Set(group.files.flatMap((file) => [file.fullPath, file.fileName]).filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+      const result = win64
+        ? await invoke<string>("set_local_win64_matched_files_enabled", { filePaths, enabled, profileId })
+        : await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled, profileId });
 
       setStatus(result);
-      const changedCount = parsedPakToggleCount(result);
+      const changedCount = win64 ? group.files.length : parsedPakToggleCount(result);
       if (changedCount === null || changedCount >= group.files.length) {
-        patchPakFilesEnabled(group.files.map((file) => file.fileName), enabled);
+        patchPakFilesEnabled(win64 ? filePaths : fileNames, enabled);
         setPairingStatus(`${group.label} is now ${enabled ? "On" : "Off"}. Updated the visible row without a full rescan.`);
       } else {
         setPairingStatus(`${group.label} partially toggled; refreshing once to reconcile skipped files.`);
@@ -3225,6 +4388,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     try {
       const result = await invoke<string>("uninstall_pak_mod_files", {
         fileNames,
+        profileId,
       });
 
       setStatus(result);
@@ -3248,6 +4412,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         source: match.source,
         sourceId: match.sourceId,
         enabled,
+        profileId,
       });
 
       setStatus(result);
@@ -3261,15 +4426,582 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
   }
 
-  async function uninstallMatch(match: InstalledSourceMatch) {
+  async function setMatchedLocalFilesEnabled(item: PairedInstalledMod, enabled: boolean) {
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
+    const busyId = `local-toggle-${item.match.source}-${item.match.sourceId}`;
+    setBusyKey(busyId);
+
+    try {
+      const win64 = installedSurfaceLabel(item) === "Win64/UE4SS";
+      const groupedPaths = item.files.flatMap((file) => [file.fullPath, file.fileName]);
+      const groupedFileNames = item.files.map((file) => file.fileName);
+      const rawTogglePaths = [...new Set([...(win64 ? groupedPaths : groupedFileNames), ...item.match.matchedFiles]
+        .filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+      const togglePaths = win64 ? rawTogglePaths : rawTogglePaths.map(fileNameKey).filter(Boolean);
+
+      const result = win64
+        ? await invoke<string>("set_local_win64_matched_files_enabled", {
+            filePaths: togglePaths,
+            enabled,
+            profileId,
+          })
+        : await invoke<string>("set_pak_mod_files_enabled", {
+            fileNames: togglePaths,
+            enabled,
+            profileId,
+          });
+
+      setStatus(result);
+      patchPakFilesEnabled(togglePaths, enabled);
+      patchSourceInstallEnabled({ ...item.match, matchedFiles: togglePaths }, enabled);
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
+
+      if (toggleResultNeedsRefresh(result, togglePaths.length)) {
+        setPairingStatus(`${displayModTitle(item.sourceMod)} toggled with skipped files; refreshing only this reconciliation pass.`);
+        await refreshInstalled(false);
+      } else {
+        setPairingStatus(`${displayModTitle(item.sourceMod)} is now ${enabled ? "On" : "Off"}. Updated the visible card without a full rescan.`);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  function crashCandidateTitle(key: string) {
+    return crashCandidateMap.get(key)?.title ?? key.replace(/^pair:|^group:/, "");
+  }
+
+  function crashGroupSignature(keys: string[]) {
+    return [...keys].sort().join("|");
+  }
+
+  function splitCrashGroup(keys: string[]) {
+    if (keys.length <= 1) return keys;
+    return keys.slice(0, Math.max(1, Math.ceil(keys.length / 2)));
+  }
+
+  function crashComplement(keys: string[], disabledGroup: string[]) {
+    const disabled = new Set(disabledGroup);
+    return keys.filter((key) => !disabled.has(key));
+  }
+
+  function chooseNextCrashGroup(suspects: string[], testedGroups: string[]) {
+    const preferred = splitCrashGroup(suspects);
+    if (!testedGroups.includes(crashGroupSignature(preferred))) return preferred;
+
+    const alternate = crashComplement(suspects, preferred);
+    if (alternate.length > 0 && !testedGroups.includes(crashGroupSignature(alternate))) return alternate;
+
+    return preferred;
+  }
+
+  function toggleResultChangedCount(result: string) {
+    const counts = [
+      ...Array.from(result.matchAll(/\b(?:Enabled|Disabled|Restored|Moved)\s+(\d+)\b/gi)).map((match) => Number(match[1])),
+      ...Array.from(result.matchAll(/\bmoving\s+(\d+)\s+file/gi)).map((match) => Number(match[1])),
+      ...Array.from(result.matchAll(/\b(\d+)\s+(?:file|files)\b/gi)).map((match) => Number(match[1])),
+    ].filter((value) => Number.isFinite(value));
+
+    return counts.length > 0 ? Math.max(...counts) : null;
+  }
+
+  function toggleResultSucceeded(result: string) {
+    const count = toggleResultChangedCount(result);
+    if (count !== null) return count > 0;
+    if (/already\s+(?:enabled|disabled|off|on)/i.test(result)) return true;
+    return !/(?:no matching|not found|0\s+(?:file|files)|failed|unable)/i.test(result);
+  }
+
+  function toggleResultNeedsRefresh(result: string, expectedCount: number) {
+    const count = toggleResultChangedCount(result);
+    const hasProblem = /(?:skipped|missing|refused|failed|unable|target already exists|no matching|not found)/i.test(result);
+    if (count !== null && expectedCount > 0 && count < expectedCount) return true;
+    return hasProblem && !(count !== null && count >= expectedCount);
+  }
+
+  function extractDisabledStoragePaths(result: string) {
+    const paths = new Set<string>();
+    for (const match of result.matchAll(/(?:storage at|disabled storage at|moved to)\s+([^.;\n]+)/gi)) {
+      const value = match[1]?.trim();
+      if (value) paths.add(value);
+    }
+    return [...paths];
+  }
+
+  async function setCrashCandidatesEnabledBatch(keys: string[], enabled: boolean): Promise<CrashToggleResult[]> {
+    const started = performance.now();
+    const uniqueKeys = [...new Set(keys)];
+    const results: CrashToggleResult[] = [];
+    const receiptActions: Array<{ key: string; title: string; match: InstalledSourceMatch }> = [];
+    const pakFileNames = new Set<string>();
+    const win64FilePaths = new Set<string>();
+    const pakKeys: string[] = [];
+    const win64Keys: string[] = [];
+    const pakPatchMatches: InstalledSourceMatch[] = [];
+    const win64PatchMatches: InstalledSourceMatch[] = [];
+
+    const pushSkipped = (key: string, title: string, skippedReason: string) => {
+      results.push({ key, title, attempted: false, success: false, skippedReason });
+    };
+
+    for (const key of uniqueKeys) {
+      const candidate = crashCandidateMap.get(key);
+      const title = candidate?.title ?? key.replace(/^pair:|^group:/, "");
+      if (!candidate) {
+        pushSkipped(key, title, "candidate not found");
+        continue;
+      }
+      if (crashTestCancelRef.current) {
+        pushSkipped(key, title, "cancelled");
+        continue;
+      }
+
+      if (candidate.item) {
+        const receiptBacked = isReceiptBackedInstalledItem(candidate.item);
+        if (receiptBacked) {
+          receiptActions.push({ key, title, match: candidate.item.match });
+          continue;
+        }
+
+        if (!itemHasManageableInstalledFiles(candidate.item)) {
+          pushSkipped(key, title, "no manageable files");
+          continue;
+        }
+
+        const win64 = installedSurfaceLabel(candidate.item) === "Win64/UE4SS";
+        const groupedPaths = candidate.item.files.flatMap((file) => [file.fullPath, file.fileName]);
+        const groupedFileNames = candidate.item.files.map((file) => file.fileName);
+        const toggleValues = [...new Set([...(win64 ? groupedPaths : groupedFileNames), ...candidate.item.match.matchedFiles]
+          .filter((value): value is string => Boolean(value && value.trim().length > 0)))];
+
+        if (toggleValues.length === 0) {
+          pushSkipped(key, title, "no tracked file paths");
+          continue;
+        }
+
+        if (win64) {
+          toggleValues.forEach((value) => win64FilePaths.add(value));
+          win64Keys.push(key);
+          win64PatchMatches.push({ ...candidate.item.match, matchedFiles: toggleValues });
+        } else {
+          toggleValues.map(fileNameKey).filter(Boolean).forEach((value) => pakFileNames.add(value));
+          pakKeys.push(key);
+          pakPatchMatches.push({ ...candidate.item.match, matchedFiles: toggleValues.map(fileNameKey).filter(Boolean) });
+        }
+      } else if (candidate.group) {
+        const win64 = groupLooksWin64OrUe4ss(candidate.group);
+        const toggleValues = win64
+          ? [...new Set(candidate.group.files.flatMap((file) => [file.fullPath, file.fileName]).filter((value): value is string => Boolean(value && value.trim().length > 0)))]
+          : candidate.group.files.map((file) => file.fileName).map(fileNameKey).filter(Boolean);
+
+        if (toggleValues.length === 0) {
+          pushSkipped(key, title, "no tracked group files");
+          continue;
+        }
+
+        if (win64) {
+          toggleValues.forEach((value) => win64FilePaths.add(value));
+          win64Keys.push(key);
+        } else {
+          toggleValues.forEach((value) => pakFileNames.add(value));
+          pakKeys.push(key);
+        }
+      } else {
+        pushSkipped(key, title, "candidate has no installed files");
+      }
+    }
+
+    for (const action of receiptActions) {
+      if (crashTestCancelRef.current) {
+        pushSkipped(action.key, action.title, "cancelled");
+        continue;
+      }
+
+      const actionStarted = performance.now();
+      try {
+        const message = await invoke<string>("set_source_install_enabled", {
+          source: action.match.source,
+          sourceId: action.match.sourceId,
+          enabled,
+          profileId,
+        });
+        const success = toggleResultSucceeded(message);
+        if (success) patchSourceInstallEnabled(action.match, enabled);
+        results.push({
+          key: action.key,
+          title: action.title,
+          attempted: true,
+          success,
+          message,
+          disabledStoragePaths: enabled ? [] : extractDisabledStoragePaths(message),
+          batchSize: 1,
+          fileCount: action.match.matchedFiles.length,
+          elapsedMs: Math.round(performance.now() - actionStarted),
+        });
+      } catch (error) {
+        results.push({
+          key: action.key,
+          title: action.title,
+          attempted: true,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+          batchSize: 1,
+          fileCount: action.match.matchedFiles.length,
+          elapsedMs: Math.round(performance.now() - actionStarted),
+        });
+      }
+    }
+
+    async function runFileBatch(command: "set_pak_mod_files_enabled" | "set_local_win64_matched_files_enabled", batchKeys: string[], values: string[], matchesToPatch: InstalledSourceMatch[]) {
+      if (values.length === 0 || batchKeys.length === 0) return;
+      if (crashTestCancelRef.current) {
+        batchKeys.forEach((key) => pushSkipped(key, crashCandidateTitle(key), "cancelled"));
+        return;
+      }
+
+      const actionStarted = performance.now();
+      try {
+        const message = command === "set_local_win64_matched_files_enabled"
+          ? await invoke<string>(command, { filePaths: values, enabled, profileId })
+          : await invoke<string>(command, { fileNames: values, enabled, profileId });
+        const success = toggleResultSucceeded(message);
+        const elapsedMs = Math.round(performance.now() - actionStarted);
+        if (success) {
+          patchPakFilesEnabled(values, enabled);
+          for (const match of matchesToPatch) patchSourceInstallEnabled(match, enabled);
+        }
+        const disabledStoragePaths = enabled ? [] : extractDisabledStoragePaths(message);
+        for (const key of batchKeys) {
+          results.push({
+            key,
+            title: crashCandidateTitle(key),
+            attempted: true,
+            success,
+            message,
+            disabledStoragePaths,
+            batchSize: batchKeys.length,
+            fileCount: values.length,
+            elapsedMs,
+          });
+        }
+      } catch (error) {
+        const elapsedMs = Math.round(performance.now() - actionStarted);
+        const message = error instanceof Error ? error.message : String(error);
+        for (const key of batchKeys) {
+          results.push({
+            key,
+            title: crashCandidateTitle(key),
+            attempted: true,
+            success: false,
+            error: message,
+            batchSize: batchKeys.length,
+            fileCount: values.length,
+            elapsedMs,
+          });
+        }
+      }
+    }
+
+    await runFileBatch("set_pak_mod_files_enabled", pakKeys, [...pakFileNames], pakPatchMatches);
+    await runFileBatch("set_local_win64_matched_files_enabled", win64Keys, [...win64FilePaths], win64PatchMatches);
+
+    const elapsedMs = Math.round(performance.now() - started);
+    const attempted = results.filter((result) => result.attempted).length;
+    const skipped = results.filter((result) => !result.attempted || result.skippedReason).length;
+    const fileCount = pakFileNames.size + win64FilePaths.size + receiptActions.reduce((total, action) => total + action.match.matchedFiles.length, 0);
+    const verb = enabled ? "enable/restore" : "disable";
+    setCrashTest((current) => ({
+      ...current,
+      history: [...current.history, `Batch ${verb}: candidates ${uniqueKeys.length}, attempted ${attempted}, file refs ${fileCount}, skipped ${skipped}, elapsed ${elapsedMs}ms.`].slice(-12),
+    }));
+
+    return results;
+  }
+  function crashTestDelay(ms = 90) {
+    return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function restoreCrashTestOriginalState(state = crashTest) {
+    const entries = Object.entries(state.originalEnabled);
+    if (entries.length === 0) {
+      setCrashTest((current) => ({ ...current, status: "No Crash Test snapshot is available to restore." }));
+      return;
+    }
+
+    setCrashTestBusy(true);
+    setCrashTest((current) => ({ ...current, status: "Restoring original enabled/disabled state..." }));
+
+    try {
+      crashTestCancelRef.current = false;
+      const originallyEnabled = entries.filter(([, enabled]) => enabled).map(([key]) => key);
+      const originallyDisabled = entries.filter(([, enabled]) => !enabled).map(([key]) => key);
+      const enableResults = await setCrashCandidatesEnabledBatch(originallyEnabled, true);
+      const disableResults = await setCrashCandidatesEnabledBatch(originallyDisabled, false);
+      const failed = [...enableResults, ...disableResults].filter((result) => result.attempted && !result.success).length;
+      const skipped = [...enableResults, ...disableResults].filter((result) => !result.attempted || result.skippedReason).length;
+
+      setCrashTest((current) => ({
+        ...current,
+        active: false,
+        currentGroup: [],
+        status: failed > 0 || skipped > 0
+          ? `Original state restore finished with ${failed} failed and ${skipped} skipped toggle(s).`
+          : "Original enabled/disabled state restored.",
+        history: [...current.history, `Restored original state in batch. Failed ${failed}, skipped ${skipped}.`].slice(-12),
+      }));
+    } finally {
+      setCrashTestBusy(false);
+    }
+  }
+
+  async function prepareCrashTestGroup(groupKeys: string[], baseState = crashTest) {
+    if (groupKeys.length === 0) return;
+    const groupSignature = crashGroupSignature(groupKeys);
+
+    setCrashTest((current) => ({
+      ...current,
+      currentGroup: groupKeys,
+      status: `Round ${baseState.round || 1}: disabling ${groupKeys.length} of ${baseState.testableCount || baseState.suspects.length} testable enabled mod group(s), then launching ${gameName}...`,
+      disabledGroupCount: groupKeys.length,
+      attemptedDisables: 0,
+      successfulDisables: 0,
+      failedDisables: 0,
+      skippedMods: [],
+      disabledStoragePaths: [],
+      testedGroups: current.testedGroups.includes(groupSignature) ? current.testedGroups : [...current.testedGroups, groupSignature],
+      lastResult: null,
+      nextAction: "Disable this half, launch the game, then wait for your Yes/No result.",
+      noProgressReason: current.testedGroups.includes(groupSignature) ? "This exact group was already tested. Choose Not sure only when you intentionally want to retry it." : null,
+      history: [...current.history, `Round ${baseState.round || 1}: testing group: ${groupKeys.map(crashCandidateTitle).join(", ")}`].slice(-12),
+    }));
+
+    const originalEntries = Object.entries(baseState.originalEnabled);
+    const originallyEnabledKeys = originalEntries.filter(([, enabled]) => enabled).map(([key]) => key);
+    await setCrashCandidatesEnabledBatch(originallyEnabledKeys, true);
+    if (crashTestCancelRef.current) return;
+
+    const disableResults = await setCrashCandidatesEnabledBatch(groupKeys, false);
+
+    const attempted = disableResults.filter((result) => result.attempted).length;
+    const successful = disableResults.filter((result) => result.success).length;
+    const failed = disableResults.filter((result) => result.attempted && !result.success).length;
+    const skipped = disableResults
+      .filter((result) => !result.attempted || result.skippedReason)
+      .map((result) => `${result.title}: ${result.skippedReason ?? result.error ?? "not attempted"}`);
+    const disabledStoragePaths = [...new Set(disableResults.flatMap((result) => result.disabledStoragePaths ?? []))];
+    const wrongSourceSet = (baseState.testableCount || baseState.suspects.length) >= 70 && groupKeys.length >= 20 && attempted <= 3;
+    const noProgressReason = wrongSourceSet ? "Crash tester is using the wrong source set." : null;
+
+    setCrashTest((current) => ({
+      ...current,
+      attemptedDisables: attempted,
+      successfulDisables: successful,
+      failedDisables: failed,
+      skippedMods: skipped.slice(0, 24),
+      disabledStoragePaths,
+      noProgressReason,
+      nextAction: wrongSourceSet
+        ? "Stop. Crash Tester did not attempt the expected half-set; inspect the candidate source before launching."
+        : (successful > 0 ? "Answer whether the problem happened while this group is disabled." : "No mods were disabled. Check skipped/failed diagnostics before continuing."),
+      status: wrongSourceSet
+        ? "Crash tester is using the wrong source set."
+        : (successful > 0
+          ? `Disabled ${successful}/${groupKeys.length} selected test group(s). Launching ${gameName}...`
+          : `Crash Test could not disable any selected mods. Failed: ${failed}. Skipped: ${skipped.length}.`),
+      history: [...current.history, `Disable results: attempted ${attempted}, successful ${successful}, failed ${failed}, skipped ${skipped.length}.`].slice(-12),
+    }));
+
+    if (wrongSourceSet || successful === 0) return;
+
+    try {
+      const result = await invoke<string>("launch_active_profile_modded", { profileId });
+      setCrashTest((current) => ({ ...current, status: `${result} After testing, answer whether the crash/problem happened.` }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCrashTest((current) => ({ ...current, status: `Launch attempt failed: ${message}. You can still answer manually or restore original state.` }));
+    }
+  }
+
+  async function startCrashTest() {
+    if (crashTestBusy) return;
+    if (!(await ensureRuntimeMutationAllowed())) return;
+
+    const enabledCandidates = crashTestCandidates.filter((candidate) => candidate.enabled);
+    const testableCandidates = enabledCandidates.filter((candidate) => !candidate.excluded);
+    const excludedCandidates = enabledCandidates.filter((candidate) => candidate.excluded);
+    if (testableCandidates.length === 0) {
+      setCrashTest((current) => ({
+        ...current,
+        status: excludedCandidates.length > 0
+          ? "All enabled mods are excluded from Crash Test. Include at least one mod to test."
+          : "No enabled mods are available for Crash Test.",
+        excludedCount: excludedCandidates.length,
+        testableCount: 0,
+      }));
+      return;
+    }
+
+    const originalEnabled = Object.fromEntries(crashTestCandidates.map((candidate) => [candidate.key, candidate.enabled]));
+    const suspects = testableCandidates.map((candidate) => candidate.key);
+    const currentGroup = splitCrashGroup(suspects);
+    const nextState: CrashTestState = {
+      active: true,
+      originalEnabled,
+      suspects,
+      currentGroup,
+      likelySuspects: [],
+      status: "Crash Test started. Tsuki saved the current enabled/disabled state.",
+      history: [`Started with ${enabledCandidates.length} enabled mod group(s), ${excludedCandidates.length} excluded, ${suspects.length} testable. First pass disables ${currentGroup.length}.`],
+      totalEnabled: enabledCandidates.length,
+      excludedCount: excludedCandidates.length,
+      testableCount: suspects.length,
+      disabledGroupCount: currentGroup.length,
+      round: 1,
+      attemptedDisables: 0,
+      successfulDisables: 0,
+      failedDisables: 0,
+      skippedMods: [],
+      disabledStoragePaths: [],
+      testableKeys: suspects,
+      testedGroups: [],
+      lastResult: null,
+      nextAction: `First round disables ${currentGroup.length}; the other ${suspects.length - currentGroup.length} testable mod group(s) stay enabled.`,
+      noProgressReason: null,
+    };
+
+    crashTestCancelRef.current = false;
+    setCrashTest(nextState);
+    setCrashTestBusy(true);
+    try {
+      await crashTestDelay(90);
+      await prepareCrashTestGroup(currentGroup, nextState);
+    } finally {
+      setCrashTestBusy(false);
+    }
+  }
+
+  async function answerCrashTest(answer: CrashTestAnswer) {
+    if (crashTestBusy || !crashTest.active || crashTest.currentGroup.length === 0) return;
+
+    if (answer === "unsure") {
+      setCrashTest((current) => ({
+        ...current,
+        lastResult: "Not sure",
+        nextAction: "Retest this same group or restore the original state.",
+        noProgressReason: "User marked this round as unsure, so Tsuki did not reduce the suspect set.",
+        status: "Marked unsure. Re-run this group, or stop and restore the original state.",
+        history: [...current.history, "User was unsure for current test group."].slice(-12),
+      }));
+      return;
+    }
+
+    const currentSuspects = crashTest.suspects;
+    const disabledHalf = crashTest.currentGroup;
+    const stillEnabledHalf = crashComplement(currentSuspects, disabledHalf);
+    const nextSuspects = answer === "no" ? disabledHalf : stillEnabledHalf;
+    const lastResult = answer === "no"
+      ? "Problem stopped while the current group was disabled. Suspects are inside the disabled half."
+      : "Problem happened while the current group was disabled. Suspects are inside the still-enabled half.";
+
+    if (nextSuspects.length === 0 || nextSuspects.length >= currentSuspects.length) {
+      const reason = nextSuspects.length === 0
+        ? "No suspect mods remain after this answer. Restore original state and rerun if needed."
+        : "This answer did not reduce the suspect set, so Tsuki stopped to avoid repeating the same test.";
+      setCrashTest((current) => ({
+        ...current,
+        lastResult,
+        noProgressReason: reason,
+        nextAction: "Restore original state, then restart Crash Test if the result was unexpected.",
+        status: reason,
+        history: [...current.history, `${lastResult} ${reason}`].slice(-12),
+      }));
+      return;
+    }
+
+    if (nextSuspects.length <= 1) {
+      const likelySuspects = nextSuspects;
+      setCrashTest((current) => ({
+        ...current,
+        suspects: nextSuspects,
+        currentGroup: [],
+        likelySuspects,
+        disabledGroupCount: 0,
+        lastResult,
+        nextAction: "Likely culprit isolated. Restore original state when finished.",
+        noProgressReason: null,
+        status: likelySuspects.length === 1
+          ? `Likely suspect found: ${crashCandidateTitle(likelySuspects[0])}. Restore the original state when finished.`
+          : "Crash Test could not isolate a suspect from the remaining enabled mods.",
+        history: [...current.history, `${lastResult} Suspect set reduced from ${currentSuspects.length} to ${nextSuspects.length}.`].slice(-12),
+      }));
+      return;
+    }
+
+    const nextGroup = chooseNextCrashGroup(nextSuspects, crashTest.testedGroups);
+    const nextSignature = crashGroupSignature(nextGroup);
+    if (crashTest.testedGroups.includes(nextSignature)) {
+      const reason = "Every candidate half for this suspect set was already tested. Tsuki stopped to avoid repeating a group.";
+      setCrashTest((current) => ({
+        ...current,
+        suspects: nextSuspects,
+        currentGroup: [],
+        disabledGroupCount: 0,
+        lastResult,
+        noProgressReason: reason,
+        nextAction: "Restore original state or answer Not sure only if you want to manually retry.",
+        status: reason,
+        history: [...current.history, `${lastResult} ${reason}`].slice(-12),
+      }));
+      return;
+    }
+
+    const nextState: CrashTestState = {
+      ...crashTest,
+      suspects: nextSuspects,
+      currentGroup: nextGroup,
+      disabledGroupCount: nextGroup.length,
+      round: crashTest.round + 1,
+      attemptedDisables: 0,
+      successfulDisables: 0,
+      failedDisables: 0,
+      skippedMods: [],
+      disabledStoragePaths: [],
+      lastResult,
+      nextAction: `Suspect set reduced from ${currentSuspects.length} to ${nextSuspects.length}. Next round disables ${nextGroup.length} and leaves ${nextSuspects.length - nextGroup.length} enabled.`,
+      noProgressReason: null,
+      history: [...crashTest.history, `${lastResult} Suspect set reduced from ${currentSuspects.length} to ${nextSuspects.length}.`].slice(-12),
+    };
+
+    setCrashTest(nextState);
+    setCrashTestBusy(true);
+    try {
+      await crashTestDelay(90);
+      await prepareCrashTestGroup(nextGroup, nextState);
+    } finally {
+      setCrashTestBusy(false);
+    }
+  }
+
+  async function stopCrashTest() {
+    crashTestCancelRef.current = true;
+    if (crashTestBusy) {
+      setCrashTest((current) => ({ ...current, status: "Crash Test is finishing the current safe toggle step. Restore will run next." }));
+      await crashTestDelay(120);
+    }
+    await restoreCrashTestOriginalState();
+  }
+  async function uninstallMatch(match: InstalledSourceMatch, receiptBacked = match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported") {
     if (!(await ensureRuntimeMutationAllowed())) return;
 
     setBusyKey(`uninstall-${match.source}-${match.sourceId}`);
 
     try {
-      const result = match.matchKind === "receipt"
-        ? await invoke<string>("uninstall_source_install", { source: match.source, sourceId: match.sourceId })
-        : await invoke<string>("uninstall_pak_mod_files", { fileNames: match.matchedFiles });
+      const result = receiptBacked
+        ? await invoke<string>("uninstall_source_install", { source: match.source, sourceId: match.sourceId, profileId })
+        : await invoke<string>("uninstall_pak_mod_files", { fileNames: match.matchedFiles, profileId });
 
       setStatus(result);
       setSelectedSourceMod(null);
@@ -3279,6 +5011,49 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyKey(null);
+    }
+  }
+
+  async function removeBrokenReceipt(match: InstalledSourceMatch) {
+    const receiptId = match.receiptId;
+    if (!receiptId) {
+      setStatus("Broken receipt ID is unavailable. Run a full refresh and try again.");
+      return;
+    }
+
+    setBusyKey(`remove-broken-${receiptId}`);
+    reportTaskProgress("Remove broken receipt", 25, `Removing receipt ${receiptId}...`);
+
+    try {
+      const result = await invoke<string>("remove_broken_receipt", { receiptId, profileId });
+      const removedKey = `${match.source}-${match.sourceId}`;
+      setMatches((current) => {
+        const next = { ...current };
+        for (const [key, value] of Object.entries(next)) {
+          if (key === removedKey || value.receiptId === receiptId) delete next[key];
+        }
+        savePairState(profileId, sourceMods, next, rawFiles);
+        return next;
+      });
+      setSourceUpdates((current) => current.filter((update) => !(update.source === match.source && update.modId === match.sourceId)));
+      invalidateInstalledSessionCache(profileId);
+      try {
+        window.localStorage.removeItem(profileLocalStorageKey(PAIR_STATE_CACHE_KEY, profileId));
+      } catch {
+        // Optional cache.
+      }
+      setSelectedSourceMod(null);
+      setSelectedSourceMatch(null);
+      setStatus(result);
+      reportTaskProgress("Remove broken receipt", 100, "Receipt removed. Refreshing Installed...");
+      await refreshInstalled();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      reportTaskProgress("Remove broken receipt failed", 100, message);
+    } finally {
+      setBusyKey(null);
+      clearTaskProgressSoon();
     }
   }
 
@@ -3297,29 +5072,33 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   async function setSelectedFilesEnabled(enabled: boolean) {
     if (!(await ensureRuntimeMutationAllowed())) return;
 
-    if (selectedFileNames.length === 0) {
-      setStatus("No selected files.");
+    if (selectedToggleKeys.length === 0) {
+      setStatus("No selected manageable mod cards.");
       return;
     }
 
-    setBusyKey(`mass-${enabled ? "enable" : "disable"}`);
+    const busyId = `mass-${enabled ? "enable" : "disable"}`;
+    setBusyKey(busyId);
 
     try {
-      const result = await invoke<string>("set_pak_mod_files_enabled", {
-        fileNames: selectedFileNames,
-        enabled,
-      });
+      const started = performance.now();
+      const results = await setCrashCandidatesEnabledBatch(selectedToggleKeys, enabled);
+      const attempted = results.filter((result) => result.attempted).length;
+      const successful = results.filter((result) => result.success).length;
+      const failed = results.filter((result) => result.attempted && !result.success).length;
+      const skipped = results.filter((result) => !result.attempted || result.skippedReason).length;
+      const elapsed = Math.round(performance.now() - started);
 
-      setStatus(result);
+      setStatus(`${enabled ? "Enabled" : "Disabled"} ${successful}/${selectedToggleKeys.length} selected mod card(s) in ${elapsed}ms. ${failed ? `${failed} failed. ` : ""}${skipped ? `${skipped} skipped.` : ""}`.trim());
+      setPairingStatus(`Multi-select ${enabled ? "enable" : "disable"}: attempted ${attempted}, succeeded ${successful}, failed ${failed}, skipped ${skipped}. Updated affected cards without a full Installed scan.`);
       clearSelectedCards();
-      await refreshInstalled();
+      window.dispatchEvent(new Event("tsuki-data-refresh"));
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyKey(null);
     }
   }
-
   function requestDeleteSelected() {
     if (selectedFileNames.length === 0) {
       setStatus("No selected files.");
@@ -3333,7 +5112,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     setStatus("Opening pak mods folder...");
 
     try {
-      const result = await invoke<string>("open_pak_mods_folder");
+      const result = await invoke<string>("open_pak_mods_folder", { profileId });
       setStatus(result);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -3365,6 +5144,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         sourceId: match.sourceId,
         matchedFiles: match.matchedFiles,
         matchKind: match.matchKind,
+        profileId,
       });
 
       setStatus(result);
@@ -3382,12 +5162,51 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     reportTaskProgress("Open installed mod", 12, sourceMod.name);
     setStatus(`Opening ${sourceMod.name} inside Tsuki...`);
 
+    const fallbackDetail: SourceModDetail = {
+      ...sourceMod,
+      description: match?.reason ?? sourceMod.shortDescription ?? "Source files are unavailable right now. Tsuki is showing the local installed files it already tracks.",
+      changelog: null,
+      files: [],
+      images: [],
+      comments: [],
+      bugs: [],
+      logs: [match?.reason ?? "Installed local file record"],
+      stats: [
+        { label: "Match", value: matchKindLabel(match?.matchKind) ?? "Local installed files" },
+        { label: "Confidence", value: `${match?.confidence ?? 0}%` },
+      ],
+    };
+
+    setSelectedSourceMod(fallbackDetail);
+
     try {
+      if ((sourceMod.source as string) === "local") {
+        const localDetail: SourceModDetail = {
+          ...sourceMod,
+          description: match?.reason ?? sourceMod.shortDescription ?? "Managed local mod. No live source page is paired yet.",
+          changelog: null,
+          files: [],
+          images: [],
+          comments: [],
+          bugs: [],
+          logs: [match?.reason ?? "Managed Unknown Mod"],
+          stats: [
+            { label: "Match", value: matchKindLabel(match?.matchKind) ?? "Unknown Mod" },
+            { label: "Confidence", value: `${match?.confidence ?? 0}%` },
+          ],
+        };
+
+        setSelectedSourceMod(localDetail);
+        setStatus(`Opened ${sourceMod.name}.`);
+        reportTaskProgress("Open installed mod", 100, "Opened local installed record.");
+        return;
+      }
+
       reportTaskProgress("Open installed mod", 48, "Loading full source detail...");
       const detail =
         sourceMod.source === "nexus"
-          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId })
-          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId });
+          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId, profileId, gameDomain: nexusGameDomain })
+          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId, profileId });
 
       reportTaskProgress("Open installed mod", 88, "Rendering detail page...");
       const safeDetail = {
@@ -3409,6 +5228,63 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     }
   }
 
+  async function openLocalGroupDetail(group: InstalledGroup) {
+    const sourceId = group.key;
+    const localSource = "local" as ModSourceKind;
+    const matchedFiles = group.files.map((file) => file.fullPath || file.fileName);
+    const match: InstalledSourceMatch = {
+      source: localSource,
+      sourceId,
+      installed: true,
+      enabled: group.enabled,
+      updateAvailable: false,
+      confidence: customGroups.includes(group.key) ? 45 : 10,
+      confidenceLevel: customGroups.includes(group.key) ? "medium" : "low",
+      ownershipClassification: customGroups.includes(group.key) ? "local_detected" : "unknown_local",
+      reason: customGroups.includes(group.key) ? "User marked this local group as custom." : "Unknown local files detected in the active game profile.",
+      matchedFiles,
+      matchKind: customGroups.includes(group.key) ? "custom-local" : "unknown-local",
+      displayName: group.label,
+      sourceFileCategory: group.files.some((file) => installedPathLooksWin64OrUe4ss(file.fullPath) || installedPathLooksWin64OrUe4ss(file.fileName)) ? "Win64/UE4SS" : null,
+      notes: "Local/unknown mod generated from the active profile scan.",
+    };
+    const detail: SourceModDetail = {
+      source: localSource,
+      sourceId,
+      name: group.label,
+      author: customGroups.includes(group.key) ? "Custom local mod" : null,
+      version: null,
+      tags: [customGroups.includes(group.key) ? "Custom Local" : "Unknown Local", `${group.files.length} files`, group.enabled ? "Enabled" : "Disabled"],
+      thumbnailUrl: null,
+      bannerUrl: null,
+      pageUrl: null,
+      updatedAt: group.modifiedUnix ? String(group.modifiedUnix) : null,
+      downloads: null,
+      likes: null,
+      views: null,
+      shortDescription: customGroups.includes(group.key) ? "Custom local mod in the selected profile." : "Unknown local mod in the selected profile.",
+      description: [
+        customGroups.includes(group.key) ? "This custom local mod is not paired with an online source yet." : "Tsuki found these local files but has not matched them to an online source yet.",
+        "Use Try Pair or Edit Metadata to match, rename, tag, and convert it into a managed mod.",
+      ].join("\n\n"),
+      changelog: null,
+      files: [],
+      images: [],
+      comments: [],
+      bugs: [],
+      logs: group.files.slice(0, 24).map((file) => `${file.fileName} - ${formatBytes(file.sizeBytes)} - ${formatDateFromUnix(file.modifiedUnix)}`),
+      stats: [
+        { label: "Files", value: group.files.length.toLocaleString() },
+        { label: "Size", value: formatBytes(group.sizeBytes) },
+        { label: "Modified", value: formatDateFromUnix(group.modifiedUnix) },
+      ],
+      dataSource: "fallback",
+      detailDataSource: "fallback",
+      fileListDataSource: "unavailable",
+    };
+    setSelectedSourceMatch(match);
+    setSelectedSourceMod(detail);
+  }
   async function updateInstalledMatch(sourceMod: SourceModSummary, match: InstalledSourceMatch) {
     const key = `update-${sourceMod.source}-${sourceMod.sourceId}`;
     setBusyKey(key);
@@ -3418,8 +5294,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
     try {
       const detail =
         sourceMod.source === "nexus"
-          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId })
-          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId });
+          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: sourceMod.sourceId, profileId, gameDomain: nexusGameDomain })
+          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: sourceMod.sourceId, profileId });
 
       const safeDetail = {
         ...detail,
@@ -3437,7 +5313,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         return;
       }
 
-      const matchedGroup = pairFilesFromMatch(match, groups) ?? {
+      const matchedGroup = pairFilesFromMatch(match, groups, sourceMod) ?? {
         key: `${match.source}-${match.sourceId}`,
         label: sourceMod.name,
         files: [],
@@ -3470,6 +5346,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         downloadUrl: file.downloadUrl ?? null,
         modName: safeDetail.name,
         description: safeDetail.description,
+        gameDomain: safeDetail.source === "nexus" ? safeDetail.gameId ?? null : null,
+        profileId,
       });
 
       if (!staged.canInstallLater) {
@@ -3498,6 +5376,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         pageUrl: safeDetail.pageUrl ?? null,
         description: safeDetail.description,
         replaceFileNames: match.matchedFiles,
+        profileId,
       });
 
       setStatus(`Updated ${safeDetail.name}: installed ${applied.installedFiles.length} file(s), replaced ${applied.replacedFiles.length} old file(s).`);
@@ -3519,20 +5398,31 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
   void pairAllSources;
 
   useEffect(() => {
+    if (!runtimeReady) return;
     if (sessionCache) {
-      setStatus("Loaded installed library from session cache.");
+      setStatus("Checking cached installed library against disk...");
       void refreshRuntimeLock();
-    } else {
+    }
+    initialRefreshTimerRef.current = window.setTimeout(() => {
+      initialRefreshTimerRef.current = null;
+      void refreshInstalled();
+    }, 0);
+
+    const reconcileOnFocus = () => {
+      if (document.hidden || installedRefreshBusyRef.current) return;
+      if (initialRefreshTimerRef.current !== null) window.clearTimeout(initialRefreshTimerRef.current);
       initialRefreshTimerRef.current = window.setTimeout(() => {
         initialRefreshTimerRef.current = null;
-        void refreshInstalled();
-      }, 900);
-    }
+        void refreshInstalled(false);
+      }, 500);
+    };
+    window.addEventListener("focus", reconcileOnFocus);
 
     const timer = window.setInterval(() => {
       void refreshRuntimeLock();
     }, 5000);
     return () => {
+      window.removeEventListener("focus", reconcileOnFocus);
       if (initialRefreshTimerRef.current !== null) {
         window.clearTimeout(initialRefreshTimerRef.current);
         initialRefreshTimerRef.current = null;
@@ -3540,7 +5430,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [profileId, runtimeReady]);
 
   useEffect(() => {
     if (autoPairTimerRef.current !== null) {
@@ -3595,43 +5485,87 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
   if (selectedSourceMod) {
     return (
-      <InstalledSourceDetailPage
-        mod={selectedSourceMod}
-        match={selectedSourceMatch}
-        busyKey={busyKey}
-        runtimeLocked={runtimeLock?.toggleLocked ?? false}
-        onBack={() => {
-          setSelectedSourceMod(null);
-          setSelectedSourceMatch(null);
-        }}
-        onOpenWebsite={openWebsite}
-        onOpenFileLocation={openInstalledFileLocation}
-        onUninstall={(match) => uninstallMatch(match)}
-        onToggleReceipt={(match) => setSourceInstallEnabled(match, !(match.enabled !== false))}
-        onUpdate={(match) => updateInstalledMatch(selectedSourceMod, match)}
-        onRefresh={async () => { await refreshInstalled(); }}
-      />
+      <>
+        <InstalledSourceDetailPage
+          mod={selectedSourceMod}
+          match={selectedSourceMatch}
+          profileId={profileId}
+          busyKey={busyKey}
+          runtimeLocked={runtimeLock?.toggleLocked ?? false}
+          onBack={() => {
+            setSelectedSourceMod(null);
+            setSelectedSourceMatch(null);
+          }}
+          onOpenWebsite={openWebsite}
+          onOpenFileLocation={openInstalledFileLocation}
+          onUninstall={(match) => uninstallMatch(match, match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported")}
+          onToggleReceipt={(match) => setSourceInstallEnabled(match, !(match.enabled !== false))}
+          onUpdate={(match) => updateInstalledMatch(selectedSourceMod, match)}
+          onEdit={(match) => setManualEditTarget({ sourceMod: selectedSourceMod, match })}
+          onRefresh={async () => { await refreshInstalled(); }}
+        />
+        {manualEditTarget && (
+          <ManualReceiptEditModal
+            target={manualEditTarget}
+            sourceCatalog={sourceMods}
+            profileId={profileId}
+            sourceConfig={runtimeSourceConfig}
+            gameName={gameName}
+            onClose={() => setManualEditTarget(null)}
+            onSaved={async () => { await refreshInstalled(); }}
+          />
+        )}
+      </>
     );
   }
 
   return (
     <section className="page installed-clean-page">
-      <div className="installed-hero">
-        <div>
-          <p className="eyebrow">Local library</p>
-          <h1>Installed Mods</h1>
-          <p>Manage installed mods, open their folders, update, disable, or uninstall. Diagnostics stay in the secret debug panel.</p>
+      <div className="installed-toolbar-v2">
+        <div className="installed-toolbar-search-v2">
+          <input
+            className="setting-input"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search installed mods..."
+          />
         </div>
 
-        <div className="installed-hero-actions simplified">
-          <button className="ghost-button compact" type="button" onClick={openPakModsFolder}>
-            Open ~mods
+        <div className="installed-toolbar-counts" aria-label="Installed counts">
+          <button className={enabledFilter === "all" ? "active" : ""} type="button" onClick={() => setEnabledFilter("all")}>
+            <span>All</span><strong>{totalInstalledLocalMods}</strong>
           </button>
+          <button className={enabledFilter === "on" ? "active" : ""} type="button" onClick={() => setEnabledFilter("on")}>
+            <span>On</span><strong>{totalEnabledMods}</strong>
+          </button>
+          <button className={enabledFilter === "off" ? "active" : ""} type="button" onClick={() => setEnabledFilter("off")}>
+            <span>Off</span><strong>{totalDisabledMods}</strong>
+          </button>
+        </div>
+
+        <div className="installed-toolbar-controls-v2">
+          <label className="installed-toolbar-select">
+            <span>Sort</span>
+            <select className="setting-input" value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}>
+              <option value="name">Name</option>
+              <option value="modified">Date</option>
+              <option value="size">Size</option>
+            </select>
+          </label>
+
+
+        </div>
+
+        <div className="installed-toolbar-actions-v2">
+          <button className="ghost-button compact" type="button" onClick={openPakModsFolder}>Open ~mods</button>
           <button className="ghost-button compact" type="button" onClick={checkStateFirstUpdates} disabled={updatesBusy}>
-            {updatesBusy ? "Checking..." : "Check Tsuki Updates"}
+            {updatesBusy ? "Checking..." : "Check Updates"}
+          </button>
+          <button className="ghost-button compact install-button" type="button" onClick={() => setCrashTestOpen(true)}>
+            Crash Test
           </button>
 
-          <details className="installed-advanced-actions">
+          <details className="installed-advanced-actions toolbar-menu">
             <summary>Advanced</summary>
             <div>
               <button className="ghost-button compact" type="button" onClick={() => pairSource("modworkshop")} disabled={busyKey === "pair-modworkshop"}>
@@ -3640,15 +5574,9 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               <button className="ghost-button compact" type="button" onClick={() => pairSource("nexus")} disabled={busyKey === "pair-nexus"}>
                 {busyKey === "pair-nexus" ? "Pairing..." : "Pair All Nexus"}
               </button>
-              <button className="ghost-button compact" type="button" onClick={() => refreshInstalled()}>
-                Refresh Only
-              </button>
-              <button className="ghost-button compact" type="button" onClick={() => refreshPairing()}>
-                Re-pair All
-              </button>
-              <button className="ghost-button compact danger-button" type="button" onClick={repairPairingCache}>
-                Reset Pair Cache
-              </button>
+              <button className="ghost-button compact" type="button" onClick={() => refreshInstalled()}>Refresh Only</button>
+              <button className="ghost-button compact" type="button" onClick={() => refreshPairing()}>Re-pair All</button>
+              <button className="ghost-button compact danger-button" type="button" onClick={repairPairingCache}>Reset Pair Cache</button>
               <button className="ghost-button compact" type="button" onClick={diagnoseModWorkshopPairing} disabled={busyKey === "diagnose-modworkshop-pairing"}>
                 {busyKey === "diagnose-modworkshop-pairing" ? "Diagnosing..." : "Diagnose MW"}
               </button>
@@ -3657,12 +5585,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               </button>
               <label className="pair-limit-control">
                 <span>Search limit</span>
-                <select
-                  className="setting-input"
-                  value={searchPairLimit}
-                  onChange={(event) => setSearchPairLimit(Number(event.target.value))}
-                  disabled={enriching}
-                >
+                <select className="setting-input" value={searchPairLimit} onChange={(event) => setSearchPairLimit(Number(event.target.value))} disabled={enriching}>
                   <option value={5}>5</option>
                   <option value={10}>10</option>
                   <option value={20}>20</option>
@@ -3675,12 +5598,8 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
               <button className="ghost-button compact" type="button" onClick={buildNexusIndex} disabled={enriching || nexusIndexing || backgroundPairing}>
                 {nexusIndexing ? "Nexus..." : "Rebuild Nexus"}
               </button>
-              <button className="ghost-button compact" type="button" onClick={clearUnpairableGroups} disabled={backgroundPairing}>
-                Clear Skipped
-              </button>
-              <button className="ghost-button compact" type="button" onClick={clearPairingGuards} disabled={backgroundPairing}>
-                Clear Guards
-              </button>
+              <button className="ghost-button compact" type="button" onClick={clearUnpairableGroups} disabled={backgroundPairing}>Clear Skipped</button>
+              <button className="ghost-button compact" type="button" onClick={clearPairingGuards} disabled={backgroundPairing}>Clear Guards</button>
             </div>
           </details>
         </div>
@@ -3688,84 +5607,85 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 
       {runtimeLock?.toggleLocked && (
         <div className="safe-result warning installed-runtime-lock">
-          <strong>{runtimeLock.payday3Running ? "PAYDAY 3 is running" : "Vanilla session active"}</strong>
+          <strong>{runtimeLock.payday3Running ? `${gameName} is running` : "Vanilla session active"}</strong>
           <span>{runtimeLock.message}</span>
         </div>
       )}
 
-      <div className="installed-metrics">
-        <div><strong>{groups.length}</strong><span>mod groups</span></div>
-        <div><strong>{pairedMods.length}</strong><span>paired</span></div>
-        <div><strong>{updateCount}</strong><span>updates</span></div>
-        <div><strong>{disabledGroups}</strong><span>disabled</span></div>
-        <div><strong>{unpairableGroups.length}</strong><span>skipped</span></div>
-        <div><strong>{autoPairQueue.length}</strong><span>auto queue</span></div>
-        <div><strong>{customGroups.length}</strong><span>custom</span></div>
-        <div><strong>{rejectedPairings.length}</strong><span>rejected</span></div>
-      </div>
-
-      <div className="installed-commandbar">
-        <div className="installed-searchbar">
-          <input
-            className="setting-input"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="Search installed..."
-          />
-
-          <div className="installed-sort-chips" aria-label="Sort installed mods">
-            {[
-              ["name", "Name"],
-              ["modified", "Date"],
-              ["size", "Size"],
-            ].map(([id, label]) => (
-              <button
-                className={sortMode === id ? "active" : ""}
-                type="button"
-                key={id}
-                onClick={() => setSortMode(id as SortMode)}
-              >
-                {label}
+      {crashTestOpen && (
+        <div className="installed-crash-modal-backdrop" role="dialog" aria-modal="true">
+          <div className="installed-crash-modal card">
+            <div className="installed-crash-modal-head">
+              <div>
+                <strong>Crash Test / Isolation Mode</strong>
+                <span>{crashTest.status}</span>
+              </div>
+              <button className="ghost-button compact" type="button" onClick={() => setCrashTestOpen(false)}>Close</button>
+            </div>
+            <div className="crash-test-actions">
+              <button className="ghost-button compact install-button" type="button" onClick={startCrashTest} disabled={crashTestBusy || crashTest.active || Boolean(runtimeLock?.toggleLocked)}>
+                {crashTestBusy ? "Working..." : "Start Crash Test"}
               </button>
-            ))}
-          </div>
-
-          <div className="installed-state-chips" aria-label="Filter installed mods by enabled state">
-            {[
-              ["all", "All"],
-              ["on", "Enabled"],
-              ["off", "Disabled"],
-            ].map(([id, label]) => (
-              <button
-                className={enabledFilter === id ? "active" : ""}
-                type="button"
-                key={id}
-                onClick={() => setEnabledFilter(id as EnabledFilter)}
-              >
-                {label}
-              </button>
-            ))}
+              <button className="ghost-button compact" type="button" onClick={() => answerCrashTest("yes")} disabled={crashTestBusy || !crashTest.active || crashTest.currentGroup.length === 0}>Problem happened</button>
+              <button className="ghost-button compact" type="button" onClick={() => answerCrashTest("no")} disabled={crashTestBusy || !crashTest.active || crashTest.currentGroup.length === 0}>Problem stopped</button>
+              <button className="ghost-button compact" type="button" onClick={() => answerCrashTest("unsure")} disabled={crashTestBusy || !crashTest.active || crashTest.currentGroup.length === 0}>Not sure</button>
+              <button className="ghost-button compact" type="button" onClick={stopCrashTest} disabled={!crashTest.active && Object.keys(crashTest.originalEnabled).length === 0}>Stop Test</button>
+              <button className="ghost-button compact" type="button" onClick={stopCrashTest} disabled={Object.keys(crashTest.originalEnabled).length === 0}>Restore Original State</button>
+              <button className="ghost-button compact" type="button" onClick={clearManualCrashTestExclusions} disabled={Object.keys(crashTestExclusionOverrides).length === 0}>Clear Manual Exclusions</button>
+            </div>
+            <div className="crash-test-details">
+              <span>Total enabled mods: {crashTest.totalEnabled || crashTestCandidates.filter((candidate) => candidate.enabled).length}</span>
+              <span>Excluded mods: {crashTest.excludedCount || crashTestExcludedCandidates.filter((candidate) => candidate.enabled).length}</span>
+              <span>Testable mods: {crashTest.testableCount || crashTestCandidates.filter((candidate) => candidate.enabled && !candidate.excluded).length}</span>
+              <span>Test round: {crashTest.round || 0}</span>
+              <span>Selected test group: {crashTest.disabledGroupCount || crashTest.currentGroup.length}</span>
+              <span>Attempted disables: {crashTest.attemptedDisables}</span>
+              <span>Successful disables: {crashTest.successfulDisables}</span>
+              <span>Failed disables: {crashTest.failedDisables}</span>
+              <span>Current suspect set: {crashTest.suspects.length}</span>
+              <span>Remaining suspects: {crashTest.suspects.length}</span>
+              <span>Currently disabled group names: {crashTest.currentGroup.length > 0 ? crashTest.currentGroup.map(crashCandidateTitle).join(", ") : "None"}</span>
+              <span>Likely suspects: {crashTest.likelySuspects.length > 0 ? crashTest.likelySuspects.map(crashCandidateTitle).join(", ") : "None yet"}</span>
+              {crashTest.lastResult && <span>Last result: {crashTest.lastResult}</span>}
+              {crashTest.nextAction && <span>Next action: {crashTest.nextAction}</span>}
+              {crashTest.noProgressReason && <span>No progress reason: {crashTest.noProgressReason}</span>}
+              {crashTest.disabledStoragePaths.length > 0 && <span>Disabled storage: {crashTest.disabledStoragePaths.join(", ")}</span>}
+              {crashTest.skippedMods.length > 0 && <span>Skipped: {crashTest.skippedMods.join("; ")}</span>}
+            </div>
+            <div className="crash-test-excluded-list">
+              <strong>Excluded mods ({crashTestExcludedCandidates.length})</strong>
+              {crashTestExcludedCandidates.length === 0 ? (
+                <span>None</span>
+              ) : (
+                <ul>
+                  {crashTestExcludedCandidates.slice(0, 16).map((candidate) => (
+                    <li key={candidate.key}>{candidate.title}: {candidate.exclusionReason ?? "excluded"}</li>
+                  ))}
+                </ul>
+              )}
+              {crashTestExcludedCandidates.length > 16 && <span>+{crashTestExcludedCandidates.length - 16} more excluded mod(s)</span>}
+            </div>
+            <p className="crash-test-note">This is an isolation tool. Tsuki can help narrow suspects, but your manual answer decides each step.</p>
           </div>
         </div>
-      </div>
-
+      )}
       <div className="mass-select-bar card">
         <div>
           <strong>Mass Select</strong>
-          <span>{selectedFileNames.length} files selected · {visibleSelectionKeys.length} visible cards</span>
+          <span>{selectedKeys.length} cards selected / {selectedToggleKeys.length} manageable / {selectedFileNames.length} files selected / {visibleSelectionKeys.length} matching cards</span>
         </div>
 
         <div className="mass-select-actions">
           <button className="ghost-button compact" type="button" onClick={selectVisibleCards} disabled={visibleSelectionKeys.length === 0}>
-            Select Visible
+            Select Filtered
           </button>
           <button className="ghost-button compact" type="button" onClick={clearSelectedCards} disabled={selectedKeys.length === 0}>
             Clear
           </button>
-          <button className="ghost-button compact" type="button" onClick={() => setSelectedFilesEnabled(true)} disabled={selectedFileNames.length === 0 || busyKey === "mass-enable"}>
+          <button className="ghost-button compact" type="button" onClick={() => setSelectedFilesEnabled(true)} disabled={selectedToggleKeys.length === 0 || busyKey === "mass-enable"}>
             {busyKey === "mass-enable" ? "..." : "Enable Selected"}
           </button>
-          <button className="ghost-button compact" type="button" onClick={() => setSelectedFilesEnabled(false)} disabled={selectedFileNames.length === 0 || busyKey === "mass-disable"}>
+          <button className="ghost-button compact" type="button" onClick={() => setSelectedFilesEnabled(false)} disabled={selectedToggleKeys.length === 0 || busyKey === "mass-disable"}>
             {busyKey === "mass-disable" ? "..." : "Disable Selected"}
           </button>
           <button className="ghost-button compact danger-button" type="button" onClick={requestDeleteSelected} disabled={selectedFileNames.length === 0}>
@@ -3777,229 +5697,195 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
       <div className="installed-status-line">
         <span>{pairingStatus}</span>
         <span>{status}</span>
-        <span>{sourceMods.length} cached cards · {sourceCacheBuckets} buckets · {sourceCacheAge} old</span>
+        <span>{sourceMods.length} cached cards - cache {sourceCacheAge} - {sourceCacheBuckets} bucket(s)</span>
         <span>{autoPairStatus}</span>
+        <span>Hydration: {metadataHydrationStatus.running ? "running" : "idle"} - {metadataHydrationStatus.hydratedCount} hydrated - {metadataHydrationStatus.missingCount} missing</span>
         {sourceUpdates.length > 0 && (
           <span>
             {sourceUpdates.filter((update) => update.updateAvailable).length}/{sourceUpdates.length} Tsuki receipt updates
-            {receiptUpdateCache?.savedAt ? ` · ${cacheAge(receiptUpdateCache.savedAt)} old` : ""}
+            {receiptUpdateCache?.savedAt ? ` - checked ${new Date(receiptUpdateCache.savedAt).toLocaleTimeString()}` : ""}
           </span>
         )}
       </div>
 
       {(view === "all" || view === "matched" || view === "updates") && (
         <div className="installed-library-grid">
-          {visiblePaired.map((item) => (
-            <article
-              className={`installed-library-card ${item.match.updateAvailable ? "update" : ""} ${selectedSet.has(pairedSelectionKey(item)) ? "selected" : ""}`}
-              key={`${item.sourceMod.source}-${item.sourceMod.sourceId}`}
-              role="button"
-              tabIndex={0}
-              onClick={(event) => {
-                if ((event.target as HTMLElement).closest("button, summary, details, input, select, a")) return;
-                void openInstalledModDetail(item.sourceMod, item.match);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void openInstalledModDetail(item.sourceMod, item.match);
-              }}
-            >
-              <label className="mass-card-check" onClick={(event) => event.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(pairedSelectionKey(item))}
-                  onChange={() => toggleSelected(pairedSelectionKey(item))}
-                  aria-label={`Select ${item.sourceMod.name}`}
-                />
-              </label>
-              <button
-                className="installed-cover"
-                type="button"
-                disabled={detailLoadingKey === `${item.sourceMod.source}-${item.sourceMod.sourceId}`}
-                onClick={() => openInstalledModDetail(item.sourceMod, item.match)}
-              >
-                {(() => {
-                  const coverUrl = sourceImageForCard(item.sourceMod);
-
-                  return (
-                    <>
-                      <span className="installed-cover-fallback">{sourceAccent(item.sourceMod.source)}</span>
-                      {coverUrl && (
-                        <img
-                          src={coverUrl}
-                          alt=""
-                          onError={(event) => {
-                            event.currentTarget.style.display = "none";
-                          }}
-                        />
-                      )}
-                    </>
-                  );
-                })()}
-                {detailLoadingKey === `${item.sourceMod.source}-${item.sourceMod.sourceId}` && <em>Opening...</em>}
+          {visiblePaired.slice(0, renderLimit).map((item) => {
+            const selectionKey = pairedSelectionKey(item);
+            const detailKey = `${item.sourceMod.source}-${item.sourceMod.sourceId}`;
+            const receiptBacked = isReceiptBackedInstalledItem(item);
+            const receiptThumbnail = receiptBacked ? (item.match.thumbnailUrl ?? item.match.bannerUrl ?? null) : null;
+            const manualThumbnail = isManualMatchKind(item.match.matchKind) ? (item.match.thumbnailUrl ?? item.match.bannerUrl ?? null) : null;
+            const exactSourceThumbnail = sourceImageUrl(item.sourceMod);
+            const cachedSourceThumbnail = sourceImageForCard(item.sourceMod);
+            const cardThumbnail = resolveInstalledThumbnailUrl({
+              receiptThumbnail,
+              exactSourceThumbnail,
+              manualThumbnail,
+              cachedSourceThumbnail,
+            }, canUseInstalledThumbnail);
+            const sourceMod = {
+              ...item.sourceMod,
+              name: item.match.displayName ?? item.sourceMod.name,
+              author: item.match.author ?? item.sourceMod.author,
+              thumbnailUrl: cardThumbnail,
+              bannerUrl: item.match.bannerUrl ?? item.sourceMod.bannerUrl,
+              pageUrl: item.match.pageUrl ?? item.sourceMod.pageUrl,
+            };
+            const locationLabel = installedSurfaceLabel(item);
+            const manageableInstalledFiles = itemHasManageableInstalledFiles(item);
+            const hasDisabledStoragePath = item.match.enabled === false && (item.match.matchedFiles ?? []).some(installedPathLooksDisabledStorage);
+            const showMissingState = (item.match.missing || item.match.broken) && !hasDisabledStoragePath;
+            const rawOwnershipLabel = ownershipBadgeLabel(item.match);
+            const ownershipLabel = !showMissingState && rawOwnershipLabel === "Missing/Broken" ? null : rawOwnershipLabel;
+            const possibleReplacement = possibleNewerLocalVersionDetected(item);
+            const localToggleBusyKey = `local-toggle-${item.match.source}-${item.match.sourceId}`;
+            const crashCandidate = crashCandidateMap.get(selectionKey);
+            const crashExcluded = Boolean(crashCandidate?.excluded);
+            const tagList = [
+              ...(sourceMod.tags ?? []),
+              item.match.updateAvailable ? "Update" : null,
+              ownershipLabel,
+              locationLabel,
+              possibleReplacement ? "Possible newer local version" : null,
+              crashExcluded ? "Crash Test Excluded" : null,
+            ].filter(Boolean) as string[];
+            const compactTagList = tagList.filter((tag) => {
+              const key = String(tag).trim().toLowerCase();
+              return key
+                && key !== "tsuki-installed"
+                && key !== "enabled"
+                && key !== "~mods"
+                && key !== "pak"
+                && key !== "installed";
+            }).slice(0, 5);
+            const toggleAction = showMissingState ? (
+              <span className="badge danger">Missing</span>
+            ) : receiptBacked ? (
+              <ModToggleButton
+                enabled={item.match.enabled !== false}
+                busy={busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}`}
+                disabled={runtimeLock?.toggleLocked}
+                onClick={() => setSourceInstallEnabled(item.match, !(item.match.enabled !== false))}
+              />
+            ) : manageableInstalledFiles ? (
+              <ModToggleButton
+                enabled={itemEnabled(item)}
+                busy={busyKey === item.group?.key || busyKey === localToggleBusyKey}
+                disabled={runtimeLock?.toggleLocked}
+                onClick={() => setMatchedLocalFilesEnabled(item, !itemEnabled(item))}
+              />
+            ) : (
+              <button className="ghost-button compact" type="button" onClick={() => void openInstalledModDetail(item.sourceMod, item.match)}>
+                Open
               </button>
+            );
 
-              <div className="installed-info">
-                <div className="installed-title-row">
-                  <div>
-                    <h2>{item.sourceMod.name}</h2>
-                    <p>{sourceLabel(item.sourceMod.source)} · {displayAuthor(item.sourceMod) ?? "Unknown author"}</p>
-                  </div>
-                  <div className="installed-card-actions">
-                    {item.match.matchKind === "receipt" && (
-                      <button
-                        className={`toggle-pill ${(item.match.enabled !== false) ? "on" : "off"}`}
-                        type="button"
-                        disabled={runtimeLock?.toggleLocked || busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}`}
-                        onClick={() => setSourceInstallEnabled(item.match, !(item.match.enabled !== false))}
-                      >
-                        {busyKey === `receipt-toggle-${item.match.source}-${item.match.sourceId}` ? "..." : (item.match.enabled !== false) ? "On" : "Off"}
-                      </button>
-                    )}
-                    {item.group && item.match.matchKind !== "receipt" && (
-                      <button
-                        className={`toggle-pill ${item.group.enabled ? "on" : "off"}`}
-                        type="button"
-                        disabled={runtimeLock?.toggleLocked || busyKey === item.group.key}
-                        onClick={() => setGroupEnabled(item.group!, !item.group!.enabled)}
-                      >
-                        {busyKey === item.group.key ? "..." : item.group.enabled ? "On" : "Off"}
-                      </button>
-                    )}
-                    {item.match.updateAvailable && (
-                      <button
-                        className="mini-action update-button"
-                        type="button"
-                        disabled={busyKey === `update-${item.match.source}-${item.match.sourceId}`}
-                        onClick={() => updateInstalledMatch(item.sourceMod, item.match)}
-                      >
-                        {busyKey === `update-${item.match.source}-${item.match.sourceId}` ? "..." : "Update"}
-                      </button>
-                    )}
-                    <button
-                      className="mini-action danger"
-                      type="button"
-                      disabled={runtimeLock?.toggleLocked || busyKey === `uninstall-${item.match.source}-${item.match.sourceId}`}
-                      onClick={() => {
-                        if (item.match.matchKind === "receipt") {
-                          void uninstallMatch(item.match);
-                        } else {
-                          requestDelete(item.sourceMod.name, item.match.matchedFiles, `uninstall-${item.match.source}-${item.match.sourceId}`);
-                        }
-                      }}
-                    >
-                      {busyKey === `uninstall-${item.match.source}-${item.match.sourceId}` ? "..." : "Uninstall"}
-                    </button>
-                    <CardMoreMenu>
-                      <summary aria-label="More options">⋯</summary>
-                      <div>
-                        <button type="button" onClick={() => openInstalledModDetail(item.sourceMod, item.match)}>Open details</button>
-                        <button type="button" onClick={() => openWebsite(item.sourceMod.pageUrl)}>Website</button>
-                        {item.group && <button type="button" onClick={() => reinstallGroupFromTsuki(item.group!)}>Reinstall from Tsuki</button>}
-                        {item.group && <button type="button" onClick={() => markGroupCustom(item.group)}>Mark Custom</button>}
-                        {item.match.matchKind === "receipt" && (
-                          <button type="button" onClick={() => setSourceInstallEnabled(item.match, !(item.match.enabled !== false))}>
-                            {(item.match.enabled !== false) ? "Disable receipt install" : "Enable receipt install"}
-                          </button>
-                        )}
-                        {item.group && item.match.matchKind !== "receipt" && (
-                          <button type="button" onClick={() => setGroupEnabled(item.group!, !item.group!.enabled)}>
-                            {item.group.enabled ? "Disable" : "Enable"}
-                          </button>
-                        )}
-                      </div>
-                    </CardMoreMenu>
-                  </div>
-                </div>
+            return (
+              <InstalledModCard
+                key={detailKey}
+                className={`installed-library-card ${item.match.updateAvailable ? "update" : ""}`}
+                title={displayModTitle(sourceMod)}
+                source={sourceMod.source}
+                sourceLabel={sourceLabel(sourceMod.source)}
+                author={displayAuthor(sourceMod)}
+                version={sourceMod.version ?? item.match.sourceFileVersion}
+                thumbnailUrl={sourceMod.thumbnailUrl}
+                bannerUrl={sourceMod.bannerUrl}
+                tags={compactTagList}
+                updatedLabel={installedUpdatedLabel(item.match)}
+                enabled={!showMissingState && item.match.enabled !== false}
+                stateLabel={showMissingState ? "Missing" : itemEnabled(item) ? (receiptBacked ? null : "Local") : "Off"}
+                showStateBadge={showMissingState || !itemEnabled(item) || !receiptBacked}
+                selected={selectedSet.has(selectionKey)}
+                loadingLabel={detailLoadingKey === detailKey ? "Opening..." : null}
+                canUseThumbnail={canUseInstalledThumbnail}
+                onThumbnailFailed={rememberInstalledThumbnailFailure}
+                selectionControl={massSelectionMode ? (
+                  <label className="mass-card-check" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSet.has(selectionKey)}
+                      onChange={() => toggleSelected(selectionKey)}
+                      aria-label={`Select ${sourceMod.name}`}
+                    />
+                  </label>
+                ) : null}
+                action={toggleAction}
+                onOpen={() => void openInstalledModDetail(item.sourceMod, item.match)}
+                moreActions={(
+                  <>
+                    <button type="button" onClick={() => openInstalledModDetail(item.sourceMod, item.match)}>Open details</button>
+                    {manualMatchEditable(item.match) && <button type="button" onClick={() => setManualEditTarget({ sourceMod, match: item.match })}>Edit</button>}
+                    {!showMissingState && <button type="button" onClick={() => openInstalledFileLocation(item.match)}>Open file location</button>}
+                    <button type="button" onClick={() => openWebsite(item.sourceMod.pageUrl)}>Website</button>
+                    {item.match.updateAvailable && <button type="button" onClick={() => updateInstalledMatch(item.sourceMod, item.match)}>Update</button>}
+                    {crashCandidate && <button type="button" onClick={() => setCrashTestCandidateExcluded(selectionKey, !crashExcluded)}>{crashExcluded ? "Include in Crash Test" : "Exclude from Crash Test"}</button>}
+                    {!showMissingState && <button type="button" onClick={() => receiptBacked ? void uninstallMatch(item.match, receiptBacked) : requestDelete(item.sourceMod.name, item.match.matchedFiles, `uninstall-${item.match.source}-${item.match.sourceId}`)}>Uninstall</button>}
+                    {showMissingState && item.match.receiptId && <button type="button" onClick={() => removeBrokenReceipt(item.match)}>Remove broken receipt</button>}
+                    {showMissingState && <button type="button" onClick={() => refreshInstalled()}>Re-scan</button>}
+                    {showMissingState && <button type="button" onClick={() => setStatus("Keeping missing receipt. Tsuki will continue showing it as Missing/Broken until files return or the receipt is removed.")}>Keep Missing</button>}
+                    {showMissingState && possibleReplacement && <button type="button" onClick={() => setStatus("Tracked files missing. Possible newer local version detected. Manual linking is required before Tsuki treats it as the same install.")}>Link later</button>}
+                    {item.group && <button type="button" onClick={() => reinstallGroupFromTsuki(item.group!)}>Reinstall from Tsuki</button>}
+                    {item.group && <button type="button" onClick={() => markGroupCustom(item.group)}>Mark Custom</button>}
+                  </>
+                )}
+              />
+            );
+          })}
 
-                <p className="installed-summary">{item.sourceMod.shortDescription || item.match.reason}</p>
+          {view === "all" && unmatchedGroups.slice(0, Math.max(0, renderLimit - visiblePaired.length)).map((group) => (
+            (() => {
+              const groupLocationLabel = group.files.some((file) => installedPathLooksWin64OrUe4ss(file.fullPath) || installedPathLooksWin64OrUe4ss(file.fileName))
+                ? "Win64/UE4SS"
+                : null;
+              const groupCrashKey = groupSelectionKey(group);
+              const crashCandidate = crashCandidateMap.get(groupCrashKey);
+              const crashExcluded = Boolean(crashCandidate?.excluded);
 
-                <div className="installed-badges">
-                  {item.match.updateAvailable && <span className="badge update">Update</span>}
-                  {item.match.matchKind === "receipt" && <span className={(item.match.enabled !== false) ? "badge good" : "badge"}>{(item.match.enabled !== false) ? "Enabled" : "Disabled"}</span>}
-                  {item.group && <span className="badge">{item.group.files.length} files</span>}
-                </div>
-
-                <div className="installed-file-chip-row">
-                  {(item.group?.files ?? item.match.matchedFiles.map((fileName) => ({
-                    fileName,
-                    fullPath: fileName,
-                    extension: "unknown",
-                    sizeBytes: 0,
-                    enabled: true,
-                    priority: null,
-                    modifiedUnix: null,
-                  }))).slice(0, 4).map((file) => (
-                    <span key={file.fullPath || file.fileName} title={file.fileName}>
-                      {installedFileChipLabel(file.fileName)}
-                    </span>
-                  ))}
-                </div>
-
-
-              </div>
-            </article>
-          ))}
-
-          {view === "all" && unmatchedGroups.map((group) => (
-            <article className={`installed-library-card local-unpaired-card ${selectedSet.has(groupSelectionKey(group)) ? "selected" : ""}`} key={`unpaired-${group.key}`}>
-              <label className="mass-card-check" onClick={(event) => event.stopPropagation()}>
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(groupSelectionKey(group))}
-                  onChange={() => toggleSelected(groupSelectionKey(group))}
-                  aria-label={`Select ${group.label}`}
-                />
-              </label>
-              <div className="installed-cover local-cover">
-                <span>{group.label.slice(0, 2).toUpperCase()}</span>
-              </div>
-
-              <div className="installed-info">
-                <div className="installed-title-row">
-                  <div>
-                    <h2>{group.label}</h2>
-                    <p>Local file · Unpaired</p>
-                  </div>
-                  <div className="installed-card-actions">
-                    <button
-                      className={`toggle-pill ${group.enabled ? "on" : "off"}`}
-                      type="button"
-                      disabled={runtimeLock?.toggleLocked || busyKey === group.key}
+              return (
+                <InstalledModCard
+                  key={`unpaired-${group.key}`}
+                  className="installed-library-card local-unpaired-card"
+                  title={group.label}
+                  source="local"
+                  sourceLabel="Local"
+                  author={null}
+                  tags={["Unknown local", groupLocationLabel, crashExcluded ? "Crash Test Excluded" : null, `${group.files.length} files`, ...group.files.slice(0, 4).map((file) => installedFileChipLabel(file.fileName))].filter(Boolean) as string[]}
+                  enabled={group.enabled}
+                  stateLabel={group.enabled ? "Local" : "Off"}
+                  selected={selectedSet.has(groupSelectionKey(group))}
+                  selectionControl={massSelectionMode ? (
+                    <label className="mass-card-check" onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedSet.has(groupSelectionKey(group))}
+                        onChange={() => toggleSelected(groupSelectionKey(group))}
+                        aria-label={`Select ${group.label}`}
+                      />
+                    </label>
+                  ) : null}
+                  action={(
+                    <ModToggleButton
+                      enabled={group.enabled}
+                      busy={busyKey === group.key}
+                      disabled={runtimeLock?.toggleLocked}
                       onClick={() => setGroupEnabled(group, !group.enabled)}
-                    >
-                      {busyKey === group.key ? "..." : group.enabled ? "On" : "Off"}
-                    </button>
-                    <button className="mini-action danger" type="button" disabled={busyKey === `uninstall-${group.key}`} onClick={() => requestDelete(group.label, group.files.map((file) => file.fileName), `uninstall-${group.key}`)}>
-                      {busyKey === `uninstall-${group.key}` ? "..." : "Uninstall"}
-                    </button>
-                    <CardMoreMenu>
-                      <summary aria-label="More options">⋯</summary>
-                      <div>
-                        <button type="button" onClick={() => tryPairGroup(group)}>Try Pair</button>
-                        <button type="button" onClick={() => markGroupCustom(group)}>Mark Custom</button>
-                        <button type="button" onClick={() => setGroupEnabled(group, !group.enabled)}>{group.enabled ? "Disable" : "Enable"}</button>
-                      </div>
-                    </CardMoreMenu>
-                  </div>
-                </div>
-
-                <p className="installed-summary">No source page is paired yet. Auto Pair can keep searching in the background.</p>
-
-                <div className="installed-badges">
-                  <span className="badge">Local</span>
-                  <span className="badge">{group.files.length} files</span>
-                  <span className={group.enabled ? "badge good" : "badge"}>{group.enabled ? "Enabled" : "Disabled"}</span>
-                </div>
-
-                <div className="installed-file-chip-row">
-                  {group.files.slice(0, 4).map((file) => (
-                    <span key={file.fullPath || file.fileName} title={file.fileName}>
-                      {installedFileChipLabel(file.fileName)}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </article>
+                    />
+                  )}
+                  moreActions={(
+                    <>
+                      <button type="button" onClick={() => void openLocalGroupDetail(group)}>Open details</button>
+                      <button type="button" onClick={() => tryPairGroup(group)}>Try Pair</button>
+                      <button type="button" onClick={() => setStatus("This raw local group does not have a Receipt v2 record yet. Run Refresh so Tsuki can create an unknown receipt, then use Edit on the receipt-backed card.")}>Edit</button>
+                      <button type="button" onClick={() => markGroupCustom(group)}>Mark Custom</button>
+                      {crashCandidate && <button type="button" onClick={() => setCrashTestCandidateExcluded(groupCrashKey, !crashExcluded)}>{crashExcluded ? "Include in Crash Test" : "Exclude from Crash Test"}</button>}
+                      <button type="button" onClick={() => requestDelete(group.label, group.files.map((file) => file.fileName), `uninstall-${group.key}`)}>{busyKey === `uninstall-${group.key}` ? "..." : "Uninstall"}</button>
+                    </>
+                  )}
+                />
+              );
+            })()
           ))}
 
           {visiblePaired.length === 0 && view !== "all" && (
@@ -4011,11 +5897,21 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         </div>
       )}
 
+      {["all", "matched", "updates"].includes(view) && visiblePaired.length + (view === "all" ? unmatchedGroups.length : 0) > renderLimit && (
+        <div className="installed-load-more">
+          <button className="ghost-button compact" type="button" onClick={() => setRenderLimit((limit) => limit + 48)}>
+            <ChevronDown size={16} aria-hidden="true" /> Show More
+          </button>
+          <span>{Math.min(renderLimit, visiblePaired.length + (view === "all" ? unmatchedGroups.length : 0))} of {visiblePaired.length + (view === "all" ? unmatchedGroups.length : 0)}</span>
+        </div>
+      )}
+
       {view === "unmatched" && (
         <RawGroupList
           title="Unmatched installed mods"
           groups={unmatchedGroups}
           busyKey={busyKey}
+          onOpen={(group) => { void openLocalGroupDetail(group); }}
           onToggle={setGroupEnabled}
           onMarkCustom={markGroupCustom}
           onTryPair={tryPairGroup}
@@ -4030,6 +5926,7 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
           title="Raw installed groups"
           groups={groups}
           busyKey={busyKey}
+          onOpen={(group) => { void openLocalGroupDetail(group); }}
           onToggle={setGroupEnabled}
           onMarkCustom={markGroupCustom}
           onTryPair={tryPairGroup}
@@ -4070,10 +5967,10 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
                     />
                     <div>
                       <strong title={file.name}>{file.name}</strong>
-                      <span>{label.replace(" files", "")} · {sourceFileMetaLine(file)}</span>
+                      <span>{label.replace(" files", "")} - {sourceFileMetaLine(file)}</span>
                       <small>
                         {installed ? `Installed: ${matchedNames.join(", ")}` : "Not installed"}
-                        {replaceNames.length > 0 ? ` · Will replace: ${replaceNames.join(", ")}` : " · Will not replace existing files"}
+                        {replaceNames.length > 0 ? ` - replaces ${replaceNames.join(", ")}` : ""}
                       </small>
                     </div>
                     {recommended && <em title={reinstallPicker.recommendedReason}>Recommended</em>}
@@ -4106,6 +6003,17 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
         </div>
       )}
 
+      {manualEditTarget && (
+        <ManualReceiptEditModal
+          target={manualEditTarget}
+          sourceCatalog={sourceMods}
+          profileId={profileId}
+            sourceConfig={runtimeSourceConfig}
+            gameName={gameName}
+          onClose={() => setManualEditTarget(null)}
+          onSaved={async () => { await refreshInstalled(); }}
+        />
+      )}
       {pendingDelete && (
         <div className="confirm-overlay" role="dialog" aria-modal="true">
           <div className="confirm-panel">
@@ -4128,9 +6036,632 @@ function bestProofMatchForGroup(group: InstalledGroup, matched: InstalledSourceM
 }
 
 
+const CUSTOM_TAGS_KEY = "tsuki-custom-tags:v1";
+const MAX_CUSTOM_THUMBNAIL_BYTES = 8 * 1024 * 1024;
+const THUMBNAIL_FILE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+type TagFilterSource = "all" | TagSource;
+type TagFilterType = "all" | TagType;
+
+interface SavedCustomThumbnail {
+  path: string;
+  fileName: string;
+}
+interface SourceTaxonomyEntry {
+  source: "modworkshop" | "nexus" | string;
+  sourceGameId: string;
+  gameDomain?: string | null;
+  tsukiGameKey?: string | null;
+  taxonomyType: "category" | "descriptive" | string;
+  sourceTaxonomyId?: string | null;
+  label: string;
+  canonicalKey: string;
+}
+
+interface SourceTaxonomyGame {
+  source: "modworkshop" | "nexus" | string;
+  sourceGameId: string;
+  domainOrSlug?: string | null;
+  displayName: string;
+  tsukiGameKey?: string | null;
+  categories: SourceTaxonomyEntry[];
+  descriptiveTags: SourceTaxonomyEntry[];
+}
+
+interface SourceTaxonomyDatabase {
+  schemaVersion: number;
+  generatedAt: number;
+  sources: {
+    modworkshop: { games: SourceTaxonomyGame[] };
+    nexus: { games: SourceTaxonomyGame[] };
+  };
+}
+
+function isManualMatchKind(matchKind?: string | null) {
+  return ["manual", "user-confirmed", "user-confirmed-sha256"].includes(matchKind ?? "");
+}
+
+function readCustomTagDefinitions(): TagDefinition[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_TAGS_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => typeof item?.label === "string" && !rejectedTaxonomyLabelReason(item.label) ? customTagDefinition(item.label) : null)
+      .filter((item): item is TagDefinition => Boolean(item));
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomTagDefinitions(tags: TagDefinition[]) {
+  const customTags = mergeTagDefinitions(tags.filter((tag) => tag.source === "custom" || tag.type === "custom"));
+  window.localStorage.setItem(CUSTOM_TAGS_KEY, JSON.stringify(customTags.map(({ label }) => ({ label }))));
+}
+
+function labelsToTagIds(labels: string[] | undefined, catalog: TagDefinition[]) {
+  const byDisplay = new Map(catalog.map((tag) => [normalizeTagName(tagDisplayLabel(tag, catalog)), tag.id]));
+  const byLabel = new Map(catalog.map((tag) => [normalizeTagName(tag.label), tag.id]));
+  return [...new Set((labels ?? [])
+    .filter((label) => label && !isSystemBadgeTag(label) && !rejectedTaxonomyLabelReason(label))
+    .map((label) => byDisplay.get(normalizeTagName(label)) ?? byLabel.get(normalizeTagName(label)))
+    .filter((id): id is string => Boolean(id)))];
+}
+
+function tagIdsToLabels(ids: string[], catalog: TagDefinition[]) {
+  const byId = new Map(catalog.map((tag) => [tag.id, tag]));
+  return ids.map((id) => {
+    const tag = byId.get(id);
+    return tag ? tagDisplayLabel(tag, catalog) : null;
+  }).filter((label): label is string => Boolean(label));
+}
+
+function displayThumbnailUrl(value: string | null | undefined) {
+  if (!value) return null;
+  if (/^(https?:|data:|blob:)/i.test(value)) return value;
+  return convertFileSrc(value);
+}
+
+async function resolveThumbnailSrc(value: string | null | undefined) {
+  if (!value) return null;
+  if (/^(https?:|data:|blob:)/i.test(value)) return value;
+  try {
+    return await invoke<string>("load_managed_thumbnail_data_url", { path: value });
+  } catch {
+    return displayThumbnailUrl(value);
+  }
+}
+
+function sourceGameId(mod: SourceModSummary | SourceModDetail | null | undefined, sourceConfig?: GameProfileSourceConfig | null, profileId?: string | null) {
+  const fallback = mod?.gameId ?? mod?.nexus?.gameId ?? null;
+  const raw = mod?.source
+    ? sourceGameRawIdFromConfig(sourceConfig, profileId ?? "", mod.source, fallback)
+    : fallback ?? profileId ?? null;
+  return raw ? normalizeGameId(raw) : null;
+}
+function taxonomyEntryToTag(entry: SourceTaxonomyEntry): TagDefinition | null {
+  const source = entry.source === "modworkshop" || entry.source === "nexus" ? entry.source : null;
+  const type = entry.taxonomyType === "category" ? "category" : entry.taxonomyType === "descriptive_tag" || entry.taxonomyType === "descriptive" ? "descriptive" : null;
+  if (!source || !type || !entry.sourceGameId || !entry.canonicalKey || rejectedTaxonomyLabelReason(entry.label)) return null;
+  const gameId = normalizeGameId(entry.tsukiGameKey ?? entry.gameDomain ?? entry.sourceGameId);
+  return {
+    id: entry.canonicalKey,
+    key: entry.canonicalKey,
+    canonicalKey: entry.canonicalKey,
+    label: entry.label,
+    source,
+    gameId,
+    type,
+    sourceId: entry.sourceTaxonomyId ?? entry.canonicalKey,
+  };
+}
+
+function tagsFromTaxonomyDatabase(database: SourceTaxonomyDatabase | null | undefined) {
+  if (!database) return [];
+  const games = [...(database.sources?.modworkshop?.games ?? []), ...(database.sources?.nexus?.games ?? [])];
+  return mergeTagDefinitions(...games.flatMap((game) => [game.categories ?? [], game.descriptiveTags ?? []]).map((entries) => entries.map(taxonomyEntryToTag)));
+}
+function manualSourcePayloadFromSummary(summary: SourceModSummary, sourceConfig: GameProfileSourceConfig | null | undefined, profileId: string): ManualSourceMatchPayload {
+  return {
+    source: summary.source,
+    sourceId: summary.sourceId,
+    fileId: null,
+    gameId: sourceGameRawIdFromConfig(sourceConfig, profileId, summary.source, summary.gameId ?? summary.nexus?.gameId),
+    modName: summary.name,
+    fileName: summary.name,
+    version: summary.version ?? null,
+    author: summary.author ?? null,
+    thumbnailUrl: summary.thumbnailUrl ?? summary.bannerUrl ?? null,
+    pageUrl: summary.pageUrl ?? null,
+    sha256: null,
+    confidence: 100,
+    confidenceLevel: "manual",
+    matchKind: "manual",
+    reason: "User-confirmed manual source match from search result.",
+  };
+}
+
+function MatchPreview({ match, onConfirm, onCancel, busy }: { match: ManualSourceMatchPayload; onConfirm: () => void; onCancel: () => void; busy: boolean }) {
+  const image = displayThumbnailUrl(match.thumbnailUrl);
+  return (
+    <article className="edit-mod-match-preview">
+      {image ? <img src={image} alt="" /> : <div className="edit-mod-thumb-empty">No image</div>}
+      <div>
+        <p className="eyebrow">Found mod</p>
+        <h3>{match.modName}</h3>
+        <dl>
+          <div><dt>Source</dt><dd>{sourceLabel(match.source)} #{match.sourceId}</dd></div>
+          {match.author && <div><dt>Author</dt><dd>{match.author}</dd></div>}
+          {match.version && <div><dt>Version</dt><dd>{match.version}</dd></div>}
+          {match.pageUrl && <div><dt>URL</dt><dd>{match.pageUrl}</dd></div>}
+        </dl>
+        <div className="edit-mod-inline-actions">
+          <button className="ghost-button compact" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="ghost-button install-button" type="button" onClick={onConfirm} disabled={busy}>Confirm Match</button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function SelectTagsOverlay({ catalog, initialSelected, refreshBusy, onRefreshTags, onCreateCustomTag, onCancel, onSave }: { catalog: TagDefinition[]; initialSelected: string[]; refreshBusy: boolean; onRefreshTags: () => void; onCreateCustomTag: (label: string) => TagDefinition | null; onCancel: () => void; onSave: (ids: string[]) => void }) {
+  const [pending, setPending] = useState<string[]>(initialSelected);
+  const [query, setQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<TagFilterSource>("all");
+  const [typeFilter, setTypeFilter] = useState<TagFilterType>("all");
+  const filtered = useMemo(() => rankTags(catalog.filter((tag) => {
+    const sourceOk = sourceFilter === "all" || tag.source === sourceFilter;
+    const typeOk = typeFilter === "all" || tag.type === typeFilter;
+    return sourceOk && typeOk && tagMatchesQuery(tag, query);
+  }), query), [catalog, query, sourceFilter, typeFilter]);
+  const groups = useMemo(() => {
+    const result = new Map<string, TagDefinition[]>();
+    for (const tag of filtered) {
+      const key = tagGroupLabel(tag);
+      result.set(key, [...(result.get(key) ?? []), tag]);
+    }
+    return [...result.entries()];
+  }, [filtered]);
+  const selectedCount = pending.length;
+  const normalizedQuery = normalizeTagName(query);
+  const canCreate = normalizedQuery.length > 0 && !catalog.some((tag) => normalizeTagName(tag.label) === normalizedQuery);
+
+  function toggle(tag: TagDefinition) {
+    setPending((current) => current.includes(tag.id) ? current.filter((id) => id !== tag.id) : [...current, tag.id]);
+  }
+
+  function createCustom() {
+    const created = onCreateCustomTag(query);
+    if (!created) return;
+    setPending((current) => current.includes(created.id) ? current : [...current, created.id]);
+  }
+
+  return (
+    <div className="tag-picker-backdrop" role="dialog" aria-modal="true">
+      <section className="tag-picker-panel">
+        <header className="tag-picker-header">
+          <div>
+            <p className="eyebrow">Select tags</p>
+            <h2>Tag Catalog</h2>
+          </div>
+          <button className="ghost-button compact" type="button" onClick={onCancel}>Close</button>
+        </header>
+        <div className="tag-picker-toolbar">
+          <input className="setting-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tags" />
+          <div className="segmented-control compact-segmented">
+            {(["all", "modworkshop", "nexus", "custom"] as TagFilterSource[]).map((value) => <button key={value} className={sourceFilter === value ? "active" : ""} type="button" onClick={() => setSourceFilter(value)}>{value === "all" ? "All" : value === "modworkshop" ? "ModWorkshop" : value === "nexus" ? "Nexus" : "Custom"}</button>)}
+          </div>
+          <div className="segmented-control compact-segmented">
+            {(["all", "category", "descriptive", "custom"] as TagFilterType[]).map((value) => <button key={value} className={typeFilter === value ? "active" : ""} type="button" onClick={() => setTypeFilter(value)}>{value === "all" ? "All Types" : value === "category" ? "Categories" : value === "descriptive" ? "Descriptive Tags" : "Custom Tags"}</button>)}
+          </div>
+          <button className="ghost-button compact" type="button" onClick={onRefreshTags} disabled={refreshBusy}>{refreshBusy ? "Refreshing..." : "Refresh Tags"}</button>
+          {canCreate && <button className="ghost-button compact" type="button" onClick={createCustom}>Create Custom Tag</button>}
+        </div>
+        <div className="tag-picker-scroll">
+          {groups.map(([group, tags]) => (
+            <section className="tag-picker-group" key={group}>
+              <h3>{group}</h3>
+              <div className="tag-picker-chip-grid">
+                {tags.map((tag) => <button key={tag.id} className={`tag-chip ${tagColorClass(tag)} ${pending.includes(tag.id) ? "selected" : ""}`} style={tagColorStyle(tag, catalog)} type="button" onClick={() => toggle(tag)} title={`${tag.source} / ${tag.type}${tag.sourceId ? ` #${tag.sourceId}` : ""}`}>{tagDisplayLabel(tag, catalog)}</button>)}
+              </div>
+            </section>
+          ))}
+          {groups.length === 0 && <p className="muted-text">No tags match the current filters.</p>}
+        </div>
+        <footer className="tag-picker-footer">
+          <span>{selectedCount} selected</span>
+          <div className="edit-mod-inline-actions">
+            <button className="ghost-button compact" type="button" onClick={onCancel}>Cancel</button>
+            <button className="ghost-button install-button" type="button" onClick={() => onSave(pending)}>Save Tags</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function ManualReceiptEditModal({
+  target,
+  sourceCatalog,
+  profileId,
+  sourceConfig,
+  gameName,
+  onClose,
+  onSaved,
+}: {
+  target: ManualEditTarget;
+  sourceCatalog: SourceModSummary[];
+  profileId: string;
+  sourceConfig: GameProfileSourceConfig;
+  gameName: string;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const gameId = useMemo(() => sourceGameId(target.sourceMod, sourceConfig, profileId) ?? normalizeGameId(profileId), [profileId, sourceConfig, target.sourceMod]);
+  const modWorkshopGameKey = sourceConfig.modworkshopGameId || sourceConfig.modworkshopSlug || gameId || profileId;
+  const hasModWorkshopSource = Boolean(sourceConfig.modworkshopGameId || sourceConfig.modworkshopSlug);
+  const hasNexusSource = Boolean(sourceConfig.nexusDomain || sourceConfig.nexusGameId);
+  void sourceCatalog;
+  const initialTags = useMemo(() => (target.sourceMod.tags ?? []).filter((tag) => !isSystemBadgeTag(tag) && !rejectedTaxonomyLabelReason(tag)), [target.sourceMod.tags]);
+  const [customTags, setCustomTags] = useState<TagDefinition[]>(() => readCustomTagDefinitions());
+  const [taxonomyTags, setTaxonomyTags] = useState<TagDefinition[]>([]);
+  const fallbackTags = useMemo(() => seedTagCatalog(gameId), [gameId]);
+  const tagCatalog = useMemo(() => mergeTagDefinitions(taxonomyTags, fallbackTags, customTags), [customTags, fallbackTags, taxonomyTags]);
+  const [displayName, setDisplayName] = useState(target.match.displayName ?? target.sourceMod.name ?? "");
+  const [version, setVersion] = useState(target.match.sourceFileVersion ?? target.sourceMod.version ?? "");
+  const [thumbnailUrl, setThumbnailUrl] = useState(target.match.thumbnailUrl ?? target.sourceMod.thumbnailUrl ?? target.sourceMod.bannerUrl ?? "");
+  const [thumbnailPreview, setThumbnailPreview] = useState<string | null>(() => displayThumbnailUrl(target.match.thumbnailUrl ?? target.sourceMod.thumbnailUrl ?? target.sourceMod.bannerUrl));
+  const [imageUrlInput, setImageUrlInput] = useState("");
+  const [pendingImageUrl, setPendingImageUrl] = useState<string | null>(null);
+  const [thumbnailError, setThumbnailError] = useState<string | null>(null);
+  const [pageUrl, setPageUrl] = useState(target.match.pageUrl ?? target.sourceMod.pageUrl ?? "");
+  const [author, setAuthor] = useState(target.match.author ?? target.sourceMod.author ?? "");
+  const [notes, setNotes] = useState(target.match.notes ?? "");
+  const [editDraftTags, setEditDraftTags] = useState<string[]>(() => labelsToTagIds(initialTags, tagCatalog));
+  const [tagQuery, setTagQuery] = useState("");
+  const [pickerPendingTags, setPickerPendingTags] = useState<string[] | null>(null);
+  const [sourceSearchQuery, setSourceSearchQuery] = useState(target.sourceMod.name ?? "");
+  const [sourceSearchResults, setSourceSearchResults] = useState<SourceModSummary[]>([]);
+  const [pendingMatch, setPendingMatch] = useState<ManualSourceMatchPayload | null>(null);
+  const [confirmedMatch, setConfirmedMatch] = useState<ManualSourceMatchPayload | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [status, setStatus] = useState("Manual edits save to the receipt and keep tracked files intact.");
+  const [busy, setBusy] = useState(false);
+  const [tagRefreshBusy, setTagRefreshBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const hasManualMatch = isManualMatchKind(target.match.matchKind);
+  const tagDefinitionsById = useMemo(() => new Map(tagCatalog.map((tag) => [tag.id, tag])), [tagCatalog]);
+  const selectedTags = editDraftTags.map((id) => tagDefinitionsById.get(id)).filter((tag): tag is TagDefinition => Boolean(tag));
+  const compactTagMatches = useMemo(() => rankTags(tagCatalog.filter((tag) => tagMatchesQuery(tag, tagQuery)), tagQuery).slice(0, 8), [tagCatalog, tagQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void resolveThumbnailSrc(thumbnailUrl).then((src) => {
+      if (!cancelled) setThumbnailPreview(src);
+    });
+    return () => { cancelled = true; };
+  }, [thumbnailUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId })
+      .then((database) => {
+        if (!cancelled) setTaxonomyTags(tagsFromTaxonomyDatabase(database));
+      })
+      .catch(() => {
+        if (!cancelled) setTaxonomyTags([]);
+      });
+    return () => { cancelled = true; };
+  }, [gameId]);
+
+  function createCustomTag(label: string) {
+    const clean = label.trim();
+    if (!clean || isSystemBadgeTag(clean) || rejectedTaxonomyLabelReason(clean)) return null;
+    const created = customTagDefinition(clean, gameId);
+    const next = mergeTagDefinitions(customTags, [created]);
+    setCustomTags(next);
+    writeCustomTagDefinitions(next);
+    return created;
+  }
+
+  function openTagPicker(seedIds: string[] = []) {
+    setPickerPendingTags([...new Set([...editDraftTags, ...seedIds])]);
+  }
+
+  function selectCompactTag(tag: TagDefinition) {
+    openTagPicker([tag.id]);
+  }
+
+  function createCompactCustomTag() {
+    const label = tagQuery.trim() || window.prompt("Custom tag name")?.trim() || "";
+    const created = createCustomTag(label);
+    if (created) openTagPicker([created.id]);
+  }
+
+  async function refreshTagCatalog() {
+    if (tagRefreshBusy) return;
+    setTagRefreshBusy(true);
+    setStatus(`Refreshing tag catalog for ${gameId}...`);
+    try {
+      const [taxonomyStatus, taxonomyDatabase, indexedMods] = await Promise.all([
+        invoke("refresh_current_game_taxonomy", { gameId }).catch(() => null),
+        invoke<SourceTaxonomyDatabase>("get_source_taxonomy_for_game", { gameId }).catch(() => null),
+        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 1200, profileId }).catch(() => []),
+      ]);
+      void taxonomyStatus;
+      const officialTags = tagsFromTaxonomyDatabase(taxonomyDatabase);
+      void indexedMods;
+      if (officialTags.length === 0) {
+        setStatus(`Refresh failed: no valid official taxonomy entries were returned for ${gameId}. Custom tags were kept.`);
+        return;
+      }
+      setTaxonomyTags(officialTags);
+      setStatus(`Tag catalog refreshed: ${officialTags.length} valid official source taxonomy item(s) for ${gameId}. Custom tags were kept.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTagRefreshBusy(false);
+    }
+  }
+
+  async function loadMatchFromUrl() {
+    const parsed = parseManualSourceUrl(pageUrl);
+    if (!parsed) {
+      setStatus(`Paste a supported ${gameName} ModWorkshop or Nexus mod page URL.`);
+      return;
+    }
+    setBusy(true);
+    setStatus(`Loading ${sourceLabel(parsed.source)} mod ${parsed.modId}...`);
+    try {
+      const detail = parsed.source === "nexus"
+        ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: parsed.modId, profileId, gameDomain: parsed.gameDomain ?? null })
+        : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: parsed.modId, profileId });
+      /* Source detail tags are intentionally not ingested into the selectable taxonomy. */
+      setPendingMatch(sourceMatchPayloadFromDetail(detail, parsed.pageUrl, sourceConfig, profileId));
+      setStatus("Review the found mod, then Confirm Match if it is the right pairing.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function searchForMod() {
+    const query = sourceSearchQuery.trim();
+    if (!query) {
+      setStatus("Enter a mod name or keyword to search.");
+      return;
+    }
+    setBusy(true);
+    setStatus("Searching configured sources...");
+    try {
+      const [modworkshopResults, nexusResults, indexedResults] = await Promise.all([
+        hasModWorkshopSource ? invoke<SourceModSummary[]>("search_modworkshop_mods_for_query", { query, page: 1, profileId, gameId: modWorkshopGameKey }).catch(() => []) : Promise.resolve([]),
+        hasNexusSource ? invoke<SourceModSummary[]>("search_nexus_mods_for_query", { query, profileId }).catch(() => []) : Promise.resolve([]),
+        invoke<SourceModSummary[]>("list_source_index", { source: null, limit: 1200, profileId }).catch(() => []),
+      ]);
+      const queryText = query.toLowerCase();
+      const resultMap = new Map<string, SourceModSummary>();
+      for (const mod of filterProfileSourceMods(profileId, [...modworkshopResults, ...nexusResults, ...indexedResults])) {
+        const haystack = [mod.name, mod.author ?? "", ...(mod.tags ?? [])].join(" ").toLowerCase();
+        if (haystack.includes(queryText)) resultMap.set(sourceKey(mod), mod);
+      }
+      const results = [...resultMap.values()].slice(0, 12);
+      setSourceSearchResults(results);
+      /* Source detail tags are intentionally not ingested into the selectable taxonomy. */
+      setStatus(results.length ? `Found ${results.length} candidate${results.length === 1 ? "" : "s"}. Select one to review.` : "No matching mods found.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  function confirmMatch(match: ManualSourceMatchPayload) {
+    setConfirmedMatch(match);
+    setPendingMatch(null);
+    setDisplayName(match.modName);
+    setVersion(match.version ?? "");
+    setAuthor(match.author ?? "");
+    setPageUrl(match.pageUrl ?? pageUrl);
+    if (match.thumbnailUrl) {
+      setThumbnailUrl(match.thumbnailUrl);
+      void resolveThumbnailSrc(match.thumbnailUrl).then(setThumbnailPreview);
+    }
+    setStatus("Manual match confirmed. Save to write it to the receipt.");
+  }
+
+  async function chooseThumbnail(file: File | null) {
+    if (!file) return;
+    if (!THUMBNAIL_FILE_TYPES.has(file.type)) {
+      setThumbnailError("Choose a PNG, JPG, WEBP, or GIF image.");
+      return;
+    }
+    if (file.size > MAX_CUSTOM_THUMBNAIL_BYTES) {
+      setThumbnailError("Choose an image under 8 MB.");
+      return;
+    }
+    if (!target.match.receiptId) {
+      setThumbnailError("This card has no receipt ID, so a local thumbnail cannot be stored safely yet.");
+      return;
+    }
+    setBusy(true);
+    setThumbnailError(null);
+    try {
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const saved = await invoke<SavedCustomThumbnail>("save_custom_receipt_thumbnail", { receiptId: target.match.receiptId, fileName: file.name, bytes });
+      setThumbnailUrl(saved.path);
+      setThumbnailPreview(await resolveThumbnailSrc(saved.path));
+      setStatus(`Stored ${saved.fileName}. Save to attach it to this receipt.`);
+    } catch (error) {
+      setThumbnailError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function previewImageUrl() {
+    const trimmed = imageUrlInput.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setThumbnailError("Paste a valid http or https image URL.");
+      return;
+    }
+    setPendingImageUrl(trimmed);
+    setThumbnailError(null);
+  }
+
+  function resetThumbnail() {
+    const fallback = confirmedMatch?.thumbnailUrl ?? target.sourceMod.thumbnailUrl ?? target.sourceMod.bannerUrl ?? "";
+    setThumbnailUrl(fallback);
+    void resolveThumbnailSrc(fallback).then(setThumbnailPreview);
+    setPendingImageUrl(null);
+    setImageUrlInput("");
+    setThumbnailError(null);
+  }
+
+  async function save(clearSourceMatch = false) {
+    if (!target.match.receiptId) {
+      setStatus("This card has no receipt ID, so edits cannot be stored safely yet.");
+      return;
+    }
+    if (clearSourceMatch && !window.confirm("Clear the manual match for this receipt? Tracked installed files stay intact.")) return;
+    setBusy(true);
+    setStatus(clearSourceMatch ? "Clearing manual match..." : "Saving receipt metadata...");
+    try {
+      await invoke("update_install_receipt_metadata", {
+        profileId,
+        update: {
+          receiptId: target.match.receiptId,
+          displayName,
+          version,
+          thumbnailUrl,
+          pageUrl,
+          author,
+          notes,
+          tags: tagIdsToLabels(editDraftTags, tagCatalog),
+          sourceMatch: clearSourceMatch ? null : confirmedMatch,
+          clearSourceMatch,
+        },
+      });
+      invalidateInstalledSessionCache(profileId);
+      await onSaved();
+      onClose();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="manual-edit-backdrop" role="dialog" aria-modal="true">
+      <section className="manual-edit-panel edit-mod-panel">
+        <header className="manual-edit-header edit-mod-header">
+          <div>
+            <p className="eyebrow">Edit mod</p>
+            <h2>{displayName || target.sourceMod.name}</h2>
+          </div>
+          <button className="ghost-button compact" type="button" onClick={onClose} disabled={busy}>Close</button>
+        </header>
+
+        <div className="edit-mod-main-grid">
+          <div className="edit-mod-fields">
+            <label>Display Name<input className="setting-input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+            <label>Version<input className="setting-input" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+            <label>Author<input className="setting-input" value={author} onChange={(event) => setAuthor(event.target.value)} /></label>
+          </div>
+
+          <article className="edit-mod-thumbnail-editor">
+            <p className="eyebrow">Thumbnail</p>
+            <div className="edit-mod-thumbnail-preview">
+              {thumbnailPreview ? <img src={thumbnailPreview} alt="" /> : <span>No thumbnail</span>}
+              {pendingImageUrl && <img className="edit-mod-hidden-image-test" src={pendingImageUrl} alt="" onLoad={() => { setThumbnailUrl(pendingImageUrl); setThumbnailPreview(pendingImageUrl); setPendingImageUrl(null); setThumbnailError(null); }} onError={() => { setPendingImageUrl(null); setThumbnailError("That image URL could not be loaded. The previous thumbnail was kept."); }} />}
+            </div>
+            <div className="edit-mod-inline-actions">
+              <button className="ghost-button compact" type="button" onClick={() => fileInputRef.current?.click()} disabled={busy}>Choose Image</button>
+              <button className="ghost-button compact" type="button" onClick={resetThumbnail} disabled={busy}>Reset Thumbnail</button>
+            </div>
+            <input ref={fileInputRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => chooseThumbnail(event.currentTarget.files?.[0] ?? null)} />
+            <div className="edit-mod-url-row">
+              <input className="setting-input" value={imageUrlInput} onChange={(event) => setImageUrlInput(event.target.value)} placeholder="Paste image URL" />
+              <button className="ghost-button compact" type="button" onClick={previewImageUrl} disabled={busy}>Preview URL</button>
+            </div>
+            {thumbnailError && <p className="error-text">{thumbnailError}</p>}
+          </article>
+        </div>
+
+        <article className="manual-match-box edit-mod-section">
+          <p className="eyebrow">Mod Page</p>
+          <div className="manual-match-row">
+            <input className="setting-input" value={pageUrl} onChange={(event) => setPageUrl(event.target.value)} placeholder="https://modworkshop.net/mod/12345 or https://www.nexusmods.com/<game>/mods/12345" />
+            <button className="ghost-button compact" type="button" onClick={loadMatchFromUrl} disabled={busy}>Match Mod</button>
+          </div>
+          {pendingMatch && <MatchPreview match={pendingMatch} busy={busy} onCancel={() => setPendingMatch(null)} onConfirm={() => confirmMatch(pendingMatch)} />}
+          {confirmedMatch && !pendingMatch && <p className="success-text">Manual match confirmed: {confirmedMatch.modName} ({sourceLabel(confirmedMatch.source)} #{confirmedMatch.sourceId})</p>}
+        </article>
+
+        <article className="edit-mod-section">
+          <p className="eyebrow">Search for Mod</p>
+          <div className="manual-match-row">
+            <input className="setting-input" value={sourceSearchQuery} onChange={(event) => setSourceSearchQuery(event.target.value)} placeholder="Search current game sources" />
+            <button className="ghost-button compact" type="button" onClick={searchForMod} disabled={busy}>Search</button>
+          </div>
+          {sourceSearchResults.length > 0 && <div className="edit-mod-search-results">
+            {sourceSearchResults.map((result) => {
+              const thumb = displayThumbnailUrl(result.thumbnailUrl ?? result.bannerUrl);
+              return <button key={`${result.source}-${result.sourceId}`} className="edit-mod-search-result" type="button" onClick={() => setPendingMatch(manualSourcePayloadFromSummary(result, sourceConfig, profileId))}>
+                {thumb ? <img src={thumb} alt="" /> : <span />}
+                <strong>{result.name}</strong>
+                <small>{sourceLabel(result.source)} #{result.sourceId}{result.author ? ` by ${result.author}` : ""}</small>
+                <span>{(result.tags ?? []).filter((tag) => !isSystemBadgeTag(tag)).slice(0, 3).filter(Boolean).join(" - ")}</span>
+              </button>;
+            })}
+          </div>}
+        </article>
+
+        <article className="edit-mod-section edit-mod-tags-section">
+          <div className="edit-mod-section-title">
+            <p className="eyebrow">Tags</p>
+            <button className="ghost-button compact" type="button" onClick={() => openTagPicker()}>See All</button>
+          </div>
+          <div className="edit-mod-tag-search">
+            <input className="setting-input" value={tagQuery} onChange={(event) => setTagQuery(event.target.value)} placeholder="Search tags" />
+            <button className="ghost-button compact" type="button" onClick={createCompactCustomTag}>Create Custom Tag</button>
+          </div>
+          <div className="edit-mod-tag-results">
+            {compactTagMatches.map((tag) => <button key={tag.id} className={`tag-chip ${tagColorClass(tag)}`} style={tagColorStyle(tag, tagCatalog)} type="button" onClick={() => selectCompactTag(tag)}>{tagDisplayLabel(tag, tagCatalog)}</button>)}
+          </div>
+          <div className="edit-mod-selected-tags">
+            {selectedTags.length ? selectedTags.map((tag) => <span key={tag.id} className={`tag-chip selected ${tagColorClass(tag)}`} style={tagColorStyle(tag, tagCatalog)}>{tagDisplayLabel(tag, tagCatalog)}</span>) : <span className="muted-text">No tags selected.</span>}
+          </div>
+        </article>
+
+        <details className="edit-mod-advanced" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}>
+          <summary>Advanced / Technical Info</summary>
+          <label>Notes<textarea className="setting-input" value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
+          <dl>
+            <div><dt>Receipt ID</dt><dd>{target.match.receiptId ?? "None"}</dd></div>
+            <div><dt>Match kind</dt><dd>{target.match.matchKind}</dd></div>
+            <div><dt>Source ID</dt><dd>{target.match.sourceId}</dd></div>
+          </dl>
+        </details>
+
+        <p className="manual-edit-status">{status}</p>
+
+        <footer className="manual-edit-actions edit-mod-actions">
+          {hasManualMatch && <button className="ghost-button compact danger-button" type="button" onClick={() => save(true)} disabled={busy}>Clear Manual Match</button>}
+          <span className="edit-mod-action-spacer" />
+          <button className="ghost-button compact" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="ghost-button install-button" type="button" onClick={() => save(false)} disabled={busy}>{busy ? "Saving..." : "Save"}</button>
+        </footer>
+
+        {pickerPendingTags && <SelectTagsOverlay catalog={tagCatalog} initialSelected={pickerPendingTags} refreshBusy={tagRefreshBusy} onRefreshTags={refreshTagCatalog} onCreateCustomTag={createCustomTag} onCancel={() => setPickerPendingTags(null)} onSave={(ids) => { setEditDraftTags(ids); setPickerPendingTags(null); }} />}
+      </section>
+    </div>
+  );
+}
 function InstalledSourceDetailPage({
   mod,
   match,
+  profileId,
   busyKey,
   runtimeLocked,
   onBack,
@@ -4139,10 +6670,12 @@ function InstalledSourceDetailPage({
   onUninstall,
   onToggleReceipt,
   onUpdate,
+  onEdit,
   onRefresh,
 }: {
   mod: SourceModDetail;
   match: InstalledSourceMatch | null;
+  profileId: string;
   busyKey: string | null;
   runtimeLocked: boolean;
   onBack: () => void;
@@ -4151,10 +6684,11 @@ function InstalledSourceDetailPage({
   onUninstall: (match: InstalledSourceMatch) => void;
   onToggleReceipt: (match: InstalledSourceMatch) => void;
   onUpdate: (match: InstalledSourceMatch) => void;
+  onEdit: (match: InstalledSourceMatch) => void;
   onRefresh: () => Promise<void>;
 }) {
-  const [tab, setTab] = useState<"description" | "files" | "changelog" | "comments" | "images">("description");
   const [fileBusyKey, setFileBusyKey] = useState<string | null>(null);
+  const [developerMode, setDeveloperMode] = useState(false);
   const uninstallBusy = match ? busyKey === `uninstall-${match.source}-${match.sourceId}` : false;
   const locationBusy = match ? busyKey === `open-location-${match.source}-${match.sourceId}` : false;
   const safeFiles = installableSourceFiles(Array.isArray(mod.files) ? mod.files : []);
@@ -4163,11 +6697,21 @@ function InstalledSourceDetailPage({
   const safeStats = Array.isArray(mod.stats) ? mod.stats : [];
   const safeTags = Array.isArray(mod.tags) ? mod.tags : [];
   const safeMatchedFiles: string[] = Array.isArray(match?.matchedFiles) ? (match?.matchedFiles ?? []).filter((item): item is string => typeof item === "string") : [];
-  const heroImage = mod.bannerUrl ?? mod.thumbnailUrl;
-  const paragraphs = descriptionParagraphs(mod.description || mod.shortDescription).slice(0, 80);
-  const changelog = descriptionParagraphs(mod.changelog).filter((line) => line !== "No description loaded.");
-  const comments = (mod.comments ?? []).map(cleanSourceDescription).filter(Boolean).slice(0, 16);
+  const receiptBacked = Boolean(match?.installed && (match.ownershipClassification === "tsuki_installed" || match.ownershipClassification === "tsuki_imported"));
+  const heroImage = mod.bannerUrl ?? mod.thumbnailUrl ?? match?.bannerUrl ?? match?.thumbnailUrl ?? null;
 
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{ developerMode?: boolean }>("get_app_settings")
+      .then((settings) => { if (!cancelled) setDeveloperMode(Boolean(settings.developerMode)); })
+      .catch(() => { if (!cancelled) setDeveloperMode(false); });
+    const onDeveloperModeChanged = (event: Event) => setDeveloperMode(Boolean((event as CustomEvent<boolean>).detail));
+    window.addEventListener("tsuki-developer-mode-changed", onDeveloperModeChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tsuki-developer-mode-changed", onDeveloperModeChanged);
+    };
+  }, []);
   function matchedNamesForFile(file: SourceModFile) {
     if (!match?.installed) return [];
     const fileName = file.name.toLowerCase();
@@ -4196,6 +6740,8 @@ function InstalledSourceDetailPage({
         downloadUrl: file.downloadUrl ?? null,
         modName: mod.name,
         description: mod.description,
+        gameDomain: mod.source === "nexus" ? mod.gameId ?? null : null,
+        profileId,
       });
       if (!staged.canInstallLater) {
         reportTaskProgress("Install failed", 100, "No installable files detected.");
@@ -4219,6 +6765,7 @@ function InstalledSourceDetailPage({
         pageUrl: mod.pageUrl ?? null,
         description: mod.description,
         replaceFileNames: [],
+        profileId,
       });
       reportTaskProgress("Install mod", 100, `Installed ${file.name}.`);
       await onRefresh();
@@ -4235,7 +6782,7 @@ function InstalledSourceDetailPage({
     setFileBusyKey(`uninstall-${fileNames.join("|")}`);
     reportTaskProgress("Uninstall mod", 20, `Removing ${fileNames.length} file(s)...`);
     try {
-      await invoke<string>("uninstall_pak_mod_files", { fileNames });
+      await invoke<string>("uninstall_pak_mod_files", { fileNames, profileId });
       reportTaskProgress("Uninstall mod", 100, `Removed ${fileNames.length} file(s).`);
       await onRefresh();
     } catch (error) {
@@ -4251,7 +6798,7 @@ function InstalledSourceDetailPage({
     setFileBusyKey(`toggle-${fileNames.join("|")}`);
     reportTaskProgress(enabled ? "Enable mod" : "Disable mod", 30, `${enabled ? "Enabling" : "Disabling"} ${fileNames.length} file(s)...`);
     try {
-      await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled });
+      await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled, profileId });
       reportTaskProgress(enabled ? "Enable mod" : "Disable mod", 100, `${enabled ? "Enabled" : "Disabled"} ${fileNames.length} file(s).`);
       await onRefresh();
     } catch (error) {
@@ -4272,6 +6819,7 @@ function InstalledSourceDetailPage({
         sourceId: match.sourceId,
         matchedFiles: fileNames,
         matchKind: match.matchKind,
+        profileId,
       });
       reportTaskProgress("Open location", 100, "Opened file location.");
     } catch (error) {
@@ -4282,250 +6830,183 @@ function InstalledSourceDetailPage({
     }
   }
 
+  const sourceFileGroups: UnifiedFileGroup[] = (["main", "optional", "old"] as SourceFileBucket[])
+    .filter((bucket) => bucket !== "old" || fileGroups.old.length > 0)
+    .map((bucket) => ({
+      id: bucket,
+      title: bucket === "main" ? "Main files" : bucket === "optional" ? "Optional files" : "Old files",
+      subtitle: bucket === "main" ? "Primary source downloads" : bucket === "optional" ? "Optional downloads and requirements" : "Older source versions",
+      rows: fileGroups[bucket].map((file) => {
+        const matchedNames = matchedNamesForFile(file);
+        const installed = matchedNames.length > 0;
+        const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
+        const busy = fileBusyKey?.includes(file.id) || matchedNames.some((name) => fileBusyKey?.includes(name));
+        return {
+          id: file.id,
+          title: file.name,
+          subtitle: sourceFileMetaLine(file),
+          status: installed ? (disabled ? "Disabled" : "Installed") : "Available",
+          tone: installed ? (disabled ? "warning" as const : "good" as const) : "neutral" as const,
+          actions: installed ? (
+            <>
+              <button className="ghost-button compact" type="button" onClick={() => openSourceFileLocation(matchedNames)} disabled={Boolean(busy)}>Open Folder</button>
+              <button className="ghost-button compact" type="button" onClick={() => setSourceFileEnabled(matchedNames, disabled)} disabled={runtimeLocked || Boolean(busy)}>{disabled ? "Enable" : "Disable"}</button>
+              <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFile(matchedNames)} disabled={runtimeLocked || Boolean(busy)}>Uninstall</button>
+            </>
+          ) : (
+            <button className="ghost-button compact install-button" type="button" onClick={() => installSourceFile(file)} disabled={runtimeLocked || Boolean(busy)}>Install</button>
+          ),
+        };
+      }),
+      emptyLabel: `No ${bucket} source files are available.`,
+    }));
+  const installedFileGroups: UnifiedFileGroup[] = safeMatchedFiles.length ? [{
+    id: "installed-files",
+    title: receiptBacked ? "Receipt installed files" : "Local installed files",
+    subtitle: receiptBacked ? "Files recorded in the install receipt." : "Files detected locally for this mod.",
+    rows: safeMatchedFiles.map((fileName) => {
+      const disabled = /\.disabled$/i.test(fileName);
+      return {
+        id: fileName,
+        title: installedFileBaseName(fileName),
+        subtitle: installedFileShortPath(fileName),
+        meta: fileName,
+        status: disabled ? "Disabled" : "Enabled",
+        tone: disabled ? "warning" as const : "good" as const,
+        actions: (
+          <>
+            <button className="ghost-button compact" type="button" onClick={() => openSourceFileLocation([fileName])} disabled={Boolean(fileBusyKey?.includes(fileName))}>Reveal</button>
+            <button className="ghost-button compact" type="button" onClick={() => navigator.clipboard.writeText(fileName)}>Copy Path</button>
+            <button className="ghost-button compact" type="button" onClick={() => navigator.clipboard.writeText(installedFileShortPath(fileName))}>Copy Relative Path</button>
+            <button className="ghost-button compact" type="button" onClick={() => setSourceFileEnabled([fileName], disabled)} disabled={runtimeLocked || Boolean(fileBusyKey?.includes(fileName))}>{disabled ? "Enable" : "Disable"}</button>
+            <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFile([fileName])} disabled={runtimeLocked || Boolean(fileBusyKey?.includes(fileName))}>Delete</button>
+          </>
+        ),
+      };
+    }),
+  }] : [];
+  const changelogEntries = cleanSourceDescription(mod.changelog).split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const commentItems = (mod.comments ?? []).map(cleanSourceDescription).filter(Boolean).slice(0, 16).map((comment, index) => <p key={`installed-comment-${index}`}>{comment}</p>);
+  const metadata: UnifiedInfoItem[] = [
+    { label: "Install Status", value: match?.installed ? (match.enabled === false ? "Disabled" : "Installed") : "Local / unknown", tone: match?.installed ? "good" : "warning" },
+    { label: "Verification", value: match ? `${match.confidence}% ${match.confidenceLevel ?? "match"}` : "Unmatched", tone: match ? "neutral" : "warning" },
+    { label: "Match", value: matchKindLabel(match?.matchKind) ?? "Local" },
+    { label: "Ownership", value: match?.ownershipClassification?.replace(/_/g, " ") ?? "unknown local" },
+    { label: "Source Category", value: match?.sourceFileCategory ?? null },
+    { label: "Tracked Files", value: safeMatchedFiles.length ? safeMatchedFiles.length.toLocaleString() : null },
+  ];
+  const statistics: UnifiedInfoItem[] = [
+    ...safeStats.slice(0, 10),
+    { label: "Installed Files", value: safeMatchedFiles.length ? safeMatchedFiles.length.toLocaleString() : null },
+    { label: "Source Files", value: safeFiles.length ? safeFiles.length.toLocaleString() : null },
+  ];
+  const receiptItems: UnifiedInfoItem[] = match ? [
+    { label: "Receipt", value: match.receiptId ?? "No receipt id" },
+    { label: "Source File Version", value: match.sourceFileVersion ?? null },
+    { label: "Source File", value: match.sourceFileName },
+    { label: "Reason", value: match.reason },
+  ] : [];
+  const versionHistory: UnifiedTimelineItem[] = changelogEntries.slice(0, 20).map((entry, index) => ({ id: `changelog-${index}`, title: "Changelog", detail: entry, tone: "neutral" as const }));
+  const updateItems: UnifiedTimelineItem[] = match ? [{
+    id: "installed-update",
+    title: match.updateAvailable ? "Update available" : "Installed version",
+    detail: match.reason,
+    date: match.sourceUpdatedAt ?? match.sourceFileUploadedAt ?? null,
+    status: match.updateAvailable ? "Review update" : "Current",
+    tone: match.updateAvailable ? "warning" : "good",
+  }] : [];
+  const actions: UnifiedAction[] = [
+    { key: "website", label: "Visit Page", onClick: () => onOpenWebsite(mod.pageUrl), disabled: !mod.pageUrl, variant: "neutral" },
+    match && manualMatchEditable(match) ? { key: "edit", label: "Edit Metadata", onClick: () => onEdit(match), variant: "neutral" } : null,
+    match?.installed ? { key: "open-folder", label: locationBusy ? "Opening..." : "Open Folder", onClick: () => onOpenFileLocation(match), disabled: locationBusy, variant: "neutral" } : null,
+    receiptBacked && match ? { key: "toggle", label: busyKey === `receipt-toggle-${match.source}-${match.sourceId}` ? "Working..." : (match.enabled !== false) ? "Disable" : "Enable", onClick: () => onToggleReceipt(match), disabled: runtimeLocked || busyKey === `receipt-toggle-${match.source}-${match.sourceId}`, variant: "neutral" } : null,
+    match?.installed && match.updateAvailable ? { key: "update", label: busyKey === `update-${match.source}-${match.sourceId}` ? "Updating..." : "Update", onClick: () => onUpdate(match), disabled: runtimeLocked || busyKey === `update-${match.source}-${match.sourceId}`, variant: "update" } : null,
+    safeFiles[0] ? { key: "reinstall", label: match?.installed ? "Reinstall" : "Install", onClick: () => installSourceFile(safeFiles[0]), disabled: runtimeLocked || Boolean(fileBusyKey), variant: match?.installed ? "neutral" : "install" } : null,
+    match && manualMatchEditable(match) ? { key: "change-thumbnail", label: "Change Thumbnail", onClick: () => onEdit(match), variant: "neutral" } : null,
+    { key: "refresh", label: "Repair / Refresh", onClick: () => { void onRefresh(); }, disabled: Boolean(fileBusyKey), variant: "neutral" },
+    { key: "share", label: "Share", onClick: () => navigator.clipboard.writeText(mod.pageUrl ?? mod.name), variant: "neutral" },
+    { key: "export", label: "Export", onClick: () => navigator.clipboard.writeText(JSON.stringify({ mod, match }, null, 2)), variant: "neutral" },
+    match?.installed ? { key: "uninstall", label: uninstallBusy ? "Uninstalling..." : "Uninstall", onClick: () => onUninstall(match), disabled: runtimeLocked || uninstallBusy, variant: "danger" } : null,
+  ].filter(Boolean) as UnifiedAction[];
+  const developerItems: UnifiedInfoItem[] = [
+    { label: "Receipt", value: match?.receiptId },
+    { label: "Match Kind", value: match?.matchKind },
+    { label: "Source ID", value: mod.sourceId },
+    { label: "Source File ID", value: match?.sourceFileId },
+    { label: "UID", value: mod.uid },
+    { label: "Raw Match", detail: match ? JSON.stringify(match).slice(0, 1200) : null },
+  ];
+  const dependencies: UnifiedDependencyItem[] = (mod.dependencies ?? []).map((dependency) => {
+    const enriched = enrichDependency({
+      name: dependency.name,
+      required: dependency.required,
+      optional: dependency.optional,
+      sourceKind: dependency.sourceKind as DependencySourceKind | undefined,
+      gameDomain: dependency.gameDomain ?? undefined,
+      numericGameId: dependency.numericGameId ?? undefined,
+      modId: dependency.modId ?? undefined,
+      url: dependency.url ?? undefined,
+      notes: dependency.notes ?? undefined,
+      versionConstraint: dependency.versionConstraint ?? undefined,
+    }, profileId);
+    return { id: enriched.id, title: <DependencyName dependency={enriched} />, detail: `${dependencySourceLabel(enriched)}${enriched.versionConstraint ? ` - ${enriched.versionConstraint}` : ""}`, status: enriched.required ? "Required" : "Optional", tone: enriched.required ? "warning" : "neutral", actions: <DependencyActions dependency={enriched} /> };
+  });
+
   return (
-    <section className={`page installed-source-detail-page installed-source-detail-page-v2 source-detail-page source-detail-${mod.source} browse-style-installed-detail`}>
-      <div className="source-page-shell installed-unified-shell">
-        <div className="source-page-nav">
-          <button className="ghost-button compact" type="button" onClick={onBack}>← Back to Installed</button>
-          <span>{sourceLabel(mod.source)} source detail</span>
-        </div>
-
-        <div className="source-detail-hero card installed-detail-top">
-          <div className="source-detail-hero-media installed-detail-hero-art">
-            {heroImage ? <img src={heroImage} alt="" /> : <div className="source-detail-fallback">{sourceAccent(mod.source)}</div>}
-          </div>
-
-          <div className="source-detail-hero-copy">
-            <p className="eyebrow">{sourceLabel(mod.source)}</p>
-            <h1>{displayModTitle(mod)}</h1>
-            <p>{cleanSourceDescription(mod.shortDescription || mod.description) || "Installed source page."}</p>
-            <div className="installed-badges source-detail-badges">
-              <span className="badge good">Installed match</span>
-              <span className="badge">ID {mod.sourceId}</span>
-              {displayAuthor(mod) && <span className="badge">by {displayAuthor(mod)}</span>}
-              {match && <span className="badge">{match.confidence}% match</span>}
-              {match?.matchKind === "receipt" && <span className={(match.enabled !== false) ? "badge good" : "badge"}>{(match.enabled !== false) ? "Receipt enabled" : "Receipt disabled"}</span>}
-            </div>
-          </div>
-
-          <div className="source-detail-actions safe-hero-actions">
-            <button className="ghost-button compact" type="button" onClick={() => onOpenWebsite(mod.pageUrl)}>Website</button>
-            {match?.installed && (
-              <button
-                className="ghost-button compact"
-                type="button"
-                onClick={() => onOpenFileLocation(match)}
-                disabled={locationBusy}
-              >
-                {locationBusy ? "Opening..." : "Open File Location"}
-              </button>
-            )}
-            {match?.installed && match.matchKind === "receipt" && (
-              <button
-                className={`ghost-button compact ${(match.enabled !== false) ? "" : "update-button"}`}
-                type="button"
-                onClick={() => onToggleReceipt(match)}
-                disabled={runtimeLocked || busyKey === `receipt-toggle-${match.source}-${match.sourceId}`}
-              >
-                {busyKey === `receipt-toggle-${match.source}-${match.sourceId}` ? "..." : (match.enabled !== false) ? "Disable" : "Enable"}
-              </button>
-            )}
-            {match?.installed && match.updateAvailable && (
-              <button className="ghost-button compact update-button" type="button" onClick={() => onUpdate(match)} disabled={runtimeLocked || busyKey === `update-${match.source}-${match.sourceId}`}>
-                {busyKey === `update-${match.source}-${match.sourceId}` ? "Updating..." : "Update"}
-              </button>
-            )}
-            {match?.installed && (
-              <button className="ghost-button compact danger-button" type="button" onClick={() => onUninstall(match)} disabled={runtimeLocked || uninstallBusy}>
-                {uninstallBusy ? "Uninstalling..." : "Uninstall"}
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="source-detail-grid-v2 installed-detail-polished">
-          <main className="source-detail-main-stack source-detail-tabbed-main">
-            <article className="card source-content-card source-tabbed-panel">
-              <div className="mod-page-tabs installed-detail-tabs">
-                {([
-                  ["description", "Description"],
-                  ["files", `Files ${safeFiles.length}`],
-                  ["changelog", `Changelog ${changelog.length}`],
-                  ["comments", `Comments ${comments.length}`],
-                  ["images", `Images ${safeImages.length}`],
-                ] as Array<[typeof tab, string]>).map(([id, label]) => (
-                  <button className={`mod-page-tab ${tab === id ? "active" : ""}`} key={id} type="button" onClick={() => setTab(id)}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              {tab === "description" && (
-                <article className="installed-source-detail-content source-tab-pane source-description-prose">
-                  <h2>Description</h2>
-                  {paragraphs.map((paragraph, index) => <p key={`installed-desc-${index}`}>{renderLinkedText(paragraph, onOpenWebsite)}</p>)}
-                </article>
-              )}
-
-              {tab === "files" && (
-                <article className="installed-source-detail-content source-tab-pane source-downloads-expanded-list source-downloads-tab-pane">
-                  <h2>Files</h2>
-                  {([
-                    ["main", "Main files"],
-                    ["optional", "Optional files"],
-                    ["old", "Old versions"],
-                    ] as Array<[SourceFileBucket, string]>).filter(([bucket]) => bucket !== "old" || fileGroups.old.length > 0).map(([bucket, label]) => (
-                    <div className={`source-downloads-expanded-group ${bucket}`} key={bucket}>
-                      <div className="source-downloads-group-heading">
-                        <h3>{label}</h3>
-                        <span className="status-pill">{fileGroups[bucket].length}</span>
-                      </div>
-                      {fileGroups[bucket].map((file) => {
-                        const matchedNames = matchedNamesForFile(file);
-                        const installed = matchedNames.length > 0;
-                        const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
-                        const busy = fileBusyKey?.includes(file.id) || matchedNames.some((name) => fileBusyKey?.includes(name));
-                        return (
-                          <div className={`source-download-detail-row source-download-action-row ${installed ? "installed" : ""}`} key={file.id}>
-                            <div>
-                              <strong title={file.name}>{file.name}</strong>
-                              <span>{sourceFileMetaLine(file)}</span>
-                            </div>
-                            <div className="source-file-row-actions">
-                              {installed ? (
-                                <>
-                                  <button className="ghost-button compact" type="button" onClick={() => openSourceFileLocation(matchedNames)} disabled={Boolean(busy)}>
-                                    Open File Location
-                                  </button>
-                                  <button className="ghost-button compact" type="button" onClick={() => setSourceFileEnabled(matchedNames, disabled)} disabled={runtimeLocked || Boolean(busy)}>
-                                    {disabled ? "Enable" : "Disable"}
-                                  </button>
-                                  <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFile(matchedNames)} disabled={runtimeLocked || Boolean(busy)}>
-                                    Uninstall
-                                  </button>
-                                </>
-                              ) : (
-                                <button className="ghost-button compact install-button" type="button" onClick={() => installSourceFile(file)} disabled={runtimeLocked || Boolean(busy)}>
-                                  Install
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                  {safeFiles.length === 0 && <p>No files exposed by this source yet.</p>}
-                </article>
-              )}
-
-              {tab === "changelog" && (
-                <article className="installed-source-detail-content source-tab-pane source-notes-list">
-                  <h2>Changelog / logs</h2>
-                  {changelog.length ? changelog.map((entry, index) => <p key={`installed-log-${index}`}>{entry}</p>) : <p>No changelog exposed by this source yet.</p>}
-                </article>
-              )}
-
-              {tab === "comments" && (
-                <article className="installed-source-detail-content source-tab-pane source-comment-list">
-                  <h2>Comments</h2>
-                  {comments.length ? comments.map((comment, index) => <p key={`installed-comment-${index}`}>{comment}</p>) : <p>Comments are not available from the current source response yet.</p>}
-                </article>
-              )}
-
-              {tab === "images" && (
-                <article className="installed-source-detail-content source-tab-pane">
-                  <h2>Images</h2>
-                  <div className="installed-detail-image-grid">
-                    {safeImages.map((image) => (
-                      <div key={image.id}>
-                        <img src={image.thumbnailUrl ?? image.imageUrl} alt="" />
-                        <strong>{image.title ?? "Image"}</strong>
-                      </div>
-                    ))}
-                    {safeImages.length === 0 && <p>No images exposed by this source yet.</p>}
-                  </div>
-                </article>
-              )}
-
-            </article>
-          </main>
-
-          <aside className="source-detail-side-stack">
-            <article className="card safe-files-card source-files-card-v2">
-              <div className="safe-files-header">
-                <div>
-                  <p className="eyebrow">Local + source</p>
-                  <h2>Files</h2>
-                </div>
-                <span className="badge">{safeMatchedFiles.length} installed</span>
-              </div>
-
-              {safeMatchedFiles.length > 0 && (
-                <div className="installed-detail-file-list local-files">
-                  {limitList(safeMatchedFiles, 36).map((fileName) => (
-                    <div key={fileName} title={fileName}>
-                      <div>
-                        <strong>{installedFileBaseName(fileName)}</strong>
-                        <p>{installedFileShortPath(fileName)}</p>
-                      </div>
-                      <span>installed</span>
-                    </div>
-                  ))}
-                  {safeMatchedFiles.length > 36 && <p>+{safeMatchedFiles.length - 36} more installed files tracked by receipt.</p>}
-                </div>
-              )}
-
-              <h3>Source files</h3>
-              <div className="installed-detail-file-list">
-                {limitList(safeFiles, 18).map((file) => (
-                  <div key={file.id} title={file.name}>
-                    <div>
-                      <strong>{file.name}</strong>
-                      <p>{sourceFileMetaLine(file)}</p>
-                    </div>
-                    <span>{file.sizeLabel ?? "Unknown size"}</span>
-                  </div>
-                ))}
-                {safeFiles.length > 18 && <p>Open the Downloads tab for all {safeFiles.length} source files.</p>}
-                {safeFiles.length === 0 && <p>No files exposed by this source yet.</p>}
-              </div>
-            </article>
-
-            {safeStats.length > 0 && (
-              <article className="card source-meta-card">
-                <p className="eyebrow">Page info</p>
-                <h2>Details</h2>
-                <div className="source-meta-list">
-                  {safeStats.slice(0, 8).map((stat) => (
-                    <div key={`${stat.label}-${stat.value}`}>
-                      <span>{stat.label}</span>
-                      <strong>{stat.value}</strong>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            )}
-
-            {safeTags.length > 0 && (
-              <article className="card source-tag-card">
-                <p className="eyebrow">Tags</p>
-                <div className="installed-badges">
-                  {safeTags.slice(0, 18).map((tag) => <span className="badge" key={tag}>{tag}</span>)}
-                </div>
-              </article>
-            )}
-          </aside>
-        </div>
-      </div>
-    </section>
+    <UnifiedModPage
+      className="installed-unified-mod-page"
+      backLabel="Back to Installed"
+      onBack={onBack}
+      source={mod.source}
+      sourceLabel={sourceLabel(mod.source)}
+      sourceAccent={sourceAccent(mod.source)}
+      sourceId={mod.sourceId}
+      title={displayModTitle(mod)}
+      summary={cleanSourceDescription(mod.shortDescription || mod.description) || (match ? match.reason : "Installed local mod.")}
+      description={mod.description || mod.shortDescription || match?.reason || "No description has been saved for this mod yet."}
+      author={displayAuthor(mod)}
+      version={mod.version ?? match?.sourceFileVersion ?? null}
+      game={sourceGameId(mod) ?? null}
+      category={match?.sourceFileCategory ?? null}
+      fileSize={safeMatchedFiles.length ? `${safeMatchedFiles.length} tracked file(s)` : null}
+      installDate={match?.installedModifiedUnix ? formatDateFromUnix(match.installedModifiedUnix) : null}
+      lastUpdate={mod.updatedAt ?? match?.sourceUpdatedAt ?? null}
+      installStatus={match?.installed ? (match.enabled === false ? "Disabled" : "Installed") : "Local / unknown"}
+      verificationStatus={match ? `${match.confidence}% ${match.confidenceLevel ?? "match"}` : "Unmatched"}
+      thumbnailUrl={mod.thumbnailUrl ?? match?.thumbnailUrl ?? null}
+      bannerUrl={heroImage}
+      pageUrl={mod.pageUrl ?? match?.pageUrl ?? null}
+      tags={safeTags}
+      badges={[
+        { label: sourceLabel(mod.source), tone: "neutral" as const },
+        match?.installed ? { label: match.enabled === false ? "Disabled" : "Installed", tone: match.enabled === false ? "warning" as const : "good" as const } : { label: "Unknown local", tone: "warning" as const },
+        match?.updateAvailable ? { label: "Update Available", tone: "warning" as const } : null,
+        receiptBacked ? { label: "Receipt backed", tone: "good" as const } : null,
+      ].filter(Boolean) as Array<{ label: string; tone?: "good" | "warning" | "danger" | "neutral" }>}
+      actions={actions}
+      metadata={metadata}
+      statistics={statistics}
+      galleryImages={safeImages}
+      fileGroups={sourceFileGroups}
+      installedFileGroups={installedFileGroups}
+      dependencies={dependencies}
+      versionHistory={versionHistory}
+      receiptItems={receiptItems}
+      updateItems={updateItems}
+      comments={commentItems}
+      settingsContent={match && manualMatchEditable(match) ? <button className="ghost-button compact" type="button" onClick={() => onEdit(match)}>Edit metadata and manual match</button> : null}
+      developerMode={developerMode}
+      developerItems={developerItems}
+      filesUnavailableMessage={safeFiles.length === 0 ? "Source files are unavailable right now. Tsuki is showing tracked local files when available." : null}
+      onOpenExternal={onOpenWebsite}
+    />
   );
 }
-
 function RawGroupList({
   title,
   groups,
   busyKey,
+  onOpen,
   onToggle,
   onMarkCustom,
   onTryPair,
@@ -4536,6 +7017,7 @@ function RawGroupList({
   title: string;
   groups: InstalledGroup[];
   busyKey: string | null;
+  onOpen: (group: InstalledGroup) => void;
   onToggle: (group: InstalledGroup, enabled: boolean) => void;
   onMarkCustom: (group: InstalledGroup) => void;
   onTryPair: (group: InstalledGroup) => void;
@@ -4559,18 +7041,18 @@ function RawGroupList({
               <strong>{group.label}</strong>
               <p>{group.files.map((file) => file.fileName).join(", ")}</p>
               <small>
-                {group.files.length} files · {formatBytes(group.sizeBytes)} · {formatDateFromUnix(group.modifiedUnix)}
-                {inferModWorkshopId(group) ? ` · MWS #${inferModWorkshopId(group)}` : ""}
+                {group.files.length} files - {group.enabled ? "enabled" : "disabled"}
+                {inferModWorkshopId(group) ? ` - MW #${inferModWorkshopId(group)}` : ""}
               </small>
             </div>
             <div className="raw-row-actions">
-              <button
-                className={`toggle-pill ${group.enabled ? "on" : "off"}`}
-                type="button"
-                disabled={busyKey === group.key}
+              <ModToggleButton
+                enabled={group.enabled}
+                busy={busyKey === group.key}
                 onClick={() => onToggle(group, !group.enabled)}
-              >
-                {busyKey === group.key ? "..." : group.enabled ? "Enabled" : "Disabled"}
+              />
+              <button className="mini-action" type="button" onClick={() => onOpen(group)}>
+                Open Details
               </button>
               <button className="mini-action" type="button" disabled={busyKey === `try-pair-${group.key}`} onClick={() => onTryPair(group)}>
                 {busyKey === `try-pair-${group.key}` ? "Pairing..." : "Try Pair"}

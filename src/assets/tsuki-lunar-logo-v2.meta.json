@@ -1,0 +1,8 @@
+{
+  "mode": "image_gen, transparent background",
+  "prompt": "Create a premium app logo mark for Tsuki Mod Manager, a Windows game mod manager. Transparent background, square canvas, centered isolated symbol occupying 82 percent of canvas. A bold sculpted crescent moon whose two tips subtly embrace a small four-point sparkle, with a tiny modular inset notch suggesting software customization. Silvery pearl crescent with restrained lavender edge and cool turquoise accent on the sparkle. Clean crisp silhouette, polished dimensional enamel, no excessive bloom, no rings, no background, no text, no letters, no wordmark. Strong readable silhouette at 24 pixels. Professional minimalist lunar identity, not a generic space illustration. Deliver a single finished icon.",
+  "source": "tsuki-lunar-logo-v2.png",
+  "uiAsset": "tsuki-lunar-logo-v2-ui.png",
+  "uiProcessing": "Sharp resize to 256 pixels, lossless PNG",
+  "nativeIcons": "Tauri icon CLI, src-tauri/icons/lunar-v2"
+}

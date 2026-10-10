@@ -1,1 +1,1 @@
-export type AppPage = "home" | "browse" | "installed" | "profiles" | "repair" | "backups" | "settings";
+export type AppPage = "home" | "browse" | "installed" | "profiles" | "games" | "profileCreator" | "repair" | "backups" | "settings";

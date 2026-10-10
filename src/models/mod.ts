@@ -14,5 +14,11 @@ export interface PakScanResult {
   pakModsPath: string;
   pakModsPathExists: boolean;
   pakFileCount: number;
+  foundMods: number;
+  exactHashMatches: number;
+  receiptMatches: number;
+  filenameMatches: number;
+  fuzzyFilenameMatches: number;
+  unknownMods: number;
   pakMods: PakModFile[];
 }

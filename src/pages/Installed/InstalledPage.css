@@ -1677,7 +1677,6 @@
   max-width: 720px;
 }
 
-.installed-metrics,
 .mass-select-bar,
 .installed-status-line,
 .installed-match-details,
@@ -1757,7 +1756,6 @@
   /* after JSX removal this only guards old builds */
 }
 
-.installed-metrics,
 .mass-select-bar,
 .installed-status-line,
 .installed-match-details {
@@ -1822,6 +1820,58 @@
   }
   .installed-cover {
     width: 100% !important;
+  }
+}
+
+/* v2.0 shared ModCard override: Installed uses the same gallery card shell as Home/Browse. */
+.installed-library-grid {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+  gap: 20px !important;
+  align-items: stretch !important;
+}
+
+.installed-library-card.tsuki-mod-card {
+  display: flex !important;
+  grid-template-columns: none !important;
+  flex-direction: column !important;
+  min-height: 430px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  border-radius: 8px !important;
+}
+
+.installed-library-card.tsuki-mod-card .tsuki-mod-card-hero {
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  aspect-ratio: 16 / 9 !important;
+  border-radius: 0 !important;
+}
+
+.installed-library-card.tsuki-mod-card .tsuki-mod-card-body {
+  min-width: 0 !important;
+}
+
+.installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+  flex-wrap: nowrap !important;
+  min-width: max-content !important;
+}
+
+.installed-library-card.tsuki-mod-card .toggle-pill,
+.installed-library-card.tsuki-mod-card .ghost-button.compact,
+.installed-library-card.tsuki-mod-card .card-more-menu-trigger {
+  min-height: 34px !important;
+  white-space: nowrap !important;
+}
+
+@media (max-width: 760px) {
+  .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+    flex-wrap: wrap !important;
+    min-width: 0 !important;
   }
 }
 
@@ -2609,4 +2659,2010 @@
     max-width: 100%;
     justify-content: flex-start;
   }
+}
+
+.installed-state-chips button {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+}
+
+.installed-state-chips button strong {
+  min-width: 1.6em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.crash-test-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.crash-test-panel > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crash-test-panel > div:first-child span,
+.crash-test-details {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.crash-test-actions,
+.crash-test-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.crash-test-details span {
+  min-width: min(100%, 220px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* v2.0 installed library layout repair: compact toolbar + shared gallery grid */
+.installed-clean-page {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  gap: 14px !important;
+}
+
+.installed-clean-page .installed-hero,
+.installed-clean-page .installed-metrics,
+.installed-clean-page .crash-test-panel,
+.installed-clean-page .mass-select-bar,
+.installed-clean-page .installed-status-line {
+  display: none !important;
+}
+
+.installed-toolbar-v2 {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, var(--accent-a) 18%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 12px 24px color-mix(in srgb, #000 16%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.installed-toolbar-search-v2 {
+  min-width: 220px;
+}
+
+.installed-toolbar-search-v2 .setting-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.installed-toolbar-counts,
+.installed-toolbar-controls-v2,
+.installed-toolbar-actions-v2,
+.installed-state-chips.compact {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.installed-toolbar-counts button,
+.installed-state-chips.compact button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 7px !important;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--accent-a) 16%);
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.installed-toolbar-counts button strong {
+  min-width: 1.7em;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent-a) 20%, transparent);
+  font-size: 0.76rem;
+}
+
+.installed-toolbar-counts button.active,
+.installed-state-chips.compact button.active {
+  border-color: color-mix(in srgb, var(--accent-a) 62%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent-a) 16%, var(--panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-a) 12%, transparent);
+}
+
+.installed-toolbar-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.installed-toolbar-select .setting-input {
+  width: auto;
+  min-width: 118px;
+  max-width: 150px;
+}
+
+.installed-toolbar-actions-v2 {
+  justify-content: flex-end;
+}
+
+.installed-advanced-actions.toolbar-menu {
+  position: relative;
+  min-width: 0;
+}
+
+.installed-advanced-actions.toolbar-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--accent-a) 16%);
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+
+.installed-advanced-actions.toolbar-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.installed-advanced-actions.toolbar-menu > div {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  display: grid;
+  gap: 7px;
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 28px));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 98%, #05070a 2%);
+  box-shadow: 0 18px 44px color-mix(in srgb, #000 32%, transparent);
+}
+
+.installed-advanced-actions.toolbar-menu .pair-limit-control {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.installed-clean-page .ghost-button.compact,
+.installed-clean-page .toggle-pill,
+.installed-clean-page .card-more-menu-trigger,
+.installed-clean-page .tsuki-mod-card-action {
+  min-height: 32px !important;
+  padding: 7px 12px !important;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, var(--accent-a) 28%) !important;
+  border-radius: 999px !important;
+  color: var(--text) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel-2) 88%, var(--accent-a) 12%), color-mix(in srgb, var(--panel) 90%, transparent)) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent), 0 8px 18px color-mix(in srgb, #000 12%, transparent) !important;
+  font-size: 0.78rem !important;
+  font-weight: 850 !important;
+  line-height: 1 !important;
+}
+
+.installed-clean-page .ghost-button.compact:hover:not(:disabled),
+.installed-clean-page .toggle-pill:hover:not(:disabled),
+.installed-clean-page .card-more-menu-trigger:hover:not(:disabled),
+.installed-clean-page .tsuki-mod-card-action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-a) 66%, var(--line)) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 14%, transparent), 0 0 0 1px color-mix(in srgb, var(--accent-a) 16%, transparent), 0 12px 24px color-mix(in srgb, #000 18%, transparent) !important;
+  transform: translateY(-1px);
+}
+
+.installed-clean-page .install-button,
+.installed-clean-page .tsuki-mod-card-action:not(.danger-button):not(.update-button):not(.installed),
+.installed-clean-page .toggle-pill.on {
+  border-color: color-mix(in srgb, var(--success) 62%, var(--line)) !important;
+  color: color-mix(in srgb, var(--success) 88%, var(--text)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--success) 28%, var(--panel-2)), color-mix(in srgb, var(--success) 14%, var(--panel))) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 12%, transparent), 0 0 18px color-mix(in srgb, var(--success) 13%, transparent) !important;
+}
+
+.installed-clean-page .danger-button,
+.installed-clean-page .toggle-pill.off {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--line)) !important;
+  color: color-mix(in srgb, var(--danger) 84%, var(--text)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 22%, var(--panel-2)), color-mix(in srgb, var(--danger) 10%, var(--panel))) !important;
+}
+
+.installed-clean-page .installed-library-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+  gap: 20px !important;
+  align-items: stretch !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card {
+  display: flex !important;
+  grid-template-columns: none !important;
+  flex-direction: column !important;
+  min-height: 430px !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-hero {
+  width: 100% !important;
+  min-height: 0 !important;
+  aspect-ratio: 16 / 9 !important;
+  border-radius: 0 !important;
+}
+
+.installed-clean-page .tsuki-mod-card-tags span {
+  border-color: color-mix(in srgb, var(--accent-a) 46%, var(--line)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-a) 22%, transparent), color-mix(in srgb, var(--panel-2) 76%, transparent)) !important;
+  color: color-mix(in srgb, var(--text) 92%, var(--accent-a)) !important;
+  font-weight: 800;
+}
+
+.installed-clean-page .tsuki-mod-card-footer {
+  align-items: flex-end !important;
+  gap: 10px !important;
+}
+
+.installed-clean-page .tsuki-mod-card-stats {
+  max-width: calc(100% - 92px);
+}
+
+.installed-clean-page .tsuki-mod-card-stats span.installed {
+  display: none !important;
+}
+
+.installed-clean-page .tsuki-mod-card-actions {
+  flex-direction: column !important;
+  align-items: flex-end !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
+  min-width: 76px !important;
+  margin-left: auto;
+}
+
+.installed-clean-page .tsuki-mod-card-actions .tsuki-mod-card-action,
+.installed-clean-page .tsuki-mod-card-actions .toggle-pill,
+.installed-clean-page .tsuki-mod-card-actions .ghost-button.compact,
+.installed-clean-page .tsuki-mod-card-actions .card-more-menu-trigger {
+  max-width: 108px !important;
+  min-width: 0 !important;
+  justify-content: center !important;
+  text-align: center !important;
+}
+
+.installed-crash-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #05070a 66%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.installed-crash-modal {
+  display: grid;
+  gap: 12px;
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 16px !important;
+  border-radius: 8px !important;
+}
+
+.installed-crash-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.installed-crash-modal-head strong,
+.installed-crash-modal-head span {
+  display: block;
+}
+
+.installed-crash-modal-head span,
+.installed-crash-modal .crash-test-details,
+.installed-crash-modal .crash-test-note {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.installed-crash-modal .crash-test-actions,
+.installed-crash-modal .crash-test-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.installed-crash-modal .crash-test-details span {
+  min-width: min(100%, 210px);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-runtime-lock {
+  margin: 0;
+}
+
+@media (max-width: 1180px) {
+  .installed-toolbar-v2 {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .installed-toolbar-controls-v2,
+  .installed-toolbar-actions-v2 {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 820px) {
+  .installed-toolbar-v2 {
+    position: static;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .installed-toolbar-search-v2,
+  .installed-toolbar-counts,
+  .installed-toolbar-controls-v2,
+  .installed-toolbar-actions-v2 {
+    width: 100%;
+  }
+
+  .installed-toolbar-select .setting-input {
+    max-width: none;
+  }
+
+  .installed-clean-page .tsuki-mod-card-footer {
+    align-items: stretch !important;
+    flex-direction: column !important;
+  }
+
+  .installed-clean-page .tsuki-mod-card-stats {
+    max-width: 100%;
+  }
+
+  .installed-clean-page .tsuki-mod-card-actions {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+    min-width: 0 !important;
+  }
+
+  .installed-advanced-actions.toolbar-menu > div {
+    left: 0;
+    right: auto;
+  }
+}
+
+/* v2.0 final Installed library cleanup */
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 18px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card {
+  min-height: 414px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-body {
+  gap: 8px !important;
+  padding: 12px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+  flex-direction: column !important;
+  align-items: flex-end !important;
+  justify-content: flex-end !important;
+  min-width: 58px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions > .toggle-pill,
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions > .ghost-button.compact {
+  min-width: 52px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .card-more-menu-trigger {
+  min-width: 34px !important;
+  padding-inline: 10px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-stats {
+  max-width: calc(100% - 74px) !important;
+}
+
+@media (max-width: 1450px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 1040px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 680px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+    align-items: center !important;
+    flex-direction: row !important;
+    justify-content: flex-start !important;
+  }
+
+  .installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-stats {
+    max-width: 100% !important;
+  }
+}
+
+/* v2.0 final Installed cleanup: single compact filter row, four-card grid, bottom-right actions */
+.installed-clean-page {
+  width: 100% !important;
+  max-width: none !important;
+  padding-inline: clamp(12px, 1.4vw, 22px) !important;
+}
+
+.installed-toolbar-v2 {
+  grid-template-columns: minmax(280px, 1fr) auto auto auto !important;
+  gap: 10px !important;
+  padding: 9px 10px !important;
+}
+
+.installed-toolbar-counts button {
+  min-height: 31px !important;
+  padding: 6px 10px !important;
+  border-radius: 999px !important;
+}
+
+.installed-toolbar-actions-v2 {
+  justify-content: flex-end !important;
+}
+
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 18px !important;
+  width: 100% !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card {
+  min-height: 392px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-hero {
+  aspect-ratio: 16 / 8.8 !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+  align-self: end !important;
+  justify-self: end !important;
+  flex-direction: column !important;
+  align-items: flex-end !important;
+  justify-content: flex-end !important;
+  min-width: 56px !important;
+  margin-left: auto !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions > .toggle-pill,
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions > .ghost-button.compact {
+  min-width: 54px !important;
+  max-width: 112px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .card-more-menu-trigger {
+  width: 36px !important;
+  min-width: 36px !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-stats {
+  max-width: none !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-footer {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: end !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-audio {
+  border-color: rgba(255, 120, 216, 0.68) !important;
+  background: linear-gradient(180deg, rgba(255, 120, 216, 0.28), rgba(132, 84, 255, 0.16)) !important;
+  color: #ffd8f5 !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-pak,
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-system {
+  border-color: rgba(100, 167, 255, 0.68) !important;
+  background: linear-gradient(180deg, rgba(100, 167, 255, 0.28), rgba(59, 114, 245, 0.14)) !important;
+  color: #d9e9ff !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-ui {
+  border-color: rgba(78, 230, 255, 0.68) !important;
+  background: linear-gradient(180deg, rgba(78, 230, 255, 0.24), rgba(58, 173, 210, 0.14)) !important;
+  color: #d8fbff !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-gameplay,
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-success {
+  border-color: color-mix(in srgb, var(--success) 68%, var(--line)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--success) 28%, transparent), color-mix(in srgb, var(--success) 12%, transparent)) !important;
+  color: color-mix(in srgb, var(--success) 82%, #fff) !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-weapon,
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-update {
+  border-color: rgba(255, 154, 77, 0.7) !important;
+  background: linear-gradient(180deg, rgba(255, 154, 77, 0.26), rgba(255, 91, 91, 0.13)) !important;
+  color: #ffe0c5 !important;
+}
+
+.installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-tags span.tag-tone-danger {
+  border-color: color-mix(in srgb, var(--danger) 70%, var(--line)) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 26%, transparent), color-mix(in srgb, var(--danger) 10%, transparent)) !important;
+  color: color-mix(in srgb, var(--danger) 78%, #fff) !important;
+}
+
+@media (max-width: 1180px) {
+  .installed-toolbar-v2 {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+  }
+
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 620px) {
+  .installed-toolbar-v2,
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .installed-clean-page .installed-library-card.tsuki-mod-card .tsuki-mod-card-actions {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: flex-start !important;
+  }
+}
+
+/* Dedicated v2 Installed management cards */
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  align-items: stretch;
+}
+
+.installed-mod-card-v2 {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 374px;
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--accent));
+  border-radius: 8px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, rgba(255, 255, 255, 0.04)), color-mix(in srgb, var(--panel-2) 94%, rgba(0, 0, 0, 0.14))), var(--panel);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.installed-mod-card-v2:hover,
+.installed-mod-card-v2:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--line));
+  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.28), 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
+  transform: translateY(-1px);
+}
+
+.installed-mod-card-v2.selected {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent), 0 18px 38px rgba(0, 0, 0, 0.24);
+}
+
+.installed-mod-card-select {
+  position: absolute;
+  z-index: 5;
+  top: 48px;
+  left: 10px;
+}
+
+.installed-mod-card-hero {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 8.9;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: radial-gradient(circle at 50% 32%, color-mix(in srgb, var(--accent) 28%, transparent), color-mix(in srgb, var(--panel-2) 90%, #000));
+  cursor: inherit;
+}
+
+.installed-mod-card-hero:disabled {
+  cursor: default;
+}
+
+.installed-mod-card-hero .lazy-thumbnail-shell,
+.installed-mod-card-hero img {
+  width: 100%;
+  height: 100%;
+}
+
+.installed-mod-card-hero img {
+  display: block;
+  object-fit: cover;
+}
+
+.installed-mod-card-hero::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 46%;
+  content: "";
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.58));
+  pointer-events: none;
+}
+
+.installed-mod-card-fallback,
+.installed-cover-fallback {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: color-mix(in srgb, var(--text) 78%, var(--accent));
+  font-size: 2.1rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.installed-mod-card-source,
+.installed-mod-card-state {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  max-width: calc(50% - 14px);
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 900;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.installed-mod-card-source {
+  left: 10px;
+  background: linear-gradient(135deg, rgba(124, 92, 255, 0.9), rgba(54, 162, 255, 0.78));
+}
+
+.installed-mod-card-v2.source-nexus .installed-mod-card-source {
+  background: linear-gradient(135deg, rgba(255, 156, 54, 0.92), rgba(255, 207, 91, 0.74));
+}
+
+.installed-mod-card-v2.source-local .installed-mod-card-source {
+  background: linear-gradient(135deg, rgba(104, 113, 134, 0.92), rgba(65, 72, 88, 0.8));
+}
+
+.installed-mod-card-state {
+  right: 10px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--success) 88%, #124), color-mix(in srgb, var(--success) 58%, #061));
+}
+
+.installed-mod-card-v2.state-disabled .installed-mod-card-state,
+.installed-mod-card-v2.state-off .installed-mod-card-state {
+  background: linear-gradient(135deg, rgba(116, 105, 145, 0.92), rgba(70, 64, 90, 0.82));
+}
+
+.installed-mod-card-v2.state-missing .installed-mod-card-state,
+.installed-mod-card-v2.state-missing-broken .installed-mod-card-state {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--danger) 78%, #400), rgba(120, 29, 45, 0.9));
+}
+
+.installed-mod-card-v2.state-local .installed-mod-card-state {
+  background: linear-gradient(135deg, rgba(104, 113, 134, 0.92), rgba(65, 72, 88, 0.8));
+}
+
+.installed-mod-card-loading {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.installed-mod-card-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+}
+
+.installed-mod-card-body h3 {
+  display: -webkit-box;
+  overflow: hidden;
+  min-height: 2.6em;
+  margin: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--text);
+  font-size: 0.98rem;
+  letter-spacing: 0;
+  line-height: 1.28;
+}
+
+.installed-mod-card-author {
+  overflow: hidden;
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-mod-card-tags {
+  display: flex;
+  min-height: 25px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.installed-mod-card-tags span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--accent));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.installed-mod-card-tags .tag-tone-audio { border-color: rgba(255, 120, 216, 0.68); background: linear-gradient(180deg, rgba(255, 120, 216, 0.28), rgba(132, 84, 255, 0.16)); color: #ffd8f5; }
+.installed-mod-card-tags .tag-tone-pak,
+.installed-mod-card-tags .tag-tone-system { border-color: rgba(100, 167, 255, 0.68); background: linear-gradient(180deg, rgba(100, 167, 255, 0.28), rgba(59, 114, 245, 0.14)); color: #d9e9ff; }
+.installed-mod-card-tags .tag-tone-ui { border-color: rgba(78, 230, 255, 0.68); background: linear-gradient(180deg, rgba(78, 230, 255, 0.24), rgba(58, 173, 210, 0.14)); color: #d8fbff; }
+.installed-mod-card-tags .tag-tone-gameplay,
+.installed-mod-card-tags .tag-tone-success { border-color: color-mix(in srgb, var(--success) 68%, var(--line)); background: linear-gradient(180deg, color-mix(in srgb, var(--success) 28%, transparent), color-mix(in srgb, var(--success) 12%, transparent)); color: color-mix(in srgb, var(--success) 82%, #fff); }
+.installed-mod-card-tags .tag-tone-weapon,
+.installed-mod-card-tags .tag-tone-update { border-color: rgba(255, 154, 77, 0.7); background: linear-gradient(180deg, rgba(255, 154, 77, 0.26), rgba(255, 91, 91, 0.13)); color: #ffe0c5; }
+.installed-mod-card-tags .tag-tone-danger { border-color: color-mix(in srgb, var(--danger) 70%, var(--line)); background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 26%, transparent), color-mix(in srgb, var(--danger) 10%, transparent)); color: color-mix(in srgb, var(--danger) 78%, #fff); }
+
+.installed-mod-card-meta {
+  display: flex;
+  min-height: 19px;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.73rem;
+  font-weight: 800;
+}
+
+.installed-mod-card-footer {
+  display: flex;
+  margin-top: auto;
+  justify-content: flex-end;
+}
+
+.installed-mod-card-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.installed-mod-card-actions .toggle-pill,
+.installed-mod-card-actions .ghost-button.compact {
+  min-width: 56px;
+  min-height: 31px;
+}
+
+.installed-mod-card-actions .card-more-menu-trigger {
+  width: 36px;
+  min-width: 36px;
+  height: 31px;
+  padding-inline: 8px;
+}
+
+@media (max-width: 1180px) {
+  .installed-clean-page .installed-library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 900px) {
+  .installed-clean-page .installed-library-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 620px) {
+  .installed-clean-page .installed-library-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* v2 correction: Installed cards stay vertical, image-led, and action-stable. */
+.installed-clean-page .installed-library-grid > .installed-mod-card-v2.installed-library-card,
+.installed-mod-card-v2.installed-library-card {
+  display: flex !important;
+  grid-template-columns: none !important;
+  grid-template-rows: none !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 402px !important;
+  min-height: 402px !important;
+  max-height: 402px !important;
+  padding: 0 !important;
+  flex-direction: column !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-hero {
+  flex: 0 0 176px !important;
+  height: 176px !important;
+  min-height: 176px !important;
+  aspect-ratio: auto !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-body {
+  display: flex !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-tags {
+  max-height: 52px !important;
+  overflow: hidden !important;
+  align-content: flex-start !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-footer {
+  display: flex !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin-top: auto !important;
+  align-items: flex-end !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-meta {
+  min-width: 0 !important;
+  flex: 1 1 auto !important;
+  overflow: hidden !important;
+  align-items: center !important;
+  flex-wrap: nowrap !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-meta span {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-actions {
+  flex: 0 0 auto !important;
+  align-self: flex-end !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-actions > * {
+  flex: 0 0 auto !important;
+}
+
+/* v2 final Installed card layout: dominant thumbnail, compact body, pinned footer. */
+.installed-clean-page .installed-library-grid > .installed-mod-card-v2.installed-library-card,
+.installed-mod-card-v2.installed-library-card {
+  height: 420px !important;
+  min-height: 420px !important;
+  max-height: 420px !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-hero {
+  flex-basis: 220px !important;
+  height: 220px !important;
+  min-height: 220px !important;
+  max-height: 220px !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-hero .lazy-thumbnail-shell,
+.installed-mod-card-v2 .installed-mod-card-hero .lazy-thumbnail-shell > *,
+.installed-mod-card-v2 .installed-mod-card-hero img,
+.installed-mod-card-v2 .installed-mod-card-fallback,
+.installed-mod-card-v2 .installed-cover-fallback {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-hero img {
+  object-fit: cover !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-body {
+  gap: 7px !important;
+  padding: 11px 12px 12px !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-body h3 {
+  min-height: 2.48em !important;
+  max-height: 2.48em !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-tags {
+  min-height: 25px !important;
+  max-height: 25px !important;
+  flex-wrap: nowrap !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-tags span {
+  flex: 0 1 auto !important;
+  min-width: 0 !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-footer {
+  min-height: 34px !important;
+}
+
+.installed-mod-card-v2 .installed-mod-card-actions {
+  margin-left: auto !important;
+}
+
+/* v2 Installed card adapter: use the same shared ModCard gallery shell as Home/Browse. */
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 18px !important;
+  align-items: stretch !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  display: flex !important;
+  flex-direction: column !important;
+  min-width: 0 !important;
+  min-height: 414px !important;
+  height: 414px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  flex: 0 0 auto !important;
+  aspect-ratio: 16 / 8.8 !important;
+  min-height: 0 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  flex-direction: column !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 24px !important;
+  max-height: 30px !important;
+  overflow: hidden !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  margin-top: auto !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: end !important;
+  gap: 10px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  align-self: end !important;
+  justify-self: end !important;
+  gap: 8px !important;
+  min-width: max-content !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions > .toggle-pill,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions > .ghost-button.compact,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions > .card-more-menu-trigger {
+  flex: 0 0 auto !important;
+}
+
+@media (max-width: 1180px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 620px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* v2.0 clipping fix: Installed cards share ModCard layout but must reserve footer space. */
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  height: auto !important;
+  min-height: 446px !important;
+  overflow: visible !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  overflow: hidden !important;
+  border-radius: 8px 8px 0 0 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 206px !important;
+  overflow: visible !important;
+  padding: 12px 12px 16px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body h3 {
+  display: -webkit-box !important;
+  min-height: 0 !important;
+  max-height: 2.6em !important;
+  overflow: hidden !important;
+  -webkit-box-orient: vertical !important;
+  -webkit-line-clamp: 2 !important;
+  line-clamp: 2 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-author {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 25px !important;
+  max-height: 28px !important;
+  overflow: hidden !important;
+  flex-wrap: nowrap !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags span {
+  min-width: 0 !important;
+  flex: 0 1 auto !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  min-height: 42px !important;
+  margin-top: auto !important;
+  padding-top: 8px !important;
+  overflow: visible !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  overflow: visible !important;
+  padding-bottom: 1px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .toggle-pill,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .card-more-menu-trigger {
+  min-height: 32px !important;
+  max-height: none !important;
+}
+/* v2.0 Installed cleanup: remove debug chrome and keep cards compact with a pinned footer. */
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 392px !important;
+  min-height: 392px !important;
+  overflow: visible !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  flex: 0 0 170px !important;
+  height: 170px !important;
+  min-height: 170px !important;
+  overflow: hidden !important;
+  border-radius: 8px 8px 0 0 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  gap: 5px !important;
+  padding: 9px 10px 10px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body h3 {
+  display: -webkit-box !important;
+  min-height: 0 !important;
+  max-height: 2.35em !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  line-height: 1.18 !important;
+  -webkit-box-orient: vertical !important;
+  -webkit-line-clamp: 2 !important;
+  line-clamp: 2 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-author {
+  margin: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 23px !important;
+  max-height: 24px !important;
+  overflow: hidden !important;
+  flex-wrap: nowrap !important;
+  gap: 5px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags span {
+  min-width: 0 !important;
+  flex: 0 1 auto !important;
+  padding: 3px 7px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  min-height: 34px !important;
+  margin-top: auto !important;
+  padding-top: 5px !important;
+  overflow: visible !important;
+  align-items: flex-end !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-stats {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  flex: 0 0 auto !important;
+  margin-left: auto !important;
+  overflow: visible !important;
+  padding-bottom: 0 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .toggle-pill,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .card-more-menu-trigger {
+  min-height: 28px !important;
+  height: 28px !important;
+  max-height: 28px !important;
+}
+/* v2.0 Installed compression + bulk action bar: thumbnail-dominant cards, shorter body, visible footer. */
+.installed-clean-page .mass-select-bar {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  width: 100% !important;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+}
+
+.installed-clean-page .mass-select-bar > div:first-child {
+  display: flex !important;
+  align-items: baseline !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+}
+
+.installed-clean-page .mass-select-bar strong {
+  font-size: 0.82rem !important;
+  letter-spacing: 0 !important;
+}
+
+.installed-clean-page .mass-select-bar span {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  color: var(--muted) !important;
+  font-size: 0.76rem !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.installed-clean-page .mass-select-actions {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
+}
+
+.installed-clean-page .mass-select-actions .ghost-button.compact {
+  min-height: 28px !important;
+  padding: 6px 9px !important;
+  font-size: 0.74rem !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  height: 348px !important;
+  min-height: 348px !important;
+  max-height: 348px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  flex: 0 0 164px !important;
+  height: 164px !important;
+  min-height: 164px !important;
+  max-height: 164px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  gap: 4px !important;
+  padding: 8px 9px 9px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body h3 {
+  max-height: 1.22em !important;
+  line-height: 1.18 !important;
+  -webkit-line-clamp: 1 !important;
+  line-clamp: 1 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-author {
+  line-height: 1.15 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 21px !important;
+  max-height: 21px !important;
+  gap: 4px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags span {
+  padding: 2px 6px !important;
+  font-size: 0.68rem !important;
+  line-height: 1.15 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  min-height: 29px !important;
+  margin-top: auto !important;
+  padding-top: 4px !important;
+  align-items: end !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-stats {
+  min-width: 0 !important;
+  max-width: none !important;
+  gap: 5px !important;
+  overflow: hidden !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-stats span {
+  font-size: 0.68rem !important;
+  white-space: nowrap !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 5px !important;
+  min-width: max-content !important;
+  margin-left: auto !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .toggle-pill,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .ghost-button.compact,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .card-more-menu-trigger {
+  min-height: 26px !important;
+  height: 26px !important;
+  max-height: 26px !important;
+  padding: 5px 8px !important;
+  font-size: 0.72rem !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .card-more-menu-trigger {
+  width: 30px !important;
+  min-width: 30px !important;
+  padding-inline: 0 !important;
+}
+
+@media (max-width: 820px) {
+  .installed-clean-page .mass-select-bar {
+    align-items: stretch !important;
+    flex-direction: column !important;
+  }
+
+  .installed-clean-page .mass-select-actions {
+    justify-content: flex-start !important;
+  }
+}
+
+.manual-edit-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 96;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 8, 14, 0.76);
+  backdrop-filter: blur(12px);
+}
+
+.manual-edit-panel {
+  width: min(880px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--tag-border, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  padding: 20px;
+  background: color-mix(in srgb, var(--panel) 92%, #101827 8%);
+  box-shadow: 0 30px 96px rgba(0, 0, 0, 0.48);
+}
+
+/* v2.0 Profile workflow card proportions: Installed cards are thumbnail-first again. */
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 16px !important;
+  align-items: stretch !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  height: 416px !important;
+  min-height: 416px !important;
+  max-height: 416px !important;
+  overflow: visible !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  flex: 0 0 276px !important;
+  height: 276px !important;
+  min-height: 276px !important;
+  max-height: 276px !important;
+  border-radius: 8px 8px 0 0 !important;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--panel-2) 82%, transparent), color-mix(in srgb, var(--panel) 92%, transparent)) !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero img,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .lazy-thumbnail-shell,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .lazy-thumbnail-shell img,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .installed-cover-fallback {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  gap: 5px !important;
+  padding: 10px 11px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body h3 {
+  max-height: 2.36em !important;
+  line-height: 1.18 !important;
+  -webkit-line-clamp: 2 !important;
+  line-clamp: 2 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 22px !important;
+  max-height: 22px !important;
+  overflow: hidden !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  min-height: 31px !important;
+  padding-top: 4px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  gap: 6px !important;
+}
+
+@media (max-width: 1320px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 920px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 620px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .installed-clean-page .tsuki-mod-card.installed-card-shell {
+    height: 394px !important;
+    min-height: 394px !important;
+    max-height: 394px !important;
+  }
+
+  .installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+    flex-basis: 252px !important;
+    height: 252px !important;
+    min-height: 252px !important;
+    max-height: 252px !important;
+  }
+}
+
+.manual-edit-header,
+.manual-edit-actions,
+.manual-match-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.manual-edit-header h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.manual-edit-header p,
+.manual-edit-status,
+.manual-match-box p,
+.manual-edit-grid label {
+  color: var(--muted);
+}
+
+.manual-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.manual-edit-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.manual-edit-wide,
+.manual-match-box {
+  grid-column: 1 / -1;
+}
+
+.manual-match-box {
+  margin-top: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.manual-match-row input {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.manual-edit-status {
+  margin: 14px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.manual-edit-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+@media (max-width: 760px) {
+  .manual-edit-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.edit-mod-panel {
+  width: min(980px, calc(100vw - 32px));
+  padding: 18px;
+}
+
+.edit-mod-header {
+  align-items: flex-start;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.edit-mod-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.edit-mod-fields,
+.edit-mod-thumbnail-editor,
+.edit-mod-section,
+.edit-mod-advanced {
+  display: grid;
+  gap: 10px;
+}
+
+.edit-mod-fields label,
+.edit-mod-advanced label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.edit-mod-section,
+.edit-mod-thumbnail-editor,
+.edit-mod-advanced {
+  margin-top: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.edit-mod-thumbnail-editor {
+  margin-top: 0;
+}
+
+.edit-mod-thumbnail-preview {
+  display: grid;
+  place-items: center;
+  min-height: 158px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--muted);
+}
+
+.edit-mod-thumbnail-preview img,
+.edit-mod-match-preview img,
+.edit-mod-search-result img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.edit-mod-hidden-image-test,
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.edit-mod-url-row,
+.edit-mod-tag-search,
+.edit-mod-inline-actions,
+.edit-mod-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-mod-url-row input,
+.edit-mod-tag-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.edit-mod-match-preview {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(46, 204, 113, 0.08);
+  border: 1px solid rgba(46, 204, 113, 0.28);
+}
+
+.edit-mod-match-preview img,
+.edit-mod-thumb-empty {
+  min-height: 116px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.edit-mod-match-preview h3 {
+  margin: 0 0 8px;
+}
+
+.edit-mod-match-preview dl,
+.edit-mod-advanced dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.edit-mod-match-preview dl div,
+.edit-mod-advanced dl div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.edit-mod-match-preview dt,
+.edit-mod-advanced dt {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+}
+
+.edit-mod-match-preview dd,
+.edit-mod-advanced dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.edit-mod-search-results {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.edit-mod-search-result {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  gap: 2px 10px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.edit-mod-search-result:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.edit-mod-search-result img,
+.edit-mod-search-result > span:first-child {
+  grid-row: 1 / span 3;
+  min-height: 54px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.edit-mod-search-result strong,
+.edit-mod-search-result small,
+.edit-mod-search-result span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-mod-search-result small,
+.edit-mod-search-result span:last-child,
+.muted-text {
+  color: var(--muted);
+}
+
+.edit-mod-tag-results,
+.edit-mod-selected-tags,
+.tag-picker-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.tag-chip {
+  border: 1px solid var(--tag-border, rgba(255, 255, 255, 0.14));
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--tag-fg, #f8fafc);
+  font-size: 0.76rem;
+  font-weight: 820;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tag-chip.selected {
+  outline: 2px solid var(--tag-selected-border, rgba(255, 255, 255, 0.58));
+  outline-offset: 2px;
+}
+
+.edit-mod-advanced summary {
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.edit-mod-advanced textarea.setting-input {
+  min-height: 86px;
+  resize: vertical;
+}
+
+.edit-mod-actions {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+}
+
+.edit-mod-action-spacer {
+  min-width: 0;
+}
+
+.error-text {
+  color: #ff9d9d;
+  margin: 0;
+}
+
+.success-text {
+  color: #7ee2a8;
+  margin: 0;
+}
+
+.tag-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 8, 14, 0.76);
+  backdrop-filter: blur(12px);
+}
+
+.tag-picker-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  width: min(920px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  border: 1px solid var(--tag-border, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 94%, #101827 6%);
+  box-shadow: 0 30px 96px rgba(0, 0, 0, 0.48);
+  overflow: hidden;
+}
+
+.tag-picker-header,
+.tag-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.tag-picker-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 0;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.tag-picker-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr);
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.compact-segmented {
+  justify-content: flex-start;
+  overflow-x: auto;
+}
+
+.tag-picker-scroll {
+  overflow: auto;
+  padding: 0 16px 16px;
+}
+
+.tag-picker-group {
+  margin-top: 14px;
+}
+
+.tag-picker-group h3 {
+  margin: 0 0 8px;
+  font-size: 0.86rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+@media (max-width: 780px) {
+  .edit-mod-main-grid,
+  .edit-mod-match-preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .edit-mod-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .edit-mod-inline-actions,
+  .edit-mod-url-row,
+  .edit-mod-tag-search,
+  .manual-match-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+/* v2.0 final Installed card proportions: keep thumbnails at roughly two-thirds of each card. */
+.installed-clean-page .installed-library-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 16px !important;
+  align-items: stretch !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell {
+  height: 416px !important;
+  min-height: 416px !important;
+  max-height: 416px !important;
+  overflow: visible !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+  flex: 0 0 276px !important;
+  height: 276px !important;
+  min-height: 276px !important;
+  max-height: 276px !important;
+  border-radius: 8px 8px 0 0 !important;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--panel-2) 82%, transparent), color-mix(in srgb, var(--panel) 92%, transparent)) !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero img,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .lazy-thumbnail-shell,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .lazy-thumbnail-shell img,
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero .installed-cover-fallback {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body {
+  gap: 5px !important;
+  padding: 10px 11px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-body h3 {
+  max-height: 2.36em !important;
+  line-height: 1.18 !important;
+  -webkit-line-clamp: 2 !important;
+  line-clamp: 2 !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-tags {
+  min-height: 22px !important;
+  max-height: 22px !important;
+  overflow: hidden !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-footer {
+  min-height: 31px !important;
+  padding-top: 4px !important;
+}
+
+.installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions {
+  gap: 6px !important;
+}
+
+@media (max-width: 1320px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 920px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 620px) {
+  .installed-clean-page .installed-library-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .installed-clean-page .tsuki-mod-card.installed-card-shell {
+    height: 394px !important;
+    min-height: 394px !important;
+    max-height: 394px !important;
+  }
+
+  .installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-hero {
+    flex-basis: 252px !important;
+    height: 252px !important;
+    min-height: 252px !important;
+    max-height: 252px !important;
+  }
+}
+.installed-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px 0;
+}
+
+.installed-load-more button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.installed-load-more span {
+  color: var(--text-muted, #a9a9bb);
+  font-size: 12px;
 }

@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin:0;background:#101215;color:#eee;font-family:Arial"><div id="root"></div><script type="module">
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {ManagedLoaderStatus} from '/src/components/ManagedLoaderStatus.tsx';
+import '/src/App.css';
+const mode=new URLSearchParams(location.search).get('mode')||'disclosure';
+window.loaderCalls=[];
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+  window.loaderCalls.push({command,args});
+  await new Promise(resolve=>setTimeout(resolve,20));
+  if(command==='managed_loader_action'){
+    if(mode==='failure')throw new Error('Download unavailable; retry when online.');
+    return {state:args.action==='uninstall'?'disclosure':'ready',authorized:args.action!=='uninstall',message:'Native PAK backend verified. Runtime compatibility remains unverified.',version:'1.2.3'};
+  }
+  return {state:mode==='failure'?'missing':mode,authorized:['ready','missing','failure'].includes(mode),message:mode==='disclosure'?'Native PAK support downloads an independently released compiled backend from GitHub. It modifies the game archive before launch and keeps recovery records. Online use and future game compatibility are not guaranteed.':mode==='unconfigured'?'Awaiting a dedicated release repository and pinned signing key.':'Native PAK backend requires verification.',version:mode==='ready'?'1.2.3':null};
+}};
+const root=createRoot(document.getElementById('root'));
+window.switchLoaderProfile=(profileId)=>root.render(React.createElement(ManagedLoaderStatus,{profileId}));
+switchLoaderProfile('builtin.outlast-trials');
+</script></body></html>

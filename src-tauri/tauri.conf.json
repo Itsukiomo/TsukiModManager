@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tsuki Mod Manager",
-  "version": "1.8.3",
+  "version": "2.0.0",
   "identifier": "com.jeffe.tsukimodmanagerapp",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,25 +13,35 @@
     "windows": [
       {
         "title": "Tsuki Mod Manager",
-        "width": 800,
-        "height": 600,
+        "width": 1500,
+        "height": 900,
         "decorations": false,
+        "visible": false,
+        "center": true,
+        "minWidth": 1100,
+        "minHeight": 700,
         "resizable": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/Tsuki Mod Manager/profile-data/**"
+        ]
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/lunar-v2/32x32.png",
+      "icons/lunar-v2/128x128.png",
+      "icons/lunar-v2/128x128@2x.png",
+      "icons/lunar-v2/icon.icns",
+      "icons/lunar-v2/icon.ico"
     ]
   }
 }

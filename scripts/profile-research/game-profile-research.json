@@ -1,0 +1,4027 @@
+{
+  "schemaVersion": 1,
+  "lastUpdated": "2026-09-04",
+  "completion": {
+    "verified": 16,
+    "total": 16
+  },
+  "games": [
+    {
+      "profileId": "builtin.cyberpunk2077",
+      "displayName": "Cyberpunk 2077",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1091500"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Cyberpunk 2077"
+          }
+        ],
+        "executables": [
+          {
+            "path": "bin/x64/Cyberpunk2077.exe",
+            "role": "primary"
+          },
+          {
+            "path": "redprelauncher.exe",
+            "role": "alternate"
+          }
+        ],
+        "processNames": [
+          "Cyberpunk2077",
+          "redprelauncher"
+        ],
+        "minimumMarkers": [
+          "bin/x64/Cyberpunk2077.exe"
+        ]
+      },
+      "engine": {
+        "name": "REDengine 4",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "cyberpunk2077",
+          "numericGameId": "3333",
+          "gameUrl": "https://www.nexusmods.com/cyberpunk2077",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "redscript",
+          "name": "redscript",
+          "installRoot": "engine/tools",
+          "sourceUrl": "https://github.com/jac3km4/redscript",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "redscript"
+      ],
+      "modTypes": [
+        {
+          "id": "archive",
+          "name": "Cyberpunk archive asset",
+          "installRoot": "archive/pc/mod",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Direct routing is limited to unambiguous .archive and .reds files. CET, RED4ext, ArchiveXL, TweakXL and REDmod retain their own compatibility/dependency contracts."
+        },
+        {
+          "id": "redscript",
+          "name": "redscript source",
+          "installRoot": "r6/scripts",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Direct routing is limited to unambiguous .archive and .reds files. CET, RED4ext, ArchiveXL, TweakXL and REDmod retain their own compatibility/dependency contracts."
+        },
+        {
+          "id": "manager",
+          "name": "Framework and REDmod package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Direct routing is limited to unambiguous .archive and .reds files. CET, RED4ext, ArchiveXL, TweakXL and REDmod retain their own compatibility/dependency contracts."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "archive/pc/mod",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "r6/scripts",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "bin/x64/Cyberpunk2077.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Direct routing is limited to unambiguous .archive and .reds files. CET, RED4ext, ArchiveXL, TweakXL and REDmod retain their own compatibility/dependency contracts."
+      },
+      "evidence": [
+        {
+          "id": "builtin-cyberpunk2077-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1091500/config/",
+          "description": "Research packet evidence for Cyberpunk 2077."
+        },
+        {
+          "id": "builtin-cyberpunk2077-2",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/maximegmd/CyberEngineTweaks",
+          "description": "Research packet evidence for Cyberpunk 2077."
+        },
+        {
+          "id": "builtin-cyberpunk2077-3",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/WopsS/RED4ext",
+          "description": "Research packet evidence for Cyberpunk 2077."
+        },
+        {
+          "id": "builtin-cyberpunk2077-4",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/cyberpunk2077",
+          "description": "Research packet evidence for Cyberpunk 2077."
+        }
+      ],
+      "unverified": [
+        "GOG and Epic identifiers are read from installed launcher manifests.",
+        "Current framework release compatibility must be resolved at install time."
+      ]
+    },
+    {
+      "profileId": "builtin.outlast-trials",
+      "displayName": "The Outlast Trials",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1304930"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "The Outlast Trials"
+          }
+        ],
+        "executables": [
+          {
+            "path": "start_protected_game.exe",
+            "role": "primary"
+          },
+          {
+            "path": "OPP/Binaries/Win64/TOTClient.exe",
+            "role": "alternate"
+          }
+        ],
+        "processNames": [
+          "start_protected_game",
+          "TOTClient"
+        ],
+        "minimumMarkers": [
+          "start_protected_game.exe"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "theoutlasttrials",
+          "numericGameId": "5376",
+          "gameUrl": "https://www.nexusmods.com/theoutlasttrials",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [],
+      "modTypes": [
+        {
+          "id": "pak",
+          "name": "Standard Unreal PAK",
+          "installRoot": "OPP/Content/Paks",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Never modifies Easy Anti-Cheat. BK2 and audio workflows remain manager handoffs with original-file backups."
+        },
+        {
+          "id": "manager",
+          "name": "Iris, Janus, Odessa and movie/audio handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Never modifies Easy Anti-Cheat. BK2 and audio workflows remain manager handoffs with original-file backups."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "OPP/Content/Paks",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "start_protected_game.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Never modifies Easy Anti-Cheat. BK2 and audio workflows remain manager handoffs with original-file backups."
+      },
+      "evidence": [
+        {
+          "id": "builtin-outlast-trials-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1304930/config/",
+          "description": "Research packet evidence for The Outlast Trials."
+        },
+        {
+          "id": "builtin-outlast-trials-2",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/theoutlasttrials/mods/219",
+          "description": "Research packet evidence for The Outlast Trials."
+        },
+        {
+          "id": "builtin-outlast-trials-3",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/theoutlasttrials",
+          "description": "Research packet evidence for The Outlast Trials."
+        }
+      ],
+      "unverified": [
+        "Exact engine minor version and non-Steam storefront identifiers."
+      ]
+    },
+    {
+      "profileId": "builtin.payday-the-heist",
+      "displayName": "PAYDAY: The Heist",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "24240"
+        ],
+        "epicCatalogIdentifiers": [],
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "PAYDAY The Heist",
+            "sourceRefs": [
+              "modrex-pdth-package"
+            ]
+          }
+        ],
+        "executables": [
+          {
+            "path": "payday_win32_release.exe",
+            "role": "primary",
+            "sourceRefs": [
+              "modrex-pdth-package"
+            ]
+          }
+        ],
+        "processNames": [
+          "payday_win32_release"
+        ],
+        "minimumMarkers": [
+          "payday_win32_release.exe"
+        ],
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "engine": {
+        "name": "Diesel",
+        "version": "PAYDAY: The Heist branch",
+        "confidence": "established-implementation",
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "modworkshop",
+          "domain": "modworkshop.net",
+          "slug": "pdth",
+          "numericGameId": "2",
+          "gameUrl": "https://modworkshop.net/g/pdth/mods",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "sourceRefs": [
+            "modworkshop-pdth",
+            "modrex-pdth-package"
+          ]
+        },
+        {
+          "provider": "nexus",
+          "domain": "paydaytheheist",
+          "numericGameId": "4339",
+          "gameUrl": "https://www.nexusmods.com/games/paydaytheheist",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "sourceRefs": [
+            "nexus-pdth",
+            "modrex-pdth-package"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "pdth-mod-overrides",
+          "displayName": "PDTHModOverrides",
+          "type": "injector",
+          "requiredFor": [
+            "pdth-override-folder"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "DINPUT8.dll",
+            "PDTHModOverrides.dll"
+          ],
+          "detection": {
+            "allFiles": [
+              "DINPUT8.dll",
+              "PDTHModOverrides.dll"
+            ],
+            "rejectLegacyFiles": [
+              "VERSION.dll"
+            ]
+          },
+          "officialHomepage": "https://github.com/HW12Dev/PDTHModOverrides",
+          "officialDownloadUrl": "https://github.com/HW12Dev/PDTHModOverrides/releases/latest",
+          "modWorkshopUrl": "https://modworkshop.net/mod/53474",
+          "automaticInstall": "eligible-after-package-contract-test",
+          "sourceRefs": [
+            "pdth-overrides-readme",
+            "pdth-overrides-release",
+            "modworkshop-pdth-overrides"
+          ]
+        },
+        {
+          "dependencyId": "dahm",
+          "displayName": "DAHM / DorHUD",
+          "type": "framework",
+          "requiredFor": [
+            "dahm-submod"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "lightfx.dll"
+          ],
+          "detection": {
+            "allFiles": [
+              "lightfx.dll"
+            ]
+          },
+          "officialHomepage": "https://dahm.neonsynth.de/main.php",
+          "modWorkshopUrl": "https://modworkshop.net/mod/14267",
+          "automaticInstall": "blocked-until-archive-layout-test",
+          "sourceRefs": [
+            "modworkshop-dahm",
+            "modrex-pdth-loader"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        "dahm"
+      ],
+      "knownModManagers": [
+        "Modrex"
+      ],
+      "knownDependencyFrameworks": [
+        "pdth-mod-overrides",
+        "dahm"
+      ],
+      "modTypes": [
+        {
+          "id": "pdth-dahm-or-blt-folder",
+          "displayName": "Loader mod folder",
+          "archiveMarkers": [
+            "mod.txt"
+          ],
+          "indexGatedMarkers": [
+            "base.lua"
+          ],
+          "installRoot": "mods",
+          "unit": "directory",
+          "requiresAny": [
+            "dahm"
+          ],
+          "sourceRefs": [
+            "modrex-pdth-package"
+          ]
+        },
+        {
+          "id": "pdth-override-folder",
+          "displayName": "Asset override folder",
+          "archiveMarkers": [],
+          "classification": "all-directories-under-explicit-mod-overrides-root",
+          "installRoot": "assets/mod_overrides",
+          "unit": "directory",
+          "requiresAll": [
+            "pdth-mod-overrides"
+          ],
+          "sourceRefs": [
+            "pdth-overrides-readme",
+            "modrex-pdth-package"
+          ]
+        },
+        {
+          "id": "pdth-pdmod-legacy",
+          "displayName": "Legacy .pdmod package",
+          "extensions": [
+            ".pdmod"
+          ],
+          "installRoot": null,
+          "unit": "archive",
+          "support": "manual-only",
+          "notes": "Conversion requires a tested decoder and complete path hash list. Tsuki must not claim automatic support yet.",
+          "sourceRefs": [
+            "pdth-overrides-readme",
+            "modrex-pdth-package"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "mods",
+          "purpose": "DAHM or compatible loader mods",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "modrex-pdth-package"
+          ]
+        },
+        {
+          "path": "assets/mod_overrides",
+          "purpose": "Replacement assets enabled by PDTHModOverrides",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "pdth-overrides-readme",
+            "modrex-pdth-package"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "Loader DLLs only; ordinary mods must never be flattened here",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "pdth-overrides-readme",
+            "modworkshop-dahm"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "move-directory",
+        "disabledContainer": "disabled",
+        "scope": "whole mod unit",
+        "neverRenameIndividualPayloadFiles": true,
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "loader-managed",
+        "notes": "No production-safe numeric prefix contract was found for either target.",
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeByMarkers": true,
+        "rejectMixedAmbiguousRoots": true,
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "updateUninstall": {
+        "ownership": "receipt-per-installed-directory",
+        "uninstall": "remove only receipt-owned files after hash and ownership checks",
+        "dependencyRemoval": "never automatic while dependents remain",
+        "sourceRefs": [
+          "modrex-pdth-package"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "game executable exists",
+          "archive maps to exactly one supported mod type",
+          "required loader files are detected"
+        ],
+        "blockedOperations": [
+          "automatic .pdmod conversion",
+          "automatic DAHM install"
+        ],
+        "sourceRefs": [
+          "pdth-overrides-readme",
+          "modrex-pdth-package"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "modworkshop-pdth",
+          "type": "source-site",
+          "url": "https://modworkshop.net/g/pdth/mods",
+          "description": "Current PAYDAY: The Heist ModWorkshop game listing and format tags."
+        },
+        {
+          "id": "nexus-pdth",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/games/paydaytheheist",
+          "description": "Current Nexus Mods game domain."
+        },
+        {
+          "id": "pdth-overrides-readme",
+          "type": "official-project",
+          "url": "https://github.com/HW12Dev/PDTHModOverrides",
+          "description": "Official install, detection, mod_overrides, and legacy loader guidance."
+        },
+        {
+          "id": "pdth-overrides-release",
+          "type": "official-release",
+          "url": "https://github.com/HW12Dev/PDTHModOverrides/releases/latest",
+          "description": "Official current release channel."
+        },
+        {
+          "id": "modworkshop-pdth-overrides",
+          "type": "source-site",
+          "url": "https://modworkshop.net/mod/53474",
+          "description": "ModWorkshop identity for PDTHModOverrides."
+        },
+        {
+          "id": "modworkshop-dahm",
+          "type": "project-page",
+          "url": "https://modworkshop.net/mod/14267",
+          "description": "Current DAHM package and official project redirect."
+        },
+        {
+          "id": "modrex-pdth-package",
+          "type": "established-open-source-implementation",
+          "url": "https://github.com/modrexio/modrex/blob/master/apps/desktop/src-tauri/src/games/pdth/package.toml",
+          "description": "Corroborates executable, source IDs, target roots, archive markers, and whole-directory units."
+        },
+        {
+          "id": "modrex-pdth-loader",
+          "type": "established-open-source-implementation",
+          "url": "https://github.com/modrexio/modrex/blob/master/apps/desktop/src-tauri/src/commands/loaders.rs",
+          "description": "Corroborates loader package detection and deployment behavior."
+        }
+      ],
+      "unverified": [
+        "A production-grade .pdmod decoder and path hash list",
+        "DAHM package auto-update and safe uninstall contract"
+      ]
+    },
+    {
+      "profileId": "builtin.payday2",
+      "displayName": "PAYDAY 2",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "218620"
+        ],
+        "epicCatalogIdentifiers": [],
+        "notes": "An Epic install is recognized by established tooling, but no stable public catalog identifier was verified in this pass.",
+        "sourceRefs": [
+          "modrex-pd2-package"
+        ]
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "PAYDAY 2",
+            "sourceRefs": [
+              "modrex-pd2-package",
+              "local-pd2-observation"
+            ]
+          },
+          {
+            "store": "epic",
+            "folderName": "PAYDAY 2",
+            "sourceRefs": [
+              "modrex-pd2-package"
+            ]
+          }
+        ],
+        "executables": [
+          {
+            "path": "PAYDAY2.exe",
+            "role": "current-x64-primary",
+            "sourceRefs": [
+              "superblt-install",
+              "modrex-pd2-package",
+              "local-pd2-observation"
+            ]
+          },
+          {
+            "path": "payday2_win32_release.exe",
+            "role": "legacy-x86-only",
+            "sourceRefs": [
+              "superblt-install",
+              "modrex-pd2-package"
+            ]
+          }
+        ],
+        "processNames": [
+          "PAYDAY2",
+          "payday2_win32_release"
+        ],
+        "minimumMarkers": [
+          "PAYDAY2.exe"
+        ],
+        "sourceRefs": [
+          "superblt-install",
+          "modrex-pd2-package",
+          "local-pd2-observation"
+        ]
+      },
+      "engine": {
+        "name": "Diesel",
+        "version": "Diesel 3.0 / current x64 build",
+        "confidence": "official-framework-and-local-observation",
+        "sourceRefs": [
+          "beardlib-readme",
+          "local-pd2-observation"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "modworkshop",
+          "domain": "modworkshop.net",
+          "slug": "payday-2",
+          "numericGameId": "1",
+          "gameUrl": "https://modworkshop.net/g/payday-2/mods",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "sourceRefs": [
+            "modworkshop-pd2",
+            "modrex-pd2-package"
+          ]
+        },
+        {
+          "provider": "nexus",
+          "domain": "payday2",
+          "numericGameId": "648",
+          "gameUrl": "https://www.nexusmods.com/games/payday2",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "notes": "The domain is the routing authority. The numeric ID is retained for APIs that expose or validate it.",
+          "sourceRefs": [
+            "nexus-pd2",
+            "modrex-pd2-package"
+          ]
+        }
+      ],
+      "otherMajorSources": [
+        {
+          "displayName": "SuperBLT",
+          "url": "https://superblt.znix.xyz/",
+          "purpose": "Official loader documentation and download flow",
+          "sourceRefs": [
+            "superblt-install"
+          ]
+        }
+      ],
+      "knownLoaders": [
+        {
+          "dependencyId": "superblt",
+          "displayName": "SuperBLT",
+          "type": "loader",
+          "requiredFor": [
+            "pd2-superblt-folder",
+            "beardlib"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "WSOCK32.dll",
+            "mods/base/mod.txt"
+          ],
+          "detection": {
+            "currentX64": [
+              "WSOCK32.dll",
+              "mods/base/mod.txt"
+            ],
+            "legacyX86": [
+              "IPHLPAPI.dll",
+              "mods/base/mod.txt"
+            ]
+          },
+          "officialHomepage": "https://superblt.znix.xyz/",
+          "officialDownloadUrl": "https://superblt.znix.xyz/",
+          "automaticInstall": "blocked-until-official-download-contract-test",
+          "architectureSpecific": true,
+          "modifiesGameRoot": true,
+          "restartRequired": true,
+          "sourceRefs": [
+            "superblt-install",
+            "local-pd2-observation"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        {
+          "dependencyId": "beardlib",
+          "displayName": "BeardLib",
+          "type": "framework",
+          "dependsOn": [
+            "superblt"
+          ],
+          "requiredFor": [
+            "pd2-beardlib-folder"
+          ],
+          "installRoot": "mods",
+          "expectedFolders": [
+            "mods/BeardLib"
+          ],
+          "detection": {
+            "allFiles": [
+              "mods/BeardLib/mod.txt"
+            ]
+          },
+          "officialHomepage": "https://github.com/diesel-modding/PAYDAY-2-BeardLib",
+          "officialDownloadUrl": "https://modworkshop.net/mod/14924",
+          "modWorkshopUrl": "https://modworkshop.net/mod/14924",
+          "automaticInstall": "eligible-after-package-contract-test",
+          "modifiesGameRoot": false,
+          "restartRequired": true,
+          "sourceRefs": [
+            "beardlib-readme",
+            "modworkshop-beardlib"
+          ]
+        }
+      ],
+      "knownModManagers": [
+        "Modrex"
+      ],
+      "knownDependencyFrameworks": [
+        "superblt",
+        "beardlib"
+      ],
+      "modTypes": [
+        {
+          "id": "pd2-superblt-folder",
+          "displayName": "SuperBLT Lua mod",
+          "archiveMarkers": [
+            "mod.txt"
+          ],
+          "installRoot": "mods",
+          "unit": "directory",
+          "requiresAll": [
+            "superblt"
+          ],
+          "sourceRefs": [
+            "superblt-install",
+            "modrex-pd2-package",
+            "local-pd2-observation"
+          ]
+        },
+        {
+          "id": "pd2-beardlib-folder",
+          "displayName": "BeardLib content package",
+          "archiveMarkers": [
+            "main.xml"
+          ],
+          "installRoot": "mods",
+          "unit": "directory",
+          "requiresAll": [
+            "superblt",
+            "beardlib"
+          ],
+          "sourceRefs": [
+            "beardlib-readme",
+            "modrex-pd2-package"
+          ]
+        },
+        {
+          "id": "pd2-override-folder",
+          "displayName": "Asset override folder",
+          "archiveMarkers": [],
+          "classification": "all-directories-under-explicit-mod-overrides-root",
+          "installRoot": "assets/mod_overrides",
+          "unit": "directory",
+          "requiresAll": [],
+          "sourceRefs": [
+            "modworkshop-pd2-overrides",
+            "modrex-pd2-package"
+          ]
+        },
+        {
+          "id": "pd2-root-loader-package",
+          "displayName": "SuperBLT loader package",
+          "extensions": [
+            ".dll"
+          ],
+          "allowedFiles": [
+            "WSOCK32.dll",
+            "IPHLPAPI.dll"
+          ],
+          "installRoot": ".",
+          "unit": "explicit-file-manifest",
+          "support": "dependency-installer-only",
+          "sourceRefs": [
+            "superblt-install"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "mods",
+          "purpose": "SuperBLT and BeardLib mod directories",
+          "createIfMissing": false,
+          "excludedDirectories": [
+            "base",
+            "downloads",
+            "logs",
+            "saves"
+          ],
+          "sourceRefs": [
+            "superblt-install",
+            "modrex-pd2-package",
+            "local-pd2-observation"
+          ]
+        },
+        {
+          "path": "assets/mod_overrides",
+          "purpose": "Replacement asset directories",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "modworkshop-pd2-overrides",
+            "modrex-pd2-package"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "Explicitly allowlisted loader DLLs only",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "superblt-install"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "move-directory",
+        "disabledContainer": "disabled",
+        "scope": "whole mod unit",
+        "neverRenameIndividualPayloadFiles": true,
+        "sourceRefs": [
+          "modrex-pd2-package"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "loader-managed",
+        "notes": "No supported numeric prefix contract was found for either target.",
+        "sourceRefs": [
+          "modrex-pd2-package"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeByMarkers": true,
+        "rejectMixedAmbiguousRoots": true,
+        "rejectUnmarkedContentPackAsOverride": true,
+        "sourceRefs": [
+          "modrex-pd2-package"
+        ]
+      },
+      "updateUninstall": {
+        "ownership": "receipt-per-installed-directory",
+        "uninstall": "remove only receipt-owned files after hash and ownership checks",
+        "dependencyRemoval": "never automatic while dependents remain",
+        "sourceRefs": [
+          "modrex-pd2-package"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "current or legacy executable exists",
+          "archive maps to exactly one supported mod type",
+          "required dependency is detected",
+          "root payload contains only allowlisted loader files"
+        ],
+        "blockedOperations": [
+          "automatic SuperBLT install",
+          "automatic BeardLib install"
+        ],
+        "sourceRefs": [
+          "superblt-install",
+          "beardlib-readme",
+          "modrex-pd2-package"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "superblt-install",
+          "type": "official-project",
+          "url": "https://superblt.znix.xyz/",
+          "description": "Current x64 and legacy x86 loader names, game-root placement, and base mod bootstrap."
+        },
+        {
+          "id": "beardlib-readme",
+          "type": "official-project",
+          "url": "https://github.com/diesel-modding/PAYDAY-2-BeardLib",
+          "description": "Current official BeardLib repository, SuperBLT dependency, and 64-bit compatibility."
+        },
+        {
+          "id": "modworkshop-beardlib",
+          "type": "official-download",
+          "url": "https://modworkshop.net/mod/14924",
+          "description": "Stable BeardLib release channel."
+        },
+        {
+          "id": "modworkshop-pd2-overrides",
+          "type": "community-documentation",
+          "url": "https://wiki.modworkshop.net/books/installing-payday-2-mods/page/installing-mod-override-mods",
+          "description": "Documents the assets/mod_overrides install root."
+        },
+        {
+          "id": "modworkshop-pd2",
+          "type": "source-site",
+          "url": "https://modworkshop.net/g/payday-2/mods",
+          "description": "Current PAYDAY 2 ModWorkshop slug and mod format tags."
+        },
+        {
+          "id": "nexus-pd2",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/games/payday2",
+          "description": "Current Nexus Mods game domain."
+        },
+        {
+          "id": "modrex-pd2-package",
+          "type": "established-open-source-implementation",
+          "url": "https://github.com/modrexio/modrex/blob/master/apps/desktop/src-tauri/src/games/pd2/package.toml",
+          "description": "Corroborates source IDs, executable variants, target roots, markers, units, and infrastructure exclusions."
+        },
+        {
+          "id": "local-pd2-observation",
+          "type": "local-read-only-observation",
+          "locator": "Steam app 218620 installation inspected on 2026-09-04",
+          "description": "Observed PAYDAY2.exe, WSOCK32.dll, mods/base/mod.txt, and a user mod folder; legacy executable and assets/mod_overrides were absent."
+        }
+      ],
+      "unverified": [
+        "Stable public Epic catalog identifier",
+        "Official machine-readable SuperBLT latest-release endpoint suitable for unattended installation",
+        "Package-level install and rollback tests for BeardLib"
+      ]
+    },
+    {
+      "profileId": "builtin.payday3",
+      "displayName": "PAYDAY 3",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1272080"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "PAYDAY3"
+          }
+        ],
+        "executables": [
+          {
+            "path": "PAYDAY3.exe",
+            "role": "primary"
+          },
+          {
+            "path": "PAYDAY3/Binaries/Win64/PAYDAY3-Win64-Shipping.exe",
+            "role": "alternate"
+          }
+        ],
+        "processNames": [
+          "PAYDAY3",
+          "PAYDAY3-Win64-Shipping"
+        ],
+        "minimumMarkers": [
+          "PAYDAY3.exe"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine 5 family",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "modworkshop",
+          "domain": "modworkshop.net",
+          "slug": "payday-3",
+          "numericGameId": "853",
+          "gameUrl": "https://modworkshop.net/g/payday-3/mods",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        },
+        {
+          "provider": "nexus",
+          "domain": "payday3",
+          "numericGameId": "5717",
+          "gameUrl": "https://www.nexusmods.com/payday3",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [],
+      "modTypes": [
+        {
+          "id": "pak",
+          "name": "PAK or complete IoStore companion set",
+          "installRoot": "PAYDAY3/Content/Paks",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "PAK/IoStore companions stay together. No third-party loader is treated as universally required."
+        },
+        {
+          "id": "ue4ss",
+          "name": "Current compatible UE4SS folder",
+          "installRoot": "PAYDAY3/Binaries/Win64",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "PAK/IoStore companions stay together. No third-party loader is treated as universally required."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "PAYDAY3/Content/Paks",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "PAYDAY3/Binaries/Win64",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "PAYDAY3.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "PAK/IoStore companions stay together. No third-party loader is treated as universally required."
+      },
+      "evidence": [
+        {
+          "id": "builtin-payday3-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1272080/config/",
+          "description": "Research packet evidence for PAYDAY 3."
+        },
+        {
+          "id": "builtin-payday3-2",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/payday3",
+          "description": "Research packet evidence for PAYDAY 3."
+        },
+        {
+          "id": "builtin-payday3-3",
+          "type": "official-or-primary-project",
+          "url": "https://modworkshop.net/game/payday-3",
+          "description": "Research packet evidence for PAYDAY 3."
+        }
+      ],
+      "unverified": [
+        "The recommended third-party UE5 loader build remains release-sensitive."
+      ]
+    },
+    {
+      "profileId": "builtin.resident-evil-7",
+      "displayName": "Resident Evil 7 biohazard",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "418370"
+        ],
+        "epicCatalogIdentifiers": [],
+        "alternateStores": [],
+        "sourceRefs": [
+          "steamdb-re7-config"
+        ]
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "RESIDENT EVIL 7 biohazard",
+            "sourceRefs": [
+              "steamdb-re7-config"
+            ]
+          }
+        ],
+        "executables": [
+          {
+            "path": "re7.exe",
+            "role": "primary",
+            "sourceRefs": [
+              "steamdb-re7-config",
+              "steamdb-re7-depot"
+            ]
+          }
+        ],
+        "processNames": [
+          "re7"
+        ],
+        "minimumMarkers": [
+          "re7.exe",
+          "re_chunk_000.pak"
+        ],
+        "variants": [
+          {
+            "id": "current-rt",
+            "label": "Current ray-tracing branch",
+            "reframeworkAsset": "RE7.zip",
+            "selection": "default for the public Steam branch",
+            "sourceRefs": [
+              "reframework-release",
+              "steamdb-re7-config"
+            ]
+          },
+          {
+            "id": "legacy-dx11-non-rt",
+            "label": "Legacy non-ray-tracing branch",
+            "reframeworkAsset": "RE7_TDB49.zip",
+            "selection": "requires Steam branch metadata or explicit user confirmation",
+            "sourceRefs": [
+              "reframework-release",
+              "steamdb-re7-config"
+            ]
+          }
+        ],
+        "sourceRefs": [
+          "steamdb-re7-config",
+          "steamdb-re7-depot"
+        ]
+      },
+      "engine": {
+        "name": "RE Engine",
+        "version": "Current RT branch or legacy TDB49 branch",
+        "confidence": "verified",
+        "sourceRefs": [
+          "steamdb-re7-config",
+          "reframework-release"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "residentevil7",
+          "numericGameId": "3111",
+          "gameUrl": "https://www.nexusmods.com/games/residentevil7",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "notes": "The domain is the routing authority; the numeric ID is corroborated by Nexus game image paths.",
+          "sourceRefs": [
+            "nexus-re7"
+          ]
+        }
+      ],
+      "sourceAvailability": {
+        "modWorkshop": {
+          "supported": false,
+          "slug": null,
+          "numericGameId": null,
+          "gameUrl": null,
+          "reason": "No dedicated current game page was verified."
+        }
+      },
+      "otherMajorSources": [
+        {
+          "displayName": "Haven's Night RE Engine Modding Documentation",
+          "url": "https://github.com/Havens-Night/REEngine-Modding-Documentation/wiki",
+          "purpose": "Established RE Engine packaging and tooling documentation",
+          "sourceRefs": [
+            "reengine-modding-docs"
+          ]
+        },
+        {
+          "displayName": "Resident Evil Modding Board",
+          "url": "https://residentevilmodding.boards.net/",
+          "purpose": "Long-running game-specific community forum",
+          "sourceRefs": [
+            "reengine-modding-docs"
+          ]
+        }
+      ],
+      "knownLoaders": [
+        {
+          "dependencyId": "reframework",
+          "displayName": "REFramework",
+          "type": "loader-framework",
+          "currentStableVersion": "v1.5.9.1",
+          "requiredFor": [
+            "re7-reframework-script",
+            "re7-reframework-plugin"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "dinput8.dll"
+          ],
+          "generatedFolders": [
+            "reframework/autorun",
+            "reframework/plugins"
+          ],
+          "detection": {
+            "allFiles": [
+              "dinput8.dll"
+            ],
+            "optionalRuntimeEvidence": [
+              "re2_framework_log.txt"
+            ]
+          },
+          "variants": [
+            {
+              "id": "re7-current",
+              "assetName": "RE7.zip",
+              "gameVariant": "current-rt"
+            },
+            {
+              "id": "re7-tdb49",
+              "assetName": "RE7_TDB49.zip",
+              "gameVariant": "legacy-dx11-non-rt"
+            }
+          ],
+          "officialHomepage": "https://github.com/praydog/REFramework",
+          "officialDownloadUrl": "https://github.com/praydog/REFramework/releases/latest",
+          "nexusUrl": "https://www.nexusmods.com/residentevil7/mods/80",
+          "sourcePreference": "official stable GitHub release selected by game branch",
+          "installInstructions": "For non-VR installs, extract only dinput8.dll from the matching RE7 release asset to the game root.",
+          "automaticInstall": "eligible-after-transaction-and-variant-tests",
+          "architectureSpecific": true,
+          "modifiesGameRoot": true,
+          "restartRequired": true,
+          "updateCheck": "github-releases",
+          "sourceRefs": [
+            "reframework-readme",
+            "reframework-release",
+            "reframework-re7-nexus"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        "reframework"
+      ],
+      "knownModManagers": [
+        {
+          "dependencyId": "fluffy-mod-manager",
+          "displayName": "Fluffy Mod Manager",
+          "type": "mod-manager",
+          "currentVersion": "3.079",
+          "installRoot": "{fluffyManagerRoot}",
+          "expectedFolders": [
+            "Games/RE7/Mods"
+          ],
+          "detection": {
+            "configuredRootRequired": true,
+            "allFolders": [
+              "Games/RE7"
+            ]
+          },
+          "officialHomepage": "https://www.nexusmods.com/site/mods/818",
+          "officialDownloadUrl": "https://www.nexusmods.com/site/mods/818?tab=files",
+          "sourcePreference": "current Nexus Modding Tools release",
+          "automaticInstall": "manual-download-only",
+          "modifiesGameRoot": true,
+          "restartRequired": false,
+          "updateCheck": "nexus-files",
+          "sourceRefs": [
+            "fluffy-current",
+            "vortex-re7-extension"
+          ]
+        }
+      ],
+      "knownDependencyFrameworks": [
+        "reframework",
+        "fluffy-mod-manager"
+      ],
+      "supportedModFormats": [
+        ".lua",
+        ".dll",
+        ".pak",
+        ".zip",
+        ".rar",
+        ".7z",
+        "modinfo.ini",
+        "natives tree"
+      ],
+      "modTypes": [
+        {
+          "id": "re7-reframework-script",
+          "displayName": "REFramework autorun script",
+          "extensions": [
+            ".lua"
+          ],
+          "archiveMarkers": [
+            "reframework/autorun"
+          ],
+          "installRoot": "reframework/autorun",
+          "unit": "receipt-owned-file-tree",
+          "requiresAll": [
+            "reframework"
+          ],
+          "sourceRefs": [
+            "reframework-re7-nexus",
+            "reframework-wiki"
+          ]
+        },
+        {
+          "id": "re7-reframework-plugin",
+          "displayName": "REFramework native plugin",
+          "extensions": [
+            ".dll"
+          ],
+          "archiveMarkers": [
+            "reframework/plugins"
+          ],
+          "installRoot": "reframework/plugins",
+          "unit": "receipt-owned-file-tree",
+          "requiresAll": [
+            "reframework"
+          ],
+          "sourceRefs": [
+            "reframework-wiki"
+          ]
+        },
+        {
+          "id": "re7-fluffy-package",
+          "displayName": "Fluffy-managed asset package",
+          "extensions": [
+            ".zip",
+            ".rar",
+            ".7z"
+          ],
+          "archiveMarkers": [
+            "modinfo.ini",
+            "natives",
+            ".pak"
+          ],
+          "installRoot": "{fluffyManagerRoot}/Games/RE7/Mods",
+          "unit": "preserved-archive",
+          "requiresAll": [
+            "fluffy-mod-manager"
+          ],
+          "activation": "delegated-to-fluffy",
+          "sourceRefs": [
+            "fluffy-current",
+            "vortex-re7-extension"
+          ]
+        },
+        {
+          "id": "re7-root-pak",
+          "displayName": "Standalone RE Engine PAK",
+          "extensions": [
+            ".pak"
+          ],
+          "installRoot": ".",
+          "unit": "explicit-file-manifest",
+          "support": "manual-only",
+          "notes": "The current game uses numbered patch PAKs. Tsuki must not select or overwrite a patch slot until package collision and rollback tests exist.",
+          "sourceRefs": [
+            "steamdb-re7-depot",
+            "fluffy-current"
+          ]
+        },
+        {
+          "id": "re7-root-utility",
+          "displayName": "Root DLL or executable utility",
+          "extensions": [
+            ".dll",
+            ".exe",
+            ".ini"
+          ],
+          "installRoot": null,
+          "unit": "explicit-file-manifest",
+          "support": "manual-review-only",
+          "notes": "Root injectors can conflict with dinput8.dll or other proxies and require an allowlisted package recipe.",
+          "sourceRefs": [
+            "vortex-re7-extension",
+            "reframework-readme"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "reframework/autorun",
+          "purpose": "REFramework Lua scripts and their receipt-owned companion data",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "reframework-re7-nexus",
+            "reframework-wiki"
+          ]
+        },
+        {
+          "path": "reframework/plugins",
+          "purpose": "REFramework native plugins",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "reframework-wiki"
+          ]
+        },
+        {
+          "path": "{fluffyManagerRoot}/Games/RE7/Mods",
+          "rootBase": "configured-external-tool",
+          "purpose": "Preserved packages imported into Fluffy",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "vortex-re7-extension"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "REFramework dinput8.dll and explicitly approved root recipes only",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "reframework-readme",
+            "steamdb-re7-depot"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "per-mod-type",
+        "reframeworkOwnedUnits": "move receipt-owned files between live paths and profile-scoped disabled storage",
+        "fluffyPackages": "delegate activation and deactivation to Fluffy; moving its source archive does not undo an already applied game-archive change",
+        "dependencies": "disable only after all dependents are disabled",
+        "sourceRefs": [
+          "fluffy-current",
+          "reframework-wiki"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "framework-or-manager-controlled",
+        "notes": "No stable ordering contract was verified for REFramework scripts/plugins or older-title Fluffy installs.",
+        "sourceRefs": [
+          "fluffy-current",
+          "reframework-wiki"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeReframeworkTreesByExactMarkers": true,
+        "preserveFluffyArchives": true,
+        "rejectMixedRootInjectorsWithoutRecipe": true,
+        "sourceRefs": [
+          "fluffy-current",
+          "vortex-re7-extension",
+          "reframework-readme"
+        ]
+      },
+      "updateUninstall": {
+        "reframeworkMods": "receipt-owned file update with conflict and dependent checks",
+        "fluffyPackages": "delegate applied-state uninstall to Fluffy before removing the source package",
+        "afterGameUpdate": "require Fluffy archive re-read; if mods were active, follow Fluffy force-uninstall and Steam verification guidance",
+        "sourceRefs": [
+          "fluffy-current"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "re7.exe and re_chunk_000.pak exist",
+          "RE7 branch variant is known before installing REFramework",
+          "archive maps to exactly one supported mod type",
+          "required framework or configured Fluffy root is detected"
+        ],
+        "blockedOperations": [
+          "automatic root PAK installation",
+          "automatic root DLL or executable installation without an allowlisted recipe",
+          "claiming a Fluffy package is active before Fluffy confirms it"
+        ],
+        "sourceRefs": [
+          "steamdb-re7-depot",
+          "reframework-release",
+          "fluffy-current"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "steamdb-re7-config",
+          "type": "established-store-database",
+          "url": "https://steamdb.info/app/418370/config/",
+          "description": "Steam app ID, install directory, executable, RE Engine identity, and current public/non-RT branches."
+        },
+        {
+          "id": "steamdb-re7-depot",
+          "type": "established-store-database",
+          "url": "https://steamdb.info/depot/418371/",
+          "description": "Current 2026 executable and base/patch PAK file layout."
+        },
+        {
+          "id": "nexus-re7",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/games/residentevil7",
+          "description": "Current Nexus domain; the Nexus-hosted game tile path identifies numeric game ID 3111."
+        },
+        {
+          "id": "reframework-readme",
+          "type": "official-project",
+          "url": "https://github.com/praydog/REFramework",
+          "description": "Official non-VR loader install and supported-game documentation."
+        },
+        {
+          "id": "reframework-release",
+          "type": "official-release",
+          "url": "https://github.com/praydog/REFramework/releases/latest",
+          "description": "Current stable v1.5.9.1 assets RE7.zip and RE7_TDB49.zip with branch guidance."
+        },
+        {
+          "id": "reframework-re7-nexus",
+          "type": "project-source-page",
+          "url": "https://www.nexusmods.com/residentevil7/mods/80",
+          "description": "Game-specific dinput8.dll, autorun script, and plugin paths."
+        },
+        {
+          "id": "reframework-wiki",
+          "type": "official-project-documentation",
+          "url": "https://github.com/praydog/REFramework/wiki",
+          "description": "Official Lua autorun and native plugin loading contracts."
+        },
+        {
+          "id": "fluffy-current",
+          "type": "official-download-and-documentation",
+          "url": "https://www.nexusmods.com/site/mods/818",
+          "description": "Current Fluffy 3.079 release, older RE Engine game workflow, package formats, and game-update recovery."
+        },
+        {
+          "id": "vortex-re7-extension",
+          "type": "nexus-reviewed-established-implementation",
+          "url": "https://www.nexusmods.com/site/mods/914",
+          "description": "Current RE7 integration corroborating Games/RE7/Mods, reframework/autorun, root utility exceptions, and delegated Fluffy activation."
+        },
+        {
+          "id": "reengine-modding-docs",
+          "type": "established-community-documentation",
+          "url": "https://github.com/Havens-Night/REEngine-Modding-Documentation/wiki",
+          "description": "Current RE Engine packaging/tooling reference and community links."
+        }
+      ],
+      "unverified": [
+        "A trustworthy automatic detector for current-RT versus legacy non-RT when Steam branch metadata is unavailable",
+        "Transactional Fluffy activation status and archive re-read integration",
+        "Safe standalone patch PAK slot allocation"
+      ]
+    },
+    {
+      "profileId": "builtin.resident-evil-village",
+      "displayName": "Resident Evil Village",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1196590"
+        ],
+        "epicCatalogIdentifiers": [],
+        "alternateStores": [
+          {
+            "store": "microsoft",
+            "status": "supported-by-current-fluffy",
+            "automaticDetection": "pending",
+            "sourceRefs": [
+              "fluffy-current"
+            ]
+          }
+        ],
+        "sourceRefs": [
+          "steamdb-re8-config",
+          "fluffy-current"
+        ]
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Resident Evil Village BIOHAZARD VILLAGE",
+            "sourceRefs": [
+              "steamdb-re8-config",
+              "reframework-re8-nexus"
+            ]
+          }
+        ],
+        "executables": [
+          {
+            "path": "re8.exe",
+            "role": "steam-primary",
+            "sourceRefs": [
+              "steamdb-re8-config",
+              "steamdb-re8-depot"
+            ]
+          }
+        ],
+        "processNames": [
+          "re8"
+        ],
+        "minimumMarkers": [
+          "re8.exe",
+          "re_chunk_000.pak"
+        ],
+        "sourceRefs": [
+          "steamdb-re8-config",
+          "steamdb-re8-depot",
+          "vortex-re8-source"
+        ]
+      },
+      "engine": {
+        "name": "RE Engine",
+        "version": "Resident Evil Village branch",
+        "confidence": "verified",
+        "sourceRefs": [
+          "steamdb-re8-config",
+          "reframework-readme"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "residentevilvillage",
+          "numericGameId": "3669",
+          "gameUrl": "https://www.nexusmods.com/games/residentevilvillage",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "notes": "The domain is the routing authority; the numeric ID is corroborated by Nexus game image paths.",
+          "sourceRefs": [
+            "nexus-re8"
+          ]
+        }
+      ],
+      "sourceAvailability": {
+        "modWorkshop": {
+          "supported": false,
+          "slug": null,
+          "numericGameId": null,
+          "gameUrl": null,
+          "reason": "No dedicated current game page was verified."
+        }
+      },
+      "otherMajorSources": [
+        {
+          "displayName": "Haven's Night RE Engine Modding Documentation",
+          "url": "https://github.com/Havens-Night/REEngine-Modding-Documentation/wiki",
+          "purpose": "Established RE Engine packaging and tooling documentation",
+          "sourceRefs": [
+            "reengine-modding-docs"
+          ]
+        },
+        {
+          "displayName": "Resident Evil Modding Board",
+          "url": "https://residentevilmodding.boards.net/",
+          "purpose": "Long-running game-specific community forum",
+          "sourceRefs": [
+            "reengine-modding-docs"
+          ]
+        }
+      ],
+      "knownLoaders": [
+        {
+          "dependencyId": "reframework",
+          "displayName": "REFramework",
+          "type": "loader-framework",
+          "currentStableVersion": "v1.5.9.1",
+          "requiredFor": [
+            "re8-reframework-script",
+            "re8-reframework-plugin"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "dinput8.dll"
+          ],
+          "generatedFolders": [
+            "reframework/autorun",
+            "reframework/plugins"
+          ],
+          "detection": {
+            "allFiles": [
+              "dinput8.dll"
+            ],
+            "optionalRuntimeEvidence": [
+              "re2_framework_log.txt"
+            ]
+          },
+          "variants": [
+            {
+              "id": "re8-current",
+              "assetName": "RE8.zip",
+              "gameVariant": "steam-current"
+            }
+          ],
+          "officialHomepage": "https://github.com/praydog/REFramework",
+          "officialDownloadUrl": "https://github.com/praydog/REFramework/releases/latest",
+          "nexusUrl": "https://www.nexusmods.com/residentevilvillage/mods/60",
+          "sourcePreference": "official stable GitHub RE8 release asset",
+          "installInstructions": "For non-VR installs, extract only dinput8.dll from RE8.zip to the game root.",
+          "automaticInstall": "eligible-after-transaction-test",
+          "architectureSpecific": true,
+          "modifiesGameRoot": true,
+          "restartRequired": true,
+          "updateCheck": "github-releases",
+          "sourceRefs": [
+            "reframework-readme",
+            "reframework-release",
+            "reframework-re8-nexus"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        "reframework"
+      ],
+      "knownModManagers": [
+        {
+          "dependencyId": "fluffy-mod-manager",
+          "displayName": "Fluffy Mod Manager",
+          "type": "mod-manager",
+          "currentVersion": "3.079",
+          "installRoot": "{fluffyManagerRoot}",
+          "expectedFolders": [
+            "Games/RE8/Mods"
+          ],
+          "detection": {
+            "configuredRootRequired": true,
+            "allFolders": [
+              "Games/RE8"
+            ]
+          },
+          "officialHomepage": "https://www.nexusmods.com/site/mods/818",
+          "officialDownloadUrl": "https://www.nexusmods.com/site/mods/818?tab=files",
+          "sourcePreference": "current Nexus Modding Tools release",
+          "automaticInstall": "manual-download-only",
+          "modifiesGameRoot": true,
+          "restartRequired": false,
+          "updateCheck": "nexus-files",
+          "sourceRefs": [
+            "fluffy-current",
+            "fluffy-re8-page"
+          ]
+        }
+      ],
+      "knownDependencyFrameworks": [
+        "reframework",
+        "fluffy-mod-manager"
+      ],
+      "supportedModFormats": [
+        ".lua",
+        ".dll",
+        ".pak",
+        ".zip",
+        ".rar",
+        ".7z",
+        "modinfo.ini",
+        "natives tree"
+      ],
+      "modTypes": [
+        {
+          "id": "re8-reframework-script",
+          "displayName": "REFramework autorun script",
+          "extensions": [
+            ".lua"
+          ],
+          "archiveMarkers": [
+            "reframework/autorun"
+          ],
+          "installRoot": "reframework/autorun",
+          "unit": "receipt-owned-file-tree",
+          "requiresAll": [
+            "reframework"
+          ],
+          "sourceRefs": [
+            "reframework-wiki",
+            "reframework-re8-nexus"
+          ]
+        },
+        {
+          "id": "re8-reframework-plugin",
+          "displayName": "REFramework native plugin",
+          "extensions": [
+            ".dll"
+          ],
+          "archiveMarkers": [
+            "reframework/plugins"
+          ],
+          "installRoot": "reframework/plugins",
+          "unit": "receipt-owned-file-tree",
+          "requiresAll": [
+            "reframework"
+          ],
+          "sourceRefs": [
+            "reframework-wiki"
+          ]
+        },
+        {
+          "id": "re8-fluffy-package",
+          "displayName": "Fluffy-managed asset package",
+          "extensions": [
+            ".zip",
+            ".rar",
+            ".7z"
+          ],
+          "archiveMarkers": [
+            "modinfo.ini",
+            "natives",
+            ".pak"
+          ],
+          "installRoot": "{fluffyManagerRoot}/Games/RE8/Mods",
+          "unit": "preserved-archive",
+          "requiresAll": [
+            "fluffy-mod-manager"
+          ],
+          "activation": "delegated-to-fluffy",
+          "sourceRefs": [
+            "fluffy-current",
+            "fluffy-re8-page"
+          ]
+        },
+        {
+          "id": "re8-root-pak",
+          "displayName": "Standalone RE Engine PAK",
+          "extensions": [
+            ".pak"
+          ],
+          "installRoot": ".",
+          "unit": "explicit-file-manifest",
+          "support": "manual-only",
+          "notes": "The current game has numbered patch PAKs. Tsuki must not select or overwrite a patch slot until package collision and rollback tests exist.",
+          "sourceRefs": [
+            "steamdb-re8-depot",
+            "fluffy-current"
+          ]
+        },
+        {
+          "id": "re8-root-utility",
+          "displayName": "Root DLL or executable utility",
+          "extensions": [
+            ".dll",
+            ".exe",
+            ".ini"
+          ],
+          "installRoot": null,
+          "unit": "explicit-file-manifest",
+          "support": "manual-review-only",
+          "notes": "Root injectors can conflict with dinput8.dll or other proxies and require an allowlisted package recipe.",
+          "sourceRefs": [
+            "reframework-readme",
+            "fluffy-current"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "reframework/autorun",
+          "purpose": "REFramework Lua scripts and their receipt-owned companion data",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "reframework-wiki",
+            "reframework-re8-nexus"
+          ]
+        },
+        {
+          "path": "reframework/plugins",
+          "purpose": "REFramework native plugins",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "reframework-wiki"
+          ]
+        },
+        {
+          "path": "{fluffyManagerRoot}/Games/RE8/Mods",
+          "rootBase": "configured-external-tool",
+          "purpose": "Preserved packages imported into Fluffy",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "fluffy-re8-page"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "REFramework dinput8.dll and explicitly approved root recipes only",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "reframework-readme",
+            "steamdb-re8-depot"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "per-mod-type",
+        "reframeworkOwnedUnits": "move receipt-owned files between live paths and profile-scoped disabled storage",
+        "fluffyPackages": "delegate activation and deactivation to Fluffy; moving its source archive does not undo an already applied game-archive change",
+        "dependencies": "disable only after all dependents are disabled",
+        "sourceRefs": [
+          "fluffy-current",
+          "reframework-wiki"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "framework-or-manager-controlled",
+        "notes": "No stable ordering contract was verified for REFramework scripts/plugins or older-title Fluffy installs.",
+        "sourceRefs": [
+          "fluffy-current",
+          "reframework-wiki"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeReframeworkTreesByExactMarkers": true,
+        "preserveFluffyArchives": true,
+        "rejectMixedRootInjectorsWithoutRecipe": true,
+        "sourceRefs": [
+          "fluffy-current",
+          "fluffy-re8-page",
+          "reframework-readme"
+        ]
+      },
+      "updateUninstall": {
+        "reframeworkMods": "receipt-owned file update with conflict and dependent checks",
+        "fluffyPackages": "delegate applied-state uninstall to Fluffy before removing the source package",
+        "afterGameUpdate": "require Fluffy archive re-read; if mods were active, follow Fluffy force-uninstall and Steam verification guidance",
+        "sourceRefs": [
+          "fluffy-current"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "re8.exe and re_chunk_000.pak exist for Steam",
+          "archive maps to exactly one supported mod type",
+          "required framework or configured Fluffy root is detected",
+          "alternate-store executable and root are explicitly selected when Steam markers are absent"
+        ],
+        "blockedOperations": [
+          "automatic root PAK installation",
+          "automatic root DLL or executable installation without an allowlisted recipe",
+          "claiming a Fluffy package is active before Fluffy confirms it",
+          "automatic Microsoft Store detection until its current executable contract is verified"
+        ],
+        "sourceRefs": [
+          "steamdb-re8-depot",
+          "reframework-release",
+          "fluffy-current"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "steamdb-re8-config",
+          "type": "established-store-database",
+          "url": "https://steamdb.info/app/1196590/config/",
+          "description": "Steam app ID, install directory, executable, and RE Engine identity."
+        },
+        {
+          "id": "steamdb-re8-depot",
+          "type": "established-store-database",
+          "url": "https://steamdb.info/depot/1196591/",
+          "description": "Current 2026 base and numbered patch PAK file layout."
+        },
+        {
+          "id": "nexus-re8",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/games/residentevilvillage",
+          "description": "Current Nexus domain; the Nexus-hosted game tile path identifies numeric game ID 3669."
+        },
+        {
+          "id": "reframework-readme",
+          "type": "official-project",
+          "url": "https://github.com/praydog/REFramework",
+          "description": "Official non-VR loader install and supported-game documentation."
+        },
+        {
+          "id": "reframework-release",
+          "type": "official-release",
+          "url": "https://github.com/praydog/REFramework/releases/latest",
+          "description": "Current stable v1.5.9.1 RE8.zip asset and non-VR extraction guidance."
+        },
+        {
+          "id": "reframework-re8-nexus",
+          "type": "project-source-page",
+          "url": "https://www.nexusmods.com/residentevilvillage/mods/60",
+          "description": "Game-specific root folder example and dinput8.dll installation."
+        },
+        {
+          "id": "reframework-wiki",
+          "type": "official-project-documentation",
+          "url": "https://github.com/praydog/REFramework/wiki",
+          "description": "Official Lua autorun and native plugin loading contracts."
+        },
+        {
+          "id": "fluffy-current",
+          "type": "official-download-and-documentation",
+          "url": "https://www.nexusmods.com/site/mods/818",
+          "description": "Current Fluffy 3.079 release, older RE Engine game workflow, package formats, update recovery, and current Game Pass support note."
+        },
+        {
+          "id": "fluffy-re8-page",
+          "type": "official-game-specific-project-page",
+          "url": "https://www.nexusmods.com/residentevilvillage/mods/18",
+          "description": "Corroborates the internal RE8 manager folder, package intake, and archive re-read workflow."
+        },
+        {
+          "id": "vortex-re8-source",
+          "type": "official-open-source-implementation",
+          "url": "https://github.com/Nexus-Mods/game-residentevilvillage/blob/master/index.js",
+          "description": "Corroborates Steam app, executable, base PAK marker, and direct natives-tree handling."
+        },
+        {
+          "id": "reengine-modding-docs",
+          "type": "established-community-documentation",
+          "url": "https://github.com/Havens-Night/REEngine-Modding-Documentation/wiki",
+          "description": "Current RE Engine packaging/tooling reference and community links."
+        }
+      ],
+      "unverified": [
+        "Current Microsoft Store executable and install-root markers",
+        "Transactional Fluffy activation status and archive re-read integration",
+        "Safe standalone patch PAK slot allocation"
+      ]
+    },
+    {
+      "profileId": "builtin.resident-evil-requiem",
+      "displayName": "Resident Evil Requiem",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "3764200"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "RESIDENT EVIL requiem BIOHAZARD requiem"
+          }
+        ],
+        "executables": [
+          {
+            "path": "re9.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "re9"
+        ],
+        "minimumMarkers": [
+          "re9.exe"
+        ]
+      },
+      "engine": {
+        "name": "RE Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "residentevilrequiem",
+          "numericGameId": "8863",
+          "gameUrl": "https://www.nexusmods.com/residentevilrequiem",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "reframework",
+          "name": "REFramework",
+          "installRoot": ".",
+          "sourceUrl": "https://github.com/praydog/REFramework",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "reframework"
+      ],
+      "modTypes": [
+        {
+          "id": "lua",
+          "name": "REFramework Lua",
+          "installRoot": "reframework/autorun",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "RE8 asset paths are never reused. REFramework content requires the root loader; Fluffy packages use the Requiem manager profile."
+        },
+        {
+          "id": "plugin",
+          "name": "REFramework plugin",
+          "installRoot": "reframework/plugins",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "RE8 asset paths are never reused. REFramework content requires the root loader; Fluffy packages use the Requiem manager profile."
+        },
+        {
+          "id": "manager",
+          "name": "Fluffy asset package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "RE8 asset paths are never reused. REFramework content requires the root loader; Fluffy packages use the Requiem manager profile."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "reframework/autorun",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "reframework/plugins",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "re9.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "RE8 asset paths are never reused. REFramework content requires the root loader; Fluffy packages use the Requiem manager profile."
+      },
+      "evidence": [
+        {
+          "id": "builtin-resident-evil-requiem-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/3764200/config/",
+          "description": "Research packet evidence for Resident Evil Requiem."
+        },
+        {
+          "id": "builtin-resident-evil-requiem-2",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/residentevilrequiem",
+          "description": "Research packet evidence for Resident Evil Requiem."
+        },
+        {
+          "id": "builtin-resident-evil-requiem-3",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/praydog/REFramework",
+          "description": "Research packet evidence for Resident Evil Requiem."
+        }
+      ],
+      "unverified": [
+        "Asset replacement paths remain package-specific and manager-owned."
+      ]
+    },
+    {
+      "profileId": "builtin.borderlands",
+      "displayName": "Borderlands",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "8980",
+          "729040"
+        ],
+        "sourceRefs": [
+          "steamdb-borderlands-classic",
+          "steamdb-borderlands-enhanced"
+        ]
+      },
+      "detection": {
+        "variants": [
+          {
+            "id": "classic",
+            "architecture": "x86",
+            "gameRoots": [
+              {
+                "store": "steam",
+                "folderName": "Borderlands",
+                "sourceRefs": [
+                  "steamdb-borderlands-classic"
+                ]
+              }
+            ],
+            "executables": [
+              {
+                "path": "Binaries/Borderlands.exe",
+                "role": "primary",
+                "sourceRefs": [
+                  "steamdb-borderlands-classic"
+                ]
+              }
+            ],
+            "processNames": [
+              "Borderlands"
+            ],
+            "minimumMarkers": [
+              "Binaries/Borderlands.exe",
+              "WillowGame"
+            ]
+          },
+          {
+            "id": "enhanced",
+            "architecture": "x64",
+            "gameRoots": [
+              {
+                "store": "steam",
+                "folderName": "BorderlandsGOTYEnhanced",
+                "sourceRefs": [
+                  "steamdb-borderlands-enhanced"
+                ]
+              }
+            ],
+            "executables": [
+              {
+                "path": "Binaries/Win64/Launcher.exe",
+                "role": "launcher",
+                "sourceRefs": [
+                  "steamdb-borderlands-enhanced"
+                ]
+              },
+              {
+                "path": "Binaries/Win64/BorderlandsGOTY.exe",
+                "role": "primary",
+                "sourceRefs": [
+                  "steamdb-borderlands-enhanced",
+                  "willow1-release"
+                ]
+              }
+            ],
+            "processNames": [
+              "BorderlandsGOTY",
+              "Launcher"
+            ],
+            "minimumMarkers": [
+              "Binaries/Win64/BorderlandsGOTY.exe",
+              "WillowGame"
+            ]
+          }
+        ],
+        "variantSelection": "Match the Steam App ID and executable tree before selecting loader markers.",
+        "sourceRefs": [
+          "steamdb-borderlands-classic",
+          "steamdb-borderlands-enhanced",
+          "willow1-release"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine 3 family",
+        "version": "WillowGame; classic x86 and Enhanced x64 variants",
+        "confidence": "established-implementation",
+        "sourceRefs": [
+          "willow1-release",
+          "borderlands-modding-docs"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "borderlands",
+          "numericGameId": "360",
+          "gameUrl": "https://www.nexusmods.com/borderlands",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "variant": "classic",
+          "sourceRefs": [
+            "nexus-borderlands-classic"
+          ]
+        },
+        {
+          "provider": "nexus",
+          "domain": "borderlandsgotyenhanced",
+          "numericGameId": "2776",
+          "gameUrl": "https://www.nexusmods.com/borderlandsgotyenhanced",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "variant": "enhanced",
+          "sourceRefs": [
+            "nexus-borderlands-enhanced"
+          ]
+        }
+      ],
+      "otherMajorSources": [
+        {
+          "name": "Borderlands PythonSDK",
+          "url": "https://bl-sdk.github.io/",
+          "sourceRefs": [
+            "bl-sdk-docs"
+          ]
+        },
+        {
+          "name": "Borderlands Modding Support",
+          "url": "https://borderlandsmodding.com/",
+          "sourceRefs": [
+            "borderlands-modding-docs"
+          ]
+        }
+      ],
+      "knownLoaders": [
+        {
+          "dependencyId": "willow1-mod-manager-classic",
+          "displayName": "Willow1 Mod Manager - Classic",
+          "type": "framework",
+          "requiredFor": [
+            "willow1-sdkmod"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "Binaries/dsound.dll",
+            "Binaries/Plugins/unrealsdk.dll",
+            "Binaries/Plugins/pyunrealsdk.dll"
+          ],
+          "detection": {
+            "allFiles": [
+              "Binaries/dsound.dll",
+              "Binaries/Plugins/unrealsdk.dll"
+            ]
+          },
+          "officialHomepage": "https://github.com/bl-sdk/willow1-mod-manager",
+          "officialDownloadUrl": "https://github.com/bl-sdk/willow1-mod-manager/releases/latest",
+          "releaseAsset": "bl1-sdk.zip",
+          "automaticInstall": "blocked-until-runtime-install-and-rollback-test",
+          "sourceRefs": [
+            "willow1-release",
+            "willow1-classic-archive"
+          ]
+        },
+        {
+          "dependencyId": "willow1-mod-manager-enhanced",
+          "displayName": "Willow1 Mod Manager - Enhanced",
+          "type": "framework",
+          "requiredFor": [
+            "willow1-sdkmod"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "Binaries/Win64/dinput8.dll",
+            "Binaries/Win64/Plugins/unrealsdk.dll",
+            "Binaries/Win64/Plugins/pyunrealsdk.dll"
+          ],
+          "detection": {
+            "allFiles": [
+              "Binaries/Win64/dinput8.dll",
+              "Binaries/Win64/Plugins/unrealsdk.dll"
+            ]
+          },
+          "officialHomepage": "https://github.com/bl-sdk/willow1-mod-manager",
+          "officialDownloadUrl": "https://github.com/bl-sdk/willow1-mod-manager/releases/latest",
+          "releaseAsset": "bl1-enhanced-sdk.zip",
+          "automaticInstall": "blocked-until-runtime-install-and-rollback-test",
+          "sourceRefs": [
+            "willow1-release",
+            "willow1-enhanced-archive"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        "willow1-mod-manager-classic",
+        "willow1-mod-manager-enhanced"
+      ],
+      "knownModManagers": [
+        "Willow1 Mod Manager"
+      ],
+      "knownDependencyFrameworks": [
+        "willow1-mod-manager-classic",
+        "willow1-mod-manager-enhanced"
+      ],
+      "modTypes": [
+        {
+          "id": "willow1-sdkmod",
+          "displayName": "Willow SDK .sdkmod package",
+          "extensions": [
+            ".sdkmod"
+          ],
+          "installRoot": "sdk_mods",
+          "unit": "file",
+          "requiresAny": [
+            "willow1-mod-manager-classic",
+            "willow1-mod-manager-enhanced"
+          ],
+          "variantGate": "Require the dependency variant matching the detected executable tree.",
+          "sourceRefs": [
+            "willow1-release",
+            "willow1-classic-archive",
+            "willow1-enhanced-archive"
+          ]
+        },
+        {
+          "id": "willow1-python-folder",
+          "displayName": "Legacy Python SDK mod folder",
+          "archiveMarkers": [
+            "__init__.py"
+          ],
+          "installRoot": null,
+          "unit": "directory",
+          "support": "manager-handoff-only",
+          "sourceRefs": [
+            "willow1-release",
+            "bl-sdk-docs"
+          ]
+        },
+        {
+          "id": "willow1-legacy-text-or-config",
+          "displayName": "Legacy text or configuration mod",
+          "installRoot": null,
+          "unit": "file",
+          "support": "manual-only",
+          "sourceRefs": [
+            "borderlands-modding-docs"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "sdk_mods",
+          "purpose": "SDK packages after matching Willow1 runtime detection",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "willow1-classic-archive",
+            "willow1-enhanced-archive"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "Official Willow1 runtime archive only",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "willow1-release"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "move-receipt-owned-sdkmod-files",
+        "disabledContainer": "profile-scoped disabled storage",
+        "scope": "individual .sdkmod receipt",
+        "neverRenameIndividualPayloadFiles": true,
+        "sourceRefs": [
+          "willow1-release"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "manager-managed",
+        "notes": "Surface SDK dependency metadata without inventing lexical order.",
+        "sourceRefs": [
+          "willow1-release",
+          "bl-sdk-docs"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeByMarkers": true,
+        "rejectMixedAmbiguousRoots": true,
+        "sourceRefs": [
+          "willow1-classic-archive",
+          "willow1-enhanced-archive"
+        ]
+      },
+      "updateUninstall": {
+        "ownership": "receipt-per-sdkmod-file",
+        "uninstall": "remove only receipt-owned .sdkmod files after path and ownership checks",
+        "dependencyRemoval": "never automatic while dependents remain",
+        "sourceRefs": [
+          "willow1-release"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "matching executable exists",
+          "matching Willow1 runtime markers all exist",
+          "package maps only to .sdkmod",
+          "destination is not owned by another receipt"
+        ],
+        "blockedOperations": [
+          "automatic Willow1 runtime installation",
+          "cross-variant loader installation",
+          "generic Python folder installation",
+          "legacy text/config installation"
+        ],
+        "sourceRefs": [
+          "willow1-release",
+          "willow1-classic-archive",
+          "willow1-enhanced-archive"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "steamdb-borderlands-classic",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/8980/config/",
+          "description": "Steam identity and launch configuration for classic Borderlands."
+        },
+        {
+          "id": "steamdb-borderlands-enhanced",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/729040/config/",
+          "description": "Steam identity and launch configuration for GOTY Enhanced."
+        },
+        {
+          "id": "nexus-borderlands-classic",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/borderlands",
+          "description": "Canonical classic Nexus domain and researched numeric game ID 360."
+        },
+        {
+          "id": "nexus-borderlands-enhanced",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/borderlandsgotyenhanced",
+          "description": "Canonical Enhanced Nexus domain and researched numeric game ID 2776."
+        },
+        {
+          "id": "willow1-release",
+          "type": "official-release",
+          "url": "https://github.com/bl-sdk/willow1-mod-manager/releases/tag/v2.3",
+          "description": "Verified Willow1 v2.3 release, published 2026-07-03, with separate classic and Enhanced assets."
+        },
+        {
+          "id": "willow1-classic-archive",
+          "type": "official-release-asset",
+          "url": "https://github.com/bl-sdk/willow1-mod-manager/releases/download/v2.3/bl1-sdk.zip",
+          "description": "Inspected classic asset; SHA-256 622E8DD672C67758AF5FBCED3477A0018BE9B388DD3C58E6A59EE21834D80AFD."
+        },
+        {
+          "id": "willow1-enhanced-archive",
+          "type": "official-release-asset",
+          "url": "https://github.com/bl-sdk/willow1-mod-manager/releases/download/v2.3/bl1-enhanced-sdk.zip",
+          "description": "Inspected Enhanced asset; SHA-256 26F67146A47E5D0F88DD9AC1D346AF353A55FE94970F85482D23FF47DDCAB619."
+        },
+        {
+          "id": "bl-sdk-docs",
+          "type": "official-project",
+          "url": "https://bl-sdk.github.io/",
+          "description": "Official Borderlands PythonSDK documentation and mod database."
+        },
+        {
+          "id": "borderlands-modding-docs",
+          "type": "trusted-community-docs",
+          "url": "https://borderlandsmodding.com/",
+          "description": "Established Borderlands modding documentation from the research packet."
+        }
+      ],
+      "unverified": [
+        "Non-Steam store detection is not enabled.",
+        "Automatic Willow1 runtime installation needs a real install, launch, and rollback test.",
+        "Generic Python folders and legacy text/config mods require package-specific destinations."
+      ]
+    },
+    {
+      "profileId": "builtin.borderlands2",
+      "displayName": "Borderlands 2",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "49520"
+        ],
+        "sourceRefs": [
+          "steamdb-borderlands2"
+        ]
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Borderlands 2",
+            "sourceRefs": [
+              "steamdb-borderlands2"
+            ]
+          }
+        ],
+        "executables": [
+          {
+            "path": "Binaries/Win32/Launcher.exe",
+            "role": "launcher",
+            "sourceRefs": [
+              "steamdb-borderlands2"
+            ]
+          },
+          {
+            "path": "Binaries/Win32/Borderlands2.exe",
+            "role": "primary",
+            "sourceRefs": [
+              "steamdb-borderlands2",
+              "willow2-release"
+            ]
+          }
+        ],
+        "processNames": [
+          "Borderlands2",
+          "Launcher"
+        ],
+        "minimumMarkers": [
+          "Binaries/Win32/Borderlands2.exe",
+          "WillowGame"
+        ],
+        "architecture": "x86",
+        "sourceRefs": [
+          "steamdb-borderlands2",
+          "willow2-release"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine 3 family",
+        "version": "WillowGame branch",
+        "confidence": "established-implementation",
+        "sourceRefs": [
+          "willow2-release",
+          "borderlands2-modding-docs"
+        ]
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "borderlands2",
+          "numericGameId": "428",
+          "gameUrl": "https://www.nexusmods.com/borderlands2",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ],
+          "sourceRefs": [
+            "nexus-borderlands2"
+          ]
+        }
+      ],
+      "otherMajorSources": [
+        {
+          "name": "Borderlands PythonSDK",
+          "url": "https://bl-sdk.github.io/",
+          "sourceRefs": [
+            "bl2-sdk-docs"
+          ]
+        },
+        {
+          "name": "Borderlands Modding Support",
+          "url": "https://borderlandsmodding.com/bl2tps/",
+          "sourceRefs": [
+            "borderlands2-modding-docs"
+          ]
+        }
+      ],
+      "knownLoaders": [
+        {
+          "dependencyId": "willow2-mod-manager",
+          "displayName": "Willow2 Mod Manager",
+          "type": "framework",
+          "requiredFor": [
+            "willow2-sdkmod"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "Binaries/Win32/ddraw.dll",
+            "Binaries/Win32/Plugins/unrealsdk.dll",
+            "Binaries/Win32/Plugins/pyunrealsdk.dll"
+          ],
+          "detection": {
+            "allFiles": [
+              "Binaries/Win32/ddraw.dll",
+              "Binaries/Win32/Plugins/unrealsdk.dll"
+            ]
+          },
+          "officialHomepage": "https://github.com/bl-sdk/willow2-mod-manager",
+          "officialDownloadUrl": "https://github.com/bl-sdk/willow2-mod-manager/releases/latest",
+          "releaseAsset": "willow2-sdk.zip",
+          "automaticInstall": "blocked-until-runtime-install-and-rollback-test",
+          "sourceRefs": [
+            "willow2-release",
+            "willow2-archive"
+          ]
+        }
+      ],
+      "knownFrameworks": [
+        "willow2-mod-manager"
+      ],
+      "knownModManagers": [
+        {
+          "dependencyId": "openblcmm",
+          "displayName": "OpenBLCMM",
+          "type": "external-manager",
+          "requiredFor": [
+            "openblcmm-text-patch"
+          ],
+          "installRoot": ".",
+          "expectedFiles": [
+            "OpenBLCMM.exe"
+          ],
+          "detection": {
+            "externalApplication": true
+          },
+          "officialHomepage": "https://github.com/BLCM/OpenBLCMM",
+          "officialDownloadUrl": "https://github.com/BLCM/OpenBLCMM/releases/latest",
+          "automaticInstall": "external-manager-handoff-only",
+          "sourceRefs": [
+            "openblcmm-release"
+          ]
+        }
+      ],
+      "knownDependencyFrameworks": [
+        "willow2-mod-manager",
+        "openblcmm"
+      ],
+      "modTypes": [
+        {
+          "id": "willow2-sdkmod",
+          "displayName": "Willow SDK .sdkmod package",
+          "extensions": [
+            ".sdkmod"
+          ],
+          "installRoot": "sdk_mods",
+          "unit": "file",
+          "requiresAll": [
+            "willow2-mod-manager"
+          ],
+          "sourceRefs": [
+            "willow2-release",
+            "willow2-archive"
+          ]
+        },
+        {
+          "id": "openblcmm-text-patch",
+          "displayName": "OpenBLCMM text patch",
+          "extensions": [
+            ".txt"
+          ],
+          "installRoot": null,
+          "unit": "file",
+          "support": "manager-handoff-only",
+          "requiresAll": [
+            "openblcmm"
+          ],
+          "notes": "A .txt extension alone is never sufficient for direct installation; OpenBLCMM owns merge and order state.",
+          "sourceRefs": [
+            "openblcmm-release",
+            "borderlands2-modding-docs"
+          ]
+        },
+        {
+          "id": "willow2-python-folder",
+          "displayName": "Legacy Python SDK mod folder",
+          "archiveMarkers": [
+            "__init__.py"
+          ],
+          "installRoot": null,
+          "unit": "directory",
+          "support": "manager-handoff-only",
+          "sourceRefs": [
+            "willow2-release",
+            "bl2-sdk-docs"
+          ]
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "sdk_mods",
+          "purpose": "SDK packages after Willow2 runtime detection",
+          "createIfMissing": true,
+          "sourceRefs": [
+            "willow2-archive"
+          ]
+        },
+        {
+          "path": ".",
+          "purpose": "Official Willow2 runtime archive only",
+          "createIfMissing": false,
+          "sourceRefs": [
+            "willow2-release"
+          ]
+        }
+      ],
+      "enableDisable": {
+        "method": "move-receipt-owned-sdkmod-files",
+        "disabledContainer": "profile-scoped disabled storage",
+        "scope": "individual .sdkmod receipt",
+        "textPatches": "OpenBLCMM-managed",
+        "neverRenameIndividualPayloadFiles": true,
+        "sourceRefs": [
+          "willow2-release",
+          "openblcmm-release"
+        ]
+      },
+      "loadOrder": {
+        "supported": false,
+        "method": "manager-managed",
+        "notes": "OpenBLCMM owns text patch merge/order; Tsuki does not invent filename order.",
+        "sourceRefs": [
+          "openblcmm-release",
+          "willow2-release"
+        ]
+      },
+      "archiveHandling": {
+        "stripSingleWrapperFolder": true,
+        "routeByMarkers": true,
+        "rejectMixedAmbiguousRoots": true,
+        "sourceRefs": [
+          "willow2-archive",
+          "openblcmm-release"
+        ]
+      },
+      "updateUninstall": {
+        "ownership": "receipt-per-sdkmod-file",
+        "uninstall": "remove only receipt-owned .sdkmod files after path and ownership checks",
+        "dependencyRemoval": "never automatic while dependents remain",
+        "textPatchRemoval": "delegate merged text-patch state to OpenBLCMM",
+        "sourceRefs": [
+          "willow2-release",
+          "openblcmm-release"
+        ]
+      },
+      "validation": {
+        "requiredBeforeEnable": [
+          "Borderlands2.exe exists",
+          "Willow2 runtime markers all exist",
+          "package maps only to .sdkmod",
+          "destination is not owned by another receipt"
+        ],
+        "blockedOperations": [
+          "automatic Willow2 runtime installation",
+          "automatic OpenBLCMM installation",
+          "automatic text patch merge/order",
+          "generic Python folder installation"
+        ],
+        "sourceRefs": [
+          "willow2-release",
+          "willow2-archive",
+          "openblcmm-release"
+        ]
+      },
+      "evidence": [
+        {
+          "id": "steamdb-borderlands2",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/49520/config/",
+          "description": "Steam identity and launch configuration for Borderlands 2."
+        },
+        {
+          "id": "nexus-borderlands2",
+          "type": "source-site",
+          "url": "https://www.nexusmods.com/borderlands2",
+          "description": "Canonical Nexus domain and researched numeric game ID 428."
+        },
+        {
+          "id": "willow2-release",
+          "type": "official-release",
+          "url": "https://github.com/bl-sdk/willow2-mod-manager/releases/tag/v3.8",
+          "description": "Verified Willow2 v3.8 release, published 2026-06-26."
+        },
+        {
+          "id": "willow2-archive",
+          "type": "official-release-asset",
+          "url": "https://github.com/bl-sdk/willow2-mod-manager/releases/download/v3.8/willow2-sdk.zip",
+          "description": "Inspected official asset; SHA-256 E1862DDB282CF845369C9CA1CA70AC180D6104CCE25D8A133557FC74E157B4C7."
+        },
+        {
+          "id": "openblcmm-release",
+          "type": "official-release",
+          "url": "https://github.com/BLCM/OpenBLCMM/releases/tag/v1.4.1",
+          "description": "Verified current OpenBLCMM v1.4.1 release and Windows packages."
+        },
+        {
+          "id": "bl2-sdk-docs",
+          "type": "official-project",
+          "url": "https://bl-sdk.github.io/",
+          "description": "Official Borderlands PythonSDK documentation and mod database."
+        },
+        {
+          "id": "borderlands2-modding-docs",
+          "type": "trusted-community-docs",
+          "url": "https://borderlandsmodding.com/bl2tps/",
+          "description": "Established Borderlands 2/TPS documentation from the research packet."
+        }
+      ],
+      "unverified": [
+        "Non-Steam store detection is not enabled.",
+        "Automatic Willow2 runtime installation needs a real install, launch, and rollback test.",
+        "OpenBLCMM command-line import and state synchronization are not yet proven safe for Tsuki automation."
+      ]
+    },
+    {
+      "profileId": "builtin.borderlands3",
+      "displayName": "Borderlands 3",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "397540"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Borderlands 3"
+          }
+        ],
+        "executables": [
+          {
+            "path": "OakGame/Binaries/Win64/Borderlands3.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "Borderlands3"
+        ],
+        "minimumMarkers": [
+          "OakGame/Binaries/Win64/Borderlands3.exe"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "borderlands3",
+          "numericGameId": "2953",
+          "gameUrl": "https://www.nexusmods.com/borderlands3",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "open-hotfix-loader",
+          "name": "OpenHotfixLoader",
+          "installRoot": "OakGame/Binaries/Win64/Plugins",
+          "sourceUrl": "https://github.com/apple1417/OpenHotfixLoader",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "open-hotfix-loader"
+      ],
+      "modTypes": [
+        {
+          "id": "hotfix",
+          "name": "OpenHotfixLoader text hotfix",
+          "installRoot": "OakGame/Binaries/Win64/Plugins/ohl-mods",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Hotfixes and plugins require their detected loaders. Shared d3d11.dll/PluginLoader is never removed while dependents remain."
+        },
+        {
+          "id": "plugin",
+          "name": "Compatible Oak plugin",
+          "installRoot": "OakGame/Binaries/Win64/Plugins",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Hotfixes and plugins require their detected loaders. Shared d3d11.dll/PluginLoader is never removed while dependents remain."
+        },
+        {
+          "id": "manager",
+          "name": "Oak SDK/Python package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Hotfixes and plugins require their detected loaders. Shared d3d11.dll/PluginLoader is never removed while dependents remain."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "OakGame/Binaries/Win64/Plugins/ohl-mods",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "OakGame/Binaries/Win64/Plugins",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "OakGame/Binaries/Win64/Borderlands3.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Hotfixes and plugins require their detected loaders. Shared d3d11.dll/PluginLoader is never removed while dependents remain."
+      },
+      "evidence": [
+        {
+          "id": "builtin-borderlands3-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/397540/config/",
+          "description": "Research packet evidence for Borderlands 3."
+        },
+        {
+          "id": "builtin-borderlands3-2",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/bl-sdk",
+          "description": "Research packet evidence for Borderlands 3."
+        },
+        {
+          "id": "builtin-borderlands3-3",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/apple1417/OpenHotfixLoader",
+          "description": "Research packet evidence for Borderlands 3."
+        },
+        {
+          "id": "builtin-borderlands3-4",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/borderlands3",
+          "description": "Research packet evidence for Borderlands 3."
+        }
+      ],
+      "unverified": []
+    },
+    {
+      "profileId": "builtin.borderlands4",
+      "displayName": "Borderlands 4",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1285190"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Borderlands 4"
+          }
+        ],
+        "executables": [
+          {
+            "path": "OakGame/Binaries/Win64/Borderlands4.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "Borderlands4"
+        ],
+        "minimumMarkers": [
+          "OakGame/Binaries/Win64/Borderlands4.exe"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "borderlands4",
+          "numericGameId": "8148",
+          "gameUrl": "https://www.nexusmods.com/borderlands4",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "oak2-mod-manager",
+          "name": "Oak2 Mod Manager",
+          "installRoot": "OakGame/Binaries/Win64/Plugins",
+          "sourceUrl": "https://github.com/bl-sdk",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "oak2-mod-manager"
+      ],
+      "modTypes": [
+        {
+          "id": "sdkmod",
+          "name": "Oak2 SDK .sdkmod",
+          "installRoot": "sdk_mods",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Only .sdkmod routing is enabled after the Oak2 SDK marker is found. Proxy/runtime filenames are resolved from the current release."
+        },
+        {
+          "id": "manager",
+          "name": "Oak2 Python/plugin/content handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Only .sdkmod routing is enabled after the Oak2 SDK marker is found. Proxy/runtime filenames are resolved from the current release."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "sdk_mods",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "OakGame/Binaries/Win64/Borderlands4.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Only .sdkmod routing is enabled after the Oak2 SDK marker is found. Proxy/runtime filenames are resolved from the current release."
+      },
+      "evidence": [
+        {
+          "id": "builtin-borderlands4-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1285190/config/",
+          "description": "Research packet evidence for Borderlands 4."
+        },
+        {
+          "id": "builtin-borderlands4-2",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/bl-sdk",
+          "description": "Research packet evidence for Borderlands 4."
+        },
+        {
+          "id": "builtin-borderlands4-3",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/borderlands4",
+          "description": "Research packet evidence for Borderlands 4."
+        }
+      ],
+      "unverified": [
+        "The exact current Oak2 proxy/runtime filename is release-sensitive and is not auto-installed."
+      ]
+    },
+    {
+      "profileId": "builtin.tiny-tinas-wonderlands",
+      "displayName": "Tiny Tina's Wonderlands",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1286680"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Tiny Tina's Wonderlands"
+          }
+        ],
+        "executables": [
+          {
+            "path": "OakGame/Binaries/Win64/Wonderlands.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "Wonderlands"
+        ],
+        "minimumMarkers": [
+          "OakGame/Binaries/Win64/Wonderlands.exe"
+        ]
+      },
+      "engine": {
+        "name": "Unreal Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "tinytinaswonderlands",
+          "numericGameId": "4394",
+          "gameUrl": "https://www.nexusmods.com/tinytinaswonderlands",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "open-hotfix-loader",
+          "name": "OpenHotfixLoader",
+          "installRoot": "OakGame/Binaries/Win64/Plugins",
+          "sourceUrl": "https://github.com/apple1417/OpenHotfixLoader",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "open-hotfix-loader"
+      ],
+      "modTypes": [
+        {
+          "id": "hotfix",
+          "name": "OpenHotfixLoader text hotfix",
+          "installRoot": "OakGame/Binaries/Win64/Plugins/ohl-mods",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Wonderlands Redux is never universal. Hotfix/plugin installs require the matching loader markers."
+        },
+        {
+          "id": "plugin",
+          "name": "Compatible Oak plugin",
+          "installRoot": "OakGame/Binaries/Win64/Plugins",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Wonderlands Redux is never universal. Hotfix/plugin installs require the matching loader markers."
+        },
+        {
+          "id": "manager",
+          "name": "Oak SDK/Python package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Wonderlands Redux is never universal. Hotfix/plugin installs require the matching loader markers."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "OakGame/Binaries/Win64/Plugins/ohl-mods",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "OakGame/Binaries/Win64/Plugins",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "OakGame/Binaries/Win64/Wonderlands.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Wonderlands Redux is never universal. Hotfix/plugin installs require the matching loader markers."
+      },
+      "evidence": [
+        {
+          "id": "builtin-tiny-tinas-wonderlands-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1286680/config/",
+          "description": "Research packet evidence for Tiny Tina's Wonderlands."
+        },
+        {
+          "id": "builtin-tiny-tinas-wonderlands-2",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/apple1417/OpenHotfixLoader",
+          "description": "Research packet evidence for Tiny Tina's Wonderlands."
+        },
+        {
+          "id": "builtin-tiny-tinas-wonderlands-3",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/bl-sdk",
+          "description": "Research packet evidence for Tiny Tina's Wonderlands."
+        },
+        {
+          "id": "builtin-tiny-tinas-wonderlands-4",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/tinytinaswonderlands",
+          "description": "Research packet evidence for Tiny Tina's Wonderlands."
+        }
+      ],
+      "unverified": []
+    },
+    {
+      "profileId": "builtin.spider-man-remastered",
+      "displayName": "Marvel's Spider-Man Remastered",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "1817070"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Marvel's Spider-Man Remastered"
+          }
+        ],
+        "executables": [
+          {
+            "path": "Spider-Man.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "Spider-Man"
+        ],
+        "minimumMarkers": [
+          "Spider-Man.exe"
+        ]
+      },
+      "engine": {
+        "name": "Insomniac/Nixxes engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "marvelsspidermanremastered",
+          "numericGameId": "4536",
+          "gameUrl": "https://www.nexusmods.com/marvelsspidermanremastered",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "overstrike",
+          "name": "Overstrike",
+          "installRoot": ".",
+          "sourceUrl": "https://www.nexusmods.com/marvelsspidermanremastered/mods/4199",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "overstrike"
+      ],
+      "modTypes": [
+        {
+          "id": "overstrike",
+          "name": "Overstrike-supported package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": ".smpcmod, .suit, .stage, .modular and .script are handed to Overstrike; Tsuki does not guess their proprietary activation format."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "Spider-Man.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": ".smpcmod, .suit, .stage, .modular and .script are handed to Overstrike; Tsuki does not guess their proprietary activation format."
+      },
+      "evidence": [
+        {
+          "id": "builtin-spider-man-remastered-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/1817070/config/",
+          "description": "Research packet evidence for Marvel's Spider-Man Remastered."
+        },
+        {
+          "id": "builtin-spider-man-remastered-2",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/marvelsspidermanremastered/mods/4199",
+          "description": "Research packet evidence for Marvel's Spider-Man Remastered."
+        }
+      ],
+      "unverified": [
+        "Overstrike CLI invocation remains an external-manager integration step."
+      ]
+    },
+    {
+      "profileId": "builtin.spider-man-2",
+      "displayName": "Marvel's Spider-Man 2",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "2651280"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "Marvel's Spider-Man 2"
+          }
+        ],
+        "executables": [
+          {
+            "path": "Spider-Man2.exe",
+            "role": "primary"
+          },
+          {
+            "path": "SpiderMan2.exe",
+            "role": "alternate"
+          }
+        ],
+        "processNames": [
+          "Spider-Man2",
+          "SpiderMan2"
+        ],
+        "minimumMarkers": [
+          "Spider-Man2.exe"
+        ]
+      },
+      "engine": {
+        "name": "Insomniac/Nixxes engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "marvelsspiderman2",
+          "numericGameId": "6082",
+          "gameUrl": "https://www.nexusmods.com/marvelsspiderman2",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "overstrike",
+          "name": "Overstrike",
+          "installRoot": ".",
+          "sourceUrl": "https://www.nexusmods.com/marvelsspidermanremastered/mods/4199",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "overstrike"
+      ],
+      "modTypes": [
+        {
+          "id": "overstrike",
+          "name": "Game-matched Overstrike package handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "Matching extensions do not imply cross-game compatibility. Tsuki preserves the canonical API domain and hands activation to Overstrike."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "Spider-Man2.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "Matching extensions do not imply cross-game compatibility. Tsuki preserves the canonical API domain and hands activation to Overstrike."
+      },
+      "evidence": [
+        {
+          "id": "builtin-spider-man-2-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/2651280/config/",
+          "description": "Research packet evidence for Marvel's Spider-Man 2."
+        },
+        {
+          "id": "builtin-spider-man-2-2",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/marvelsspiderman2",
+          "description": "Research packet evidence for Marvel's Spider-Man 2."
+        },
+        {
+          "id": "builtin-spider-man-2-3",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/marvelsspidermanremastered/mods/4199",
+          "description": "Research packet evidence for Marvel's Spider-Man 2."
+        }
+      ],
+      "unverified": [
+        "Any pretty browser alias remains separate from the canonical API domain."
+      ]
+    },
+    {
+      "profileId": "builtin.monster-hunter-wilds",
+      "displayName": "Monster Hunter Wilds",
+      "researchStatus": "verified",
+      "lastVerified": "2026-09-04",
+      "platforms": {
+        "steamAppIds": [
+          "2246340"
+        ],
+        "epicCatalogIdentifiers": []
+      },
+      "detection": {
+        "gameRoots": [
+          {
+            "store": "steam",
+            "folderName": "MonsterHunterWilds"
+          }
+        ],
+        "executables": [
+          {
+            "path": "MonsterHunterWilds.exe",
+            "role": "primary"
+          }
+        ],
+        "processNames": [
+          "MonsterHunterWilds"
+        ],
+        "minimumMarkers": [
+          "MonsterHunterWilds.exe"
+        ]
+      },
+      "engine": {
+        "name": "RE Engine",
+        "version": "patch-dependent",
+        "confidence": "research-packet"
+      },
+      "sources": [
+        {
+          "provider": "nexus",
+          "domain": "monsterhunterwilds",
+          "numericGameId": "6993",
+          "gameUrl": "https://www.nexusmods.com/monsterhunterwilds",
+          "browseModes": [
+            "api",
+            "webview_window",
+            "external"
+          ]
+        }
+      ],
+      "otherMajorSources": [],
+      "knownLoaders": [
+        {
+          "dependencyId": "reframework",
+          "name": "REFramework",
+          "installRoot": ".",
+          "sourceUrl": "https://github.com/praydog/REFramework",
+          "installPolicy": "detect-or-external-handoff"
+        }
+      ],
+      "knownFrameworks": [],
+      "knownModManagers": [],
+      "knownDependencyFrameworks": [
+        "reframework"
+      ],
+      "modTypes": [
+        {
+          "id": "lua",
+          "name": "REFramework Lua",
+          "installRoot": "reframework/autorun",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "No DRM or online protection is modified. Fluffy packages and numbered patch PAKs remain blocked until an exact safe manager/slot operation is proven."
+        },
+        {
+          "id": "plugin",
+          "name": "REFramework plugin",
+          "installRoot": "reframework/plugins",
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "No DRM or online protection is modified. Fluffy packages and numbered patch PAKs remain blocked until an exact safe manager/slot operation is proven."
+        },
+        {
+          "id": "manager",
+          "name": "Fluffy or patch-PAK handoff",
+          "installRoot": null,
+          "packageInspection": "archive-contents-and-relative-paths",
+          "safety": "No DRM or online protection is modified. Fluffy packages and numbered patch PAKs remain blocked until an exact safe manager/slot operation is proven."
+        }
+      ],
+      "installRoots": [
+        {
+          "path": "reframework/autorun",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": "reframework/plugins",
+          "ownership": "receipt-owned-files-only"
+        },
+        {
+          "path": ".",
+          "ownership": "shared-game-root"
+        }
+      ],
+      "enableDisable": {
+        "strategy": "move receipt-owned files only",
+        "disabledStorage": "profile-scoped",
+        "sharedLoaders": "never toggled per mod"
+      },
+      "loadOrder": {
+        "strategy": "authoritative loader/manager semantics only",
+        "lexicalFallback": false
+      },
+      "archiveHandling": {
+        "inspectContents": true,
+        "supportedContainers": [
+          "zip",
+          "folder",
+          "loose-file"
+        ],
+        "unsupportedContainers": [
+          "7z",
+          "rar"
+        ],
+        "rejectTraversal": true
+      },
+      "updateUninstall": {
+        "receiptsRequired": true,
+        "backupBeforeOverwrite": true,
+        "blockSharedDependencyRemoval": true,
+        "revalidateAfterGameUpdate": true
+      },
+      "validation": {
+        "gameRootMarkers": [
+          "MonsterHunterWilds.exe"
+        ],
+        "sourceIdentityFields": [
+          "profileId",
+          "sourceId",
+          "domain",
+          "numericGameId"
+        ],
+        "directInstallBoundary": "No DRM or online protection is modified. Fluffy packages and numbered patch PAKs remain blocked until an exact safe manager/slot operation is proven."
+      },
+      "evidence": [
+        {
+          "id": "builtin-monster-hunter-wilds-1",
+          "type": "store-metadata",
+          "url": "https://steamdb.info/app/2246340/",
+          "description": "Research packet evidence for Monster Hunter Wilds."
+        },
+        {
+          "id": "builtin-monster-hunter-wilds-2",
+          "type": "official-or-primary-project",
+          "url": "https://github.com/praydog/REFramework",
+          "description": "Research packet evidence for Monster Hunter Wilds."
+        },
+        {
+          "id": "builtin-monster-hunter-wilds-3",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/site/mods/818",
+          "description": "Research packet evidence for Monster Hunter Wilds."
+        },
+        {
+          "id": "builtin-monster-hunter-wilds-4",
+          "type": "official-or-primary-project",
+          "url": "https://www.nexusmods.com/monsterhunterwilds",
+          "description": "Research packet evidence for Monster Hunter Wilds."
+        }
+      ],
+      "unverified": [
+        "Custom patch-PAK slot allocation remains disabled."
+      ]
+    }
+  ]
+}

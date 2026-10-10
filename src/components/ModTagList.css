@@ -1,0 +1,50 @@
+html[data-theme] .tsuki-mod-card .mod-tag-list {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  gap: 4px !important;
+  min-width: 0;
+  height: 22px;
+  max-height: 22px;
+  overflow: hidden;
+}
+html[data-theme] .tsuki-mod-card .mod-tag-list > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  height: 22px !important;
+  min-height: 22px !important;
+  padding: 0 6px !important;
+  line-height: 20px !important;
+  box-sizing: border-box;
+}
+.mod-tags-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  height: 22px;
+  min-width: 29px;
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, var(--accent-a) 45%, var(--line));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent-a) 18%, var(--panel));
+  color: var(--text);
+  cursor: pointer;
+}
+html[data-theme] .tsuki-mod-card .mod-tags-expand { height: 22px !important; min-height: 22px !important; padding: 0 6px !important; line-height: 1 !important; }
+html[data-theme] .tsuki-mod-card .mod-tags-expand > span { display: block; height: auto !important; min-height: 0 !important; max-height: none !important; padding: 0 !important; margin: 0 !important; border: 0 !important; background: none !important; color: inherit !important; font-size: 10px; line-height: 1 !important; }
+.mod-tags-expand > svg { flex: 0 0 12px; width: 12px; height: 12px; }
+.mod-tags-expand:hover { border-color: var(--accent-a); }
+.mod-tags-expand:focus-visible, .mod-tags-heading button:focus-visible { outline: 2px solid var(--accent-b); outline-offset: 1px; }
+.mod-tags-popover { position: fixed; z-index: 10000; width: min(320px, calc(100vw - 24px)); max-height: min(360px, calc(100dvh - 24px)); padding: 12px; overflow: auto; color: var(--text); background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent-a) 35%, var(--line)); border-radius: 8px; box-shadow: 0 12px 35px #0006; }
+.mod-tags-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+.mod-tags-heading small { margin-left: 5px; color: var(--muted); font-weight: 500; }
+.mod-tags-heading button { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.mod-tags-heading button:hover { color: var(--text); background: var(--panel-2); }
+.mod-tags-expanded-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.mod-tags-expanded-list > span { padding: 4px 7px; border: 1px solid var(--tag-border, var(--line)); border-radius: 4px; background: var(--tag-bg, var(--panel-2)); color: var(--tag-fg, var(--text)); font-size: 11px; font-weight: 650; overflow-wrap: anywhere; max-width: 100%; }

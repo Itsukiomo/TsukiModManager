@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tsuki UI Regression Preview</title></head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from "react";
+      import ReactDOM from "react-dom/client";
+      import { BootScreen } from "/src/App.tsx";
+      import { ModCard } from "/src/components/ModCard.tsx";
+      import { InstalledModCard } from "/src/components/InstalledModCard.tsx";
+      import { ModToggleButton } from "/src/components/ModToggleButton.tsx";
+      import { WindowTitleBar } from "/src/components/WindowTitleBar/WindowTitleBar.tsx";
+      import { Sidebar } from "/src/components/Sidebar/Sidebar.tsx";
+      import { UnifiedModPage } from "/src/components/UnifiedModPage.tsx";
+      import { BUILTIN_GAME_PROFILES } from "/src/models/gameProfiles.ts";
+      import { sanitizeRichHtml } from "/src/utils/richHtmlSanitizer.ts";
+      import { homeTrendingSlots } from "/src/utils/homeTrendingSlots.ts";
+      import "/src/pages/Browse/BrowsePage.css";
+      import "/src/pages/Installed/InstalledPage.css";
+      const options = new URLSearchParams(location.search);
+      const previewArtwork = new URL("/src/assets/payday3-profile-cover.png", location.origin).href;
+      document.documentElement.dataset.theme = options.get("theme") || "moonveil";
+      const mode = options.get("mode") || "cards";
+      const titlebarProfile = {...BUILTIN_GAME_PROFILES[4],displayName:options.has("long") ? "A very long custom game profile name with extended edition details" : BUILTIN_GAME_PROFILES[4].displayName};
+      const h = React.createElement;
+      window.qaClicks = [];
+      window.qaSanitize = sanitizeRichHtml;
+      const clicked = label => () => window.qaClicks.push(label);
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      if (mode === "startup") root.render(h(BootScreen, { message: "Loading game profiles..." }));
+      else if (mode === "home-carousel") {
+        function CarouselPreview() {
+          const [offset,setOffset]=React.useState(0);
+          const slots=React.useMemo(()=>homeTrendingSlots(Array.from({length:12},(_,id)=>({id,title:`Mod ${id}`}))),[]);
+          React.useEffect(()=>{const timer=setInterval(()=>setOffset(value=>(value+2)%slots.featured.length),7000);return()=>clearInterval(timer);},[]);
+          const card=(mod,className)=>h(ModCard,{key:mod.id,className:`home-showcase-card ${className}`,title:mod.title,source:'modworkshop',sourceLabel:'ModWorkshop',author:'Test author',thumbnailUrl:previewArtwork,tags:['Quality of Life','Audio'],onOpen:clicked('open'),primaryAction:{label:'Install',onClick:clicked('install')}});
+          return h('main',{style:{padding:20}},h('div',{className:'home-trending-carousel'},h('div',{className:'home-feature-panels'},...[0,1].map(step=>card(slots.featured[(offset+step)%slots.featured.length],'home-feature-hero-card'))),h('div',{className:'home-feature-controls'},h('button',{onClick:()=>setOffset(value=>(value+2)%slots.featured.length),'aria-label':'Next trending mods'},'Next')),h('div',{className:'home-trending-grid home-trending-mini-grid'},...slots.secondary.map(mod=>card(mod,'home-compact-feature-card')))));
+        }
+        root.render(h(CarouselPreview));
+      }
+      else if (mode === "home-cards") root.render(h("main",{style:{padding:20}},h("div",{className:"home-pro-card-grid home-storefront-grid"},...["home-feature-hero-card","home-feature-card","home-compact-feature-card"].map((kind,index)=>h(ModCard,{key:kind,className:`home-showcase-card ${kind}`,title:"A featured mod with a long title for consistency testing",source:"modworkshop",sourceLabel:"ModWorkshop",author:"Test author",thumbnailUrl:previewArtwork,tags:["Quality of Life","Audio","Custom Model","Work In Progress"],likes:1350,downloads:42000,views:178000,version:"1.8.2",updatedLabel:"Updated 113d ago",onOpen:clicked("open"),primaryAction:{label:index===1?"Update":index===2?"Uninstall":"Install",variant:index===1?"update":index===2?"danger":"default",onClick:clicked("install")},moreActions:h("button",{type:"button",onClick:clicked("more")},"Visit source")})))));
+      else if (mode === "titlebar") root.render(h(WindowTitleBar,{activePage:"installed", appUpdate:options.has("update")?{updateAvailable:true,latestVersion:"2.0.1"}:null, updateBusy:options.has("busy"),onCheckUpdate:clicked("check-update"),onInstallUpdate:clicked("install-update"),currentGameProfile:titlebarProfile,profileRuntime:options.has("ready")?{profileId:titlebarProfile.profileId,ready:true,executable:"sandbox.exe",gameName:titlebarProfile.displayName}:null,profileSwitching:options.has("switching")}));
+      else if (mode === "installed") root.render(h("main",{className:"installed-clean-page",style:{padding:20}},h("div",{className:"installed-library-grid"},...Array.from({length:5},(_,index)=>h(InstalledModCard,{key:index,title:index===1 ? "123_The_Emote_Wheel_Mod_70070_with_a_really_long_title" : "Custom mod artwork",source:index===1?"local":"modworkshop",sourceLabel:index===1?"Local":"ModWorkshop",author:"A very long author name for overflow testing",version:"1.8.2",thumbnailUrl:index===1?null:previewArtwork,tags:["Quality of Life","Audio","Custom Model","Work In Progress","A deliberately very long tag label that should remain readable in the expanded list"],updatedLabel:"Updated 113d ago",enabled:index!==2,onOpen:clicked("open"),action:h(ModToggleButton,{enabled:index!==2,busy:index===4,onClick:clicked("toggle")}),moreActions:h("button",{type:"button",onClick:clicked("more")},"Visit source")})))));
+      else if (mode === "sidebar") root.render(h("div", {className:"app-shell"}, h("header",null), h("div", {className:"app-body"}, h(Sidebar, {activePage:"browse", currentGameProfile:BUILTIN_GAME_PROFILES[4], onChangePage:clicked("navigation"), taskProgress:{active:true,label:"Download mod",detail:"Checking archive contents and install routes",progress:options.has("progress") ? Number(options.get("progress")) : null}}), h("main", {className:"app-main"}))));
+      else if (mode === "detail") root.render(h(UnifiedModPage, {backLabel:"Back",onBack:clicked("back"),source:"modworkshop",sourceLabel:"ModWorkshop",sourceAccent:"MW",title:"A mod with a deliberately long name for layout testing",author:"Test Author",version:"1.8.2",game:"payday-3",tags:["Quality of Life","Audio","Custom Model"],description:'<h2>Description</h2><p>Safe formatted content.</p><script>alert(1)<\/script>',actions:[{key:"install",label:"Install",onClick:clicked("install"),variant:"install"}],fileGroups:[{id:"main",title:"Main Files",rows:[{id:"file",title:"Latest version",actions:h("button",{type:"button",onClick:clicked("file-install")},"Install file")}]}]}));
+      else root.render(h("main",{style:{padding:20,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(260px,100%),1fr))",gap:16}}, ...["modworkshop","nexus","local"].map(source=>h(ModCard,{key:source,className:source === "local" ? "installed-card-shell" : "source-mod-card cleaner-card lightweight-card",title:"A compact mod card with a long title",source,sourceLabel:source,author:"Test Author",version:"1.8.2",tags:["Quality of Life","Audio","Custom Model","Work In Progress"],onOpen:clicked("open"),primaryAction:{label:"Install",onClick:clicked("install")},moreActions:h("button",{type:"button",onClick:clicked("more")},"Visit source")}))));
+    </script>
+  </body>
+</html>

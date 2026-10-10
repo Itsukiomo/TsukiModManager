@@ -1,10 +1,30 @@
 import "./BrowsePage.css";
+
+interface EmbeddedBrowserStatus {
+  open: boolean;
+  url?: string | null;
+}
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import type { AppSettings } from "../../models/settings";
-import { CardMoreMenu } from "../../components/CardMoreMenu";
+import type { GameProfile, GameProfileSourceDefinition } from "../../models/gameProfiles";
+import { profileHasConfiguredSources, type ActiveProfileRuntime } from "../../models/profileRuntime";
+import { modWorkshopCardMatchesSource, profileBrowseSessionIdentity, profileSourceCacheIdentity, profileSourcesFromConfig } from "../../models/profileSources";
+import type { ProfileSettings, ProfileSourceId } from "../../models/profileSettings";
+import { normalizeProfileSettings } from "../../models/profileSettings";
+import { ModCard } from "../../components/ModCard";
+import { UnifiedModPage } from "../../components/UnifiedModPage";
+import type { UnifiedAction, UnifiedDependencyItem, UnifiedFileGroup, UnifiedInfoItem, UnifiedTimelineItem } from "../../components/UnifiedModPage";
+import { DependencyActions, DependencyName } from "../../components/DependencyActions";
+import { buildDependencyGraph, dependencySourceLabel, dependencyToSourceSummary, enrichDependency, type DependencyDefinition, type DependencySourceKind } from "../../models/dependency";
 import { buildNexusBrowseKey, normalizeNexusId } from "../../sources/nexus/ids";
+import { readThumbnailFailures, thumbnailRecentlyFailed, writeThumbnailFailures } from "../../utils/thumbnailFailures";
+import { applyKnownSourceAuthor, displaySourceAuthor, displaySourceTitle, rememberSourceAuthorMetadata } from "../../utils/sourceAuthorCache";
+import {
+  readModWorkshopCategoryCacheEntry,
+  writeModWorkshopCategoryCache,
+} from "../../utils/modWorkshopCategoryCache";
 import type {
   ModSourceKind,
   SourceModDetail,
@@ -13,22 +33,38 @@ import type {
   StagedDownloadResult,
   InstallApplyResult,
   InstalledSourceMatch,
+  SourceCategory,
 } from "../../models/source";
 
-type BrowseTab = ModSourceKind;
-type SortMode = "recent" | "updated" | "added" | "popular" | "downloads" | "liked";
+type BrowseTab = ModSourceKind | "custom";
+type BrowsePageNumbers = Record<BrowseTab, number>;
+type BrowsePageBooleans = Record<BrowseTab, boolean>;
+type SortMode = "published_at" | "bumped_at" | "best_match" | "downloads" | "likes" | "views" | "score" | "name";
 type ViewMode = "list" | "detail";
 
-const SOURCE_CACHE_VERSION = "v1.8.39-author-home-comment-cache";
+const BROWSE_PAGE_SIZE = 20;
+const SOURCE_CACHE_VERSION = "v2.0.1-gallery-browse-cache";
 const SOURCE_CACHE_TTL_MS = 1000 * 60 * 5;
+const MODWORKSHOP_GAME_ID = "payday-3";
+const DEFAULT_SORT: SortMode = "bumped_at";
+type CategoryStatus = "idle" | "loading" | "loaded" | "cached" | "cache-refresh-failed" | "unavailable" | "failed";
 
-const sortOptions: Array<{ id: SortMode; label: string }> = [
-  { id: "recent", label: "Recent" },
-  { id: "updated", label: "Updated" },
-  { id: "added", label: "Added" },
-  { id: "popular", label: "Popular" },
-  { id: "downloads", label: "Downloads" },
-  { id: "liked", label: "Liked" },
+const modWorkshopSortOptions: Array<{ id: SortMode; label: string }> = [
+  { id: "published_at", label: "Newest" },
+  { id: "bumped_at", label: "Recently Updated" },
+  { id: "best_match", label: "Best Match" },
+  { id: "downloads", label: "Most Downloaded" },
+  { id: "likes", label: "Most Liked" },
+  { id: "views", label: "Most Viewed" },
+  { id: "score", label: "Highest Rated" },
+  { id: "name", label: "Name" },
+];
+
+const nexusSortOptions: Array<{ id: SortMode; label: string }> = [
+  { id: "bumped_at", label: "Recently Updated" },
+  { id: "published_at", label: "Newest" },
+  { id: "downloads", label: "Most Downloaded" },
+  { id: "likes", label: "Most Liked" },
 ];
 
 function modMatchesQuery(mod: SourceModSummary, query: string) {
@@ -38,7 +74,6 @@ function modMatchesQuery(mod: SourceModSummary, query: string) {
   const haystack = [
     mod.name,
     mod.author ?? "",
-    mod.shortDescription ?? "",
     mod.pageUrl ?? "",
     mod.version ?? "",
     ...(mod.tags ?? []),
@@ -71,53 +106,60 @@ interface PendingDelete {
   busyId: string;
 }
 
-function sourceLabel(source: BrowseTab) {
-  return source === "modworkshop" ? "ModWorkshop" : "Nexus";
+interface BrowseSessionSnapshot {
+  scope: string;
+  profileId: string;
+  activeSourceId: string;
+  activeTab: BrowseTab;
+  sortMode: SortMode;
+  categoryId: string;
+  categoryLabel: string;
+  view: ViewMode;
+  mods: SourceModSummary[];
+  pages: BrowsePageNumbers;
+  hasMore: BrowsePageBooleans;
+  status: string;
+  searchQuery: string;
+  sourceSearchQuery: string;
+  activeModWorkshopSearch: string;
+  activeNexusSearch: string;
+  selectedMod: SourceModDetail | null;
+  sourceMatches: Record<string, InstalledSourceMatch>;
+  browseCardsLive: boolean;
+  cacheNote: string;
 }
 
-function inferAuthorFromModName(name?: string | null) {
-  const value = String(name ?? "").replace(/&#x2F;/gi, "/").replace(/&amp;/gi, "&").trim();
-  const patterns = [
-    /\s+by\s+([^()\[\]{}|•·<>]+)$/i,
-    /\s+by\s+([^()\[\]{}|•·<>]+)\s*[-–—]/i,
-  ];
+let browseSessionSnapshot: BrowseSessionSnapshot | null = null;
 
-  for (const pattern of patterns) {
-    const author = value.match(pattern)?.[1]?.trim().replace(/\s+/g, " ");
-    if (author && author.length <= 48) return author;
-  }
+function browsePageNumbers(value?: Partial<BrowsePageNumbers> | null): BrowsePageNumbers {
+  return { modworkshop: 0, nexus: 0, github: 0, custom: 0, ...(value ?? {}) };
+}
 
-  return null;
+function browsePageBooleans(value?: Partial<BrowsePageBooleans> | null): BrowsePageBooleans {
+  return { modworkshop: true, nexus: true, github: false, custom: false, ...(value ?? {}) };
+}
+
+function sourceLabel(source: BrowseTab) {
+  if (source === "modworkshop") return "ModWorkshop";
+  if (source === "nexus") return "Nexus";
+  if (source === "github") return "GitHub";
+  return "Custom Browser";
 }
 
 function displayAuthor(mod: SourceModSummary | SourceModDetail) {
-  return (mod.author && mod.author.trim()) || inferAuthorFromModName(mod.name) || null;
+  return displaySourceAuthor(mod);
 }
 
 function displayModTitle(mod: SourceModSummary | SourceModDetail) {
-  const author = displayAuthor(mod);
-  if (!author) return mod.name;
-  const escapedAuthor = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return mod.name.replace(new RegExp(`\\s+by\\s+${escapedAuthor}\\s*$`, "i"), "").trim() || mod.name;
+  return displaySourceTitle(mod);
 }
 
-function cardDisplayAuthor(mod: SourceModSummary) {
-  const direct = displayAuthor(mod);
-  if (direct) return direct;
-
-  const cached = readDetailCache(mod);
-  if (cached) return displayAuthor(cached);
-
-  return null;
+function rememberSourceAuthor(mod: SourceModSummary | SourceModDetail) {
+  rememberSourceAuthorMetadata(mod);
 }
 
-function cardDisplayTitle(mod: SourceModSummary) {
-  const cached = readDetailCache(mod);
-  return displayModTitle(cached ?? mod);
-}
-
-function cardDisplayDescription(mod: SourceModSummary) {
-  return friendlyCardDescription(mod) || "";
+function withKnownAuthor<T extends SourceModSummary>(mod: T): T {
+  return applyKnownSourceAuthor(mod);
 }
 
 function reportTaskProgress(label: string, progress: number | null = null, detail = "") {
@@ -153,6 +195,32 @@ function recordCachePolicyDiagnostic(details: {
   });
 }
 
+function recordModWorkshopCategoryDiagnostic(details: {
+  profileId: string;
+  profileName: string;
+  gameId: string;
+  status: "success" | "warning" | "failed";
+  reason: string;
+  cacheAvailable: boolean;
+  cacheUsed: boolean;
+}) {
+  void invoke<string>("record_runtime_process_diagnostic", {
+    label: "ModWorkshop Categories",
+    status: details.status,
+    reason: details.reason,
+    details: [
+      `Profile ID: ${details.profileId}`,
+      `Profile name: ${details.profileName}`,
+      `ModWorkshop game ID: ${details.gameId}`,
+      `Cache available: ${details.cacheAvailable ? "yes" : "no"}`,
+      `Cache used: ${details.cacheUsed ? "yes" : "no"}`,
+      `Request route: https://api.modworkshop.net/games/${details.gameId}/categories`,
+    ],
+  }).catch(() => {
+    // Diagnostics must never affect Browse.
+  });
+}
+
 function invokeWithTimeout<T>(command: string, args: Record<string, unknown>, timeoutMs: number, timeoutMessage: string): Promise<T> {
   return Promise.race([
     invoke<T>(command, args),
@@ -161,22 +229,123 @@ function invokeWithTimeout<T>(command: string, args: Record<string, unknown>, ti
 }
 
 function sourceAccent(source: BrowseTab) {
-  return source === "modworkshop" ? "MW" : "NX";
+  if (source === "modworkshop") return "MW";
+  if (source === "nexus") return "NX";
+  if (source === "github") return "GH";
+  return "WEB";
 }
 
-void sourceAccent;
+function normalizeBrowserUrl(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return "";
+  try {
+    const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return new URL(withProtocol).toString();
+  } catch {
+    return "";
+  }
+}
 
-function cacheKey(source: BrowseTab, sort: SortMode) {
+function parseBrowserUrl(value?: string | null) {
+  const normalized = normalizeBrowserUrl(value);
+  if (!normalized) return null;
+  try {
+    return new URL(normalized);
+  } catch {
+    return null;
+  }
+}
+
+function browserHostMatches(url: URL, suffix: string) {
+  const host = url.hostname.toLowerCase();
+  const clean = suffix.toLowerCase();
+  return host === clean || host.endsWith(`.${clean}`);
+}
+
+function parseNexusDomainFromUrl(value?: string | null) {
+  const url = parseBrowserUrl(value);
+  if (!url || !browserHostMatches(url, "nexusmods.com")) return "";
+  const parts = url.pathname.split("/").filter(Boolean);
+  const domainIndex = parts[0]?.toLowerCase() === "games" ? 1 : 0;
+  return parts[domainIndex]?.toLowerCase() ?? "";
+}
+
+function parseModWorkshopSlugFromUrl(value?: string | null) {
+  const url = parseBrowserUrl(value);
+  if (!url || !browserHostMatches(url, "modworkshop.net")) return "";
+  const parts = url.pathname.split("/").filter(Boolean);
+  const gameRouteIndex = parts.findIndex((part) => ["g", "game", "games"].includes(part.toLowerCase()));
+  const candidate = gameRouteIndex >= 0 ? parts[gameRouteIndex + 1] : "";
+  return candidate && !/^\d+$/.test(candidate) ? decodeURIComponent(candidate).toLowerCase() : "";
+}
+
+function firstConfiguredUrl(...values: Array<string | null | undefined>) {
+  return values.map(normalizeBrowserUrl).find(Boolean) ?? "";
+}
+
+function normalizeAllowedDomain(value: string) {
+  const trimmed = value.trim().replace(/^\*\./, "").replace(/^https?:\/\//i, "").split("/")[0]?.toLowerCase() ?? "";
+  return trimmed.replace(/:\d+$/, "");
+}
+
+function browserUrlAllowed(url: string, allowedDomains: string[]) {
+  if (!allowedDomains.length) return true;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return allowedDomains
+      .map(normalizeAllowedDomain)
+      .filter(Boolean)
+      .some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+function normalizeSortMode(value: unknown, source: BrowseTab = "modworkshop"): SortMode {
+  const text = String(value ?? "").trim();
+  const legacy: Record<string, SortMode> = {
+    recent: "bumped_at",
+    updated: "bumped_at",
+    added: "published_at",
+    popular: "downloads",
+    liked: "likes",
+  };
+  const normalized = (legacy[text] ?? text) as SortMode;
+  const supported = sortOptionsForSource(source);
+  if (supported.length === 0) return DEFAULT_SORT;
+  return supported.some((option) => option.id === normalized) ? normalized : DEFAULT_SORT;
+}
+
+function sortOptionsForSource(source: BrowseTab) {
+  if (source === "modworkshop") return modWorkshopSortOptions;
+  if (source === "nexus") return nexusSortOptions;
+  return [];
+}
+
+function cacheKey(profileId: string, source: BrowseTab, sourceGameKey: string, sort: SortMode, page = 1, query = "", categoryId = "") {
+  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedCategory = categoryId.trim().toLowerCase();
+
   if (source === "nexus") {
-    return `tsuki-source-cache:${SOURCE_CACHE_VERSION}:${buildNexusBrowseKey({
-      gameDomainName: "payday3",
+    return `tsuki-source-cache:${SOURCE_CACHE_VERSION}:${profileId}:${buildNexusBrowseKey({
+      gameDomainName: sourceGameKey || profileId,
       sort,
-      offset: 0,
-      count: 24,
-    })}`;
+      offset: (Math.max(1, page) - 1) * BROWSE_PAGE_SIZE,
+      count: BROWSE_PAGE_SIZE,
+    })}:q=${encodeURIComponent(normalizedQuery)}:category=${encodeURIComponent(normalizedCategory)}`;
   }
 
-  return `tsuki-source-cache:${SOURCE_CACHE_VERSION}:${source}:payday3:${sort}`;
+  return [
+    "tsuki-source-cache",
+    SOURCE_CACHE_VERSION,
+    profileId,
+    source,
+    sourceGameKey || MODWORKSHOP_GAME_ID,
+    `page=${Math.max(1, page)}`,
+    `query=${encodeURIComponent(normalizedQuery)}`,
+    `sort=${sort}`,
+    `category=${encodeURIComponent(normalizedCategory)}`,
+  ].join(":");
 }
 
 function modTimeValue(mod: SourceModSummary) {
@@ -240,6 +409,63 @@ function sourceUpdatedLabel(mod: SourceModSummary) {
   return mod.updatedAt ? `Updated ${String(mod.updatedAt)}` : null;
 }
 
+function normalizedTagKey(tag: string) {
+  return tag.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function sourceCardTags(mod: SourceModSummary) {
+  const base = mod.tags ?? [];
+  const seen = new Set<string>();
+  const hidden = new Set(["nexus", "nexus mods", "modworkshop", "mod workshop", "payday3", "payday 3"]);
+  const result: string[] = [];
+
+  for (const tag of base) {
+    const clean = String(tag ?? "").trim();
+    if (!clean) continue;
+
+    const key = normalizedTagKey(clean);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (hidden.has(key)) continue;
+    result.push(clean);
+    if (result.length >= 8) break;
+  }
+
+  return result;
+}
+
+function lightweightBrowseMod(mod: SourceModSummary): SourceModSummary {
+  const enriched = withKnownAuthor(mod);
+  return {
+    source: enriched.source,
+    sourceId: enriched.sourceId,
+    uid: enriched.uid,
+    gameId: enriched.gameId,
+    nexus: enriched.nexus,
+    name: displayModTitle(enriched),
+    author: displayAuthor(enriched) ?? enriched.author ?? null,
+    authorUsername: enriched.authorUsername ?? null,
+    authorUserId: enriched.authorUserId ?? null,
+    authorProfileUrl: enriched.authorProfileUrl ?? null,
+    authorAvatarUrl: enriched.authorAvatarUrl ?? null,
+    version: enriched.version ?? null,
+    thumbnailUrl: enriched.thumbnailUrl ?? null,
+    bannerUrl: enriched.bannerUrl ?? null,
+    pageUrl: enriched.pageUrl ?? null,
+    updatedAt: enriched.updatedAt ?? null,
+    downloads: enriched.downloads ?? null,
+    likes: enriched.likes ?? null,
+    views: enriched.views ?? null,
+    shortDescription: null,
+    tags: Array.isArray(enriched.tags) ? enriched.tags.slice(0, 8) : [],
+  };
+}
+
+function lightweightBrowseMods(mods: SourceModSummary[]) {
+  return mods.map(lightweightBrowseMod);
+}
+
 function sortBrowseMods(mods: SourceModSummary[], sort: SortMode) {
   const copy = [...mods];
 
@@ -247,10 +473,12 @@ function sortBrowseMods(mods: SourceModSummary[], sort: SortMode) {
     const timeDelta = modTimeValue(b) - modTimeValue(a);
     const idDelta = sourceIdNumber(b) - sourceIdNumber(a);
 
-    if (sort === "downloads" || sort === "popular") return (b.downloads ?? 0) - (a.downloads ?? 0) || timeDelta || idDelta;
-    if (sort === "liked") return (b.likes ?? 0) - (a.likes ?? 0) || timeDelta || idDelta;
-    if (sort === "added") return idDelta || timeDelta;
-    if (sort === "updated" || sort === "recent") return timeDelta;
+    if (sort === "downloads" || sort === "score") return (b.downloads ?? 0) - (a.downloads ?? 0) || timeDelta || idDelta;
+    if (sort === "views") return (b.views ?? 0) - (a.views ?? 0) || timeDelta || idDelta;
+    if (sort === "likes") return (b.likes ?? 0) - (a.likes ?? 0) || timeDelta || idDelta;
+    if (sort === "published_at") return idDelta || timeDelta;
+    if (sort === "bumped_at" || sort === "best_match") return timeDelta;
+    if (sort === "name") return a.name.localeCompare(b.name) || timeDelta;
     return timeDelta || a.name.localeCompare(b.name);
   });
 
@@ -261,16 +489,16 @@ function sortBrowseMods(mods: SourceModSummary[], sort: SortMode) {
 function orderBrowseModsForSource(mods: SourceModSummary[], source: BrowseTab, sort: SortMode) {
   const clean = cleanMods(mods).filter((mod) => mod.source === source);
 
-  if (source === "modworkshop" && (sort === "recent" || sort === "updated")) {
+  if (source === "modworkshop" && (sort === "published_at" || sort === "bumped_at" || sort === "best_match")) {
     return clean;
   }
 
   return sortBrowseMods(clean, sort);
 }
 
-function readCache(source: BrowseTab, sort: SortMode): CachedSourceMods | null {
+function readCache(profileId: string, source: BrowseTab, sourceGameKey: string, sort: SortMode, page = 1, query = "", categoryId = ""): CachedSourceMods | null {
   try {
-    const raw = window.localStorage.getItem(cacheKey(source, sort));
+    const raw = window.localStorage.getItem(cacheKey(profileId, source, sourceGameKey, sort, page, query, categoryId));
     if (!raw) return null;
 
     const parsed = JSON.parse(raw) as CachedSourceMods;
@@ -281,21 +509,21 @@ function readCache(source: BrowseTab, sort: SortMode): CachedSourceMods | null {
 
     return {
       ...parsed,
-      mods: orderBrowseModsForSource(parsed.mods, source, sort),
+      mods: lightweightBrowseMods(orderBrowseModsForSource(parsed.mods, source, sort)),
     };
   } catch {
     return null;
   }
 }
 
-function writeCache(source: BrowseTab, sort: SortMode, mods: SourceModSummary[], page: number, hasMore: boolean) {
+function writeCache(profileId: string, source: BrowseTab, sourceGameKey: string, sort: SortMode, mods: SourceModSummary[], page: number, hasMore: boolean, query = "", categoryId = "") {
   try {
-    const sorted = source === "modworkshop" && (sort === "recent" || sort === "updated")
-      ? cleanMods(mods).filter((mod) => mod.source === source).slice(0, 240)
-      : orderBrowseModsForSource(mods, source, sort).slice(0, 240);
+    const sorted = source === "modworkshop" && (sort === "published_at" || sort === "bumped_at" || sort === "best_match")
+      ? cleanMods(mods).filter((mod) => mod.source === source).slice(0, BROWSE_PAGE_SIZE)
+      : orderBrowseModsForSource(mods, source, sort).slice(0, BROWSE_PAGE_SIZE);
     window.localStorage.setItem(
-      cacheKey(source, sort),
-      JSON.stringify({ version: SOURCE_CACHE_VERSION, savedAt: Date.now(), page, hasMore, mods: sorted }),
+      cacheKey(profileId, source, sourceGameKey, sort, page, query, categoryId),
+      JSON.stringify({ version: SOURCE_CACHE_VERSION, savedAt: Date.now(), page, hasMore, mods: lightweightBrowseMods(sorted) }),
     );
   } catch {
     // Cache is optional.
@@ -327,7 +555,7 @@ function clearModWorkshopBrowseCaches() {
 }
 
 
-const DETAIL_CACHE_VERSION = "v1.8.39-fast-tabs-source-actions";
+const DETAIL_CACHE_VERSION = "v2.0.0-fast-detail-cache";
 
 function detailCacheKey(source: BrowseTab, id: string) {
   return `tsuki-source-detail:${DETAIL_CACHE_VERSION}:${source}:${id}`;
@@ -396,55 +624,6 @@ function writeDetailCache(detail: SourceModDetail) {
   }
 }
 
-const THUMBNAIL_FAIL_CACHE_KEY = "tsuki-thumbnail-failures:v0.85";
-const THUMBNAIL_RETRY_AFTER_MS = 1000 * 60 * 60 * 24;
-
-function readThumbnailFailures(): Record<string, number> {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(THUMBNAIL_FAIL_CACHE_KEY) ?? "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, number> : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeThumbnailFailures(value: Record<string, number>) {
-  try {
-    window.localStorage.setItem(THUMBNAIL_FAIL_CACHE_KEY, JSON.stringify(value));
-  } catch {
-    // Optional cache.
-  }
-}
-
-function thumbnailRecentlyFailed(url: string | null | undefined, failures: Record<string, number>) {
-  if (!url) return true;
-
-  const failedAt = failures[url];
-  if (!failedAt) return false;
-
-  return Date.now() - failedAt < THUMBNAIL_RETRY_AFTER_MS;
-}
-
-function thumbnailFallbackText(source: BrowseTab) {
-  return source === "modworkshop" ? "MW" : "NX";
-}
-
-function tagClassName(tag: string) {
-  const key = tag.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return `status-pill tag-pill tag-${key || "general"}`;
-}
-
-function friendlyCardDescription(mod: SourceModSummary) {
-  const text = shortCardDescription(mod).trim();
-  const lower = text.toLowerCase();
-
-  if (!text || lower.includes("live modworkshop payday 3 listing card") || lower.includes("no description cached")) {
-    return "";
-  }
-
-  return text;
-}
-
 function sourceFileTypeLabel(file: SourceModFile) {
   const name = file.name.toLowerCase();
   if (name.endsWith(".pak")) return "PAK";
@@ -500,76 +679,8 @@ function cleanDescription(text: string) {
 function descriptionParagraphs(text: string) {
   const cleaned = cleanDescription(text);
   if (!cleaned) return ["No description loaded."];
-
-  return cleaned
-    .split(/\n{2,}/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, 12);
+  return cleaned.split(/\n{2,}/).map((line) => line.trim()).filter(Boolean).slice(0, 24);
 }
-
-function renderLinkedText(text: string, openUrl: (url?: string | null) => void) {
-  const parts: ReactNode[] = [];
-  const pattern = /<a\s+[^>]*href=["'](https?:\/\/[^"']+)["'][^>]*>(.*?)<\/a>|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<)]+)/gi;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index));
-    const url = match[1] || match[4] || match[5];
-    const label = (match[2] || match[3] || url).replace(/<[^>]+>/g, "").trim() || url;
-    parts.push(
-      <button className="inline-description-link" type="button" key={`${url}-${match.index}`} onClick={() => openUrl(url)}>
-        {label}
-      </button>,
-    );
-    lastIndex = pattern.lastIndex;
-  }
-
-  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
-  return parts.length ? parts : text;
-}
-
-function shortCardDescription(mod: SourceModSummary) {
-  const detail = readDetailCache(mod);
-  const detailText = detail ? descriptionParagraphs(detail.description || detail.shortDescription || "").join(" ") : "";
-  const rawSummary = cleanDescription((mod as SourceModSummary & { description?: string }).description || mod.shortDescription || "");
-  const rawLower = rawSummary.toLowerCase();
-  const rawIsWeak = !rawSummary
-    || rawLower.includes("live modworkshop payday 3 listing card")
-    || rawLower.includes("loaded from the payday 3 modworkshop page")
-    || rawLower.includes("no description cached")
-    || rawLower.includes("no description exposed");
-
-  const summary = cleanDescription(rawIsWeak ? detailText : rawSummary);
-  return summary;
-}
-
-function mergedCardTags(mod: SourceModSummary) {
-  const detail = readDetailCache(mod);
-  const tags = [
-    sourceLabel(mod.source),
-    "PAYDAY 3",
-    ...(Array.isArray(mod.tags) ? mod.tags : []),
-    ...((detail && Array.isArray(detail.tags)) ? detail.tags : []),
-  ]
-    .map((tag) => tag.trim())
-    .filter(Boolean);
-
-  return [...new Set(tags)].slice(0, 8);
-}
-
-function needsCardEnrichment(mod: SourceModSummary) {
-  const description = cleanDescription(mod.shortDescription || "");
-  if (!cardDisplayAuthor(mod) && mod.source === "modworkshop") return true;
-  if (!readDetailCache(mod)) return true;
-  if (!description) return true;
-  if (description.toLowerCase().includes("loaded from the payday 3 modworkshop page")) return true;
-  if (!mod.tags || mod.tags.length <= 1) return true;
-  return false;
-}
-void needsCardEnrichment;
-
 
 function sourceShouldShowInTsukiBrowser(mod: SourceModSummary) {
   const text = [
@@ -608,8 +719,10 @@ function cleanMods(mods: SourceModSummary[]) {
     if (!sourceShouldShowInTsukiBrowser({ ...mod, name })) continue;
 
     const sourceId = mod.source === "nexus" ? normalizeNexusId(mod.sourceId) ?? String(mod.sourceId) : String(mod.sourceId);
-    const gameId = mod.source === "nexus" ? normalizeNexusId(mod.gameId ?? mod.nexus?.gameId) : null;
+    const gameId = mod.source === "nexus" ? normalizeNexusId(mod.gameId ?? mod.nexus?.gameId) : mod.gameId;
     const uid = mod.source === "nexus" ? normalizeNexusId(mod.uid ?? mod.nexus?.uid) : null;
+    const author = displayAuthor({ ...mod, name }) ?? mod.author;
+    if (author) rememberSourceAuthor({ ...mod, sourceId, name, author });
 
     unique.set(`${mod.source}-${sourceId}`, {
       ...mod,
@@ -622,7 +735,8 @@ function cleanMods(mods: SourceModSummary[]) {
         uid,
       } : mod.nexus,
       name: displayModTitle({ ...mod, name }),
-      author: displayAuthor({ ...mod, name }) ?? mod.author,
+      author,
+      shortDescription: null,
       tags: Array.isArray(mod.tags) ? mod.tags : [],
     });
   }
@@ -658,7 +772,7 @@ function liveFileDataUnavailableMessage() {
 }
 
 function newestFiles(files: SourceModFile[]) {
-  return [...files].sort((a, b) => String(b.uploadedAt ?? "").localeCompare(String(a.uploadedAt ?? "")));
+  return [...files].sort(compareSourceFilesNewest);
 }
 
 function isImageAssetFile(file: SourceModFile) {
@@ -691,10 +805,11 @@ function filterModWorkshopFileChoices(files: SourceModFile[]) {
   const hasNamedRouteFile = installable.some((file) => !isGenericModWorkshopPlaceholder(file) && fileHasRouteHint(file));
 
   if (!hasNamedRouteFile) {
-    return installable.filter((file) => !isGenericModWorkshopPlaceholder(file));
+    return newestFiles(installable).filter((file) => !isGenericModWorkshopPlaceholder(file)
+      || Boolean(file.downloadUrl && /\/download(?:\?|$)|storage\.modworkshop\.net/i.test(file.downloadUrl)));
   }
 
-  return installable.filter((file) => !isGenericModWorkshopPlaceholder(file) || fileHasRouteHint(file));
+  return newestFiles(installable).filter((file) => !isGenericModWorkshopPlaceholder(file) || fileHasRouteHint(file));
 }
 
 
@@ -762,6 +877,9 @@ function normalizedFileSeries(file: SourceModFile) {
 }
 
 function sourceFileKind(file: SourceModFile, newestMain?: SourceModFile | null, source?: ModSourceKind): SourceFileBucket {
+  const category = file.fileType?.toLowerCase();
+  if (category && ["old_version", "archived", "deleted"].includes(category)) return "old";
+  if (category && ["optional", "miscellaneous", "update"].includes(category)) return "optional";
   const text = `${file.name} ${file.version ?? ""} ${file.downloadUrl ?? ""}`.toLowerCase();
   if (/\b(old|legacy|previous|archive|archived|deprecated|outdated|unsupported)\b/.test(text)) return "old";
   if (!newestMain || file.id === newestMain.id) return "main";
@@ -785,7 +903,8 @@ function groupedSourceFiles(files: SourceModFile[], source?: ModSourceKind) {
     : newestFiles(files).filter(isInstallableSourceFile).sort(compareSourceFilesNewest);
   const newestMain = source === "modworkshop"
     ? installable[0] ?? null
-    : installable.find((file) => !/\b(optional|addon|add-on|patch|compat|plugin|extra|lite|translation|variant|old|legacy|previous|archive|deprecated)\b/i.test(`${file.name} ${file.version ?? ""}`)) ?? installable[0] ?? null;
+    : installable.find((file) => file.fileType?.toLowerCase() === "main")
+      ?? installable.find((file) => !["optional", "miscellaneous", "old_version", "archived", "deleted"].includes(file.fileType?.toLowerCase() ?? "") && !/\b(optional|addon|add-on|patch|compat|plugin|extra|lite|translation|variant|old|legacy|previous|archive|deprecated)\b/i.test(`${file.name} ${file.version ?? ""}`)) ?? installable[0] ?? null;
   const groups: Record<SourceFileBucket, SourceModFile[]> = { main: [], optional: [], old: [] };
 
   for (const file of installable) {
@@ -831,7 +950,7 @@ function sourceFileMetaLine(file: SourceModFile) {
     file.sizeLabel ?? "Unknown size",
     typeof file.downloadCount === "number" ? `${file.downloadCount.toLocaleString()} downloads` : null,
     `Uploaded ${formatSourceDate(file.uploadedAt)}`,
-  ].filter(Boolean).join(" · ");
+  ].filter(Boolean).join(" - ");
 }
 
 function matchedFileNamesForSourceFile(file: SourceModFile, match?: InstalledSourceMatch | null) {
@@ -864,54 +983,376 @@ function MiniProgress({ active }: { active: boolean }) {
   );
 }
 
-function ResultNotice({ result }: { result: StagedDownloadResult }) {
+function ResultNotice({ result, profileId }: { result: StagedDownloadResult; profileId: string }) {
   const failed = result.archiveKind === "download-failed";
+  const [handoffStatus, setHandoffStatus] = useState<string | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [manager, setManager] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    setManager(null);
+    if (!failed && !result.canInstallLater) {
+      void invoke<string | null>("get_external_manager_target", { profileId, stagedFilePath: result.stagedFilePath })
+        .then(value => { if (current) setManager(value); }).catch(() => {});
+    }
+    return () => { current = false; };
+  }, [profileId, result.stagedFilePath, result.canInstallLater, failed]);
+  const handoff = async () => {
+    setHandoffBusy(true);
+    try { setHandoffStatus(await invoke<string>("prepare_external_manager_handoff", { profileId, stagedFilePath: result.stagedFilePath })); }
+    catch (error) { setHandoffStatus(String(error)); }
+    finally { setHandoffBusy(false); }
+  };
   return (
     <div className={`safe-result ${failed ? "failed" : ""}`}>
       <strong>{failed ? "Failed" : "Staged"}</strong>
       <span>{result.fileName}</span>
-      <small>{failed ? result.warnings.join(" ") : `${result.archiveKind} · ${result.sizeBytes.toLocaleString()} bytes`}</small>
+      <small>{failed ? result.warnings.join(" ") : `${result.archiveKind} - ${result.sizeBytes.toLocaleString()} bytes`}</small>
+      {!failed && !result.canInstallLater && <small>{result.warnings.join(" ") || "Automatic installation is unavailable for this package. Review its required loader and authored installation instructions."}</small>}
+      {!failed && !result.canInstallLater && manager && <button type="button" className="primary-button" disabled={handoffBusy} onClick={() => void handoff()}>{handoffBusy ? "Preparing..." : `Prepare for ${manager}`}</button>}
+      {handoffStatus && <small role="status">{handoffStatus}</small>}
     </div>
   );
 }
+interface BrowsePageProps {
+  initialMod?: SourceModSummary | null;
+  onInitialModConsumed?: () => void;
+  currentGameProfile: GameProfile;
+  profileRuntime?: ActiveProfileRuntime | null;
+  profileSwitching?: boolean;
+}
 
-export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initialMod?: SourceModSummary | null; onInitialModConsumed?: () => void }) {
-  const [activeTab, setActiveTab] = useState<BrowseTab>("modworkshop");
-  const [sortMode, setSortMode] = useState<SortMode>("recent");
-  const [view, setView] = useState<ViewMode>("list");
-  const [mods, setMods] = useState<SourceModSummary[]>([]);
-  const [pages, setPages] = useState<Record<BrowseTab, number>>({ modworkshop: 0, nexus: 0 });
-  const [hasMore, setHasMore] = useState<Record<BrowseTab, boolean>>({ modworkshop: true, nexus: true });
+export function BrowsePage({ initialMod = null, onInitialModConsumed, currentGameProfile, profileRuntime, profileSwitching = false }: BrowsePageProps) {
+  const profileId = currentGameProfile.profileId;
+  const [profileSourceSettings, setProfileSourceSettings] = useState<ProfileSettings | null>(null);
+  const runtimeSourceConfig = profileRuntime?.sourceConfig ?? currentGameProfile.sourceConfig ?? {};
+  const gameName = profileRuntime?.gameName || currentGameProfile.displayName || "Current game";
+  const gameInstalled = currentGameProfile.installation?.installed === true;
+  const sourceInstallsReady = currentGameProfile.sourceInstallSupport === "ready";
+  const downloadsEnabled = gameInstalled && sourceInstallsReady;
+  const downloadsBlockedMessage = !gameInstalled
+    ? `${gameName} is not installed. Browsing is available, but downloads and installs are disabled.`
+    : `Downloads for ${gameName} stay disabled until its profile install rules finish validation.`;
+  const sessionScope = profileBrowseSessionIdentity(profileId, currentGameProfile.gameVersion, runtimeSourceConfig);
+  const restoredSession = browseSessionSnapshot?.scope === sessionScope ? browseSessionSnapshot : null;
+  const explicitSourceSettings = profileSourceSettings?.enabledSources ?? [];
+  const sourceAllowed = (source: ProfileSourceId) => explicitSourceSettings.length === 0 || explicitSourceSettings.includes(source);
+  const configuredSources = useMemo(
+    () => profileSourcesFromConfig(runtimeSourceConfig, gameName).filter((source) => sourceAllowed(source.provider === "custom" ? "custom" : source.provider)),
+    [explicitSourceSettings.join("|"), gameName, runtimeSourceConfig],
+  );
+  const initialSource = configuredSources.find((source) => source.id === restoredSession?.activeSourceId) ?? configuredSources[0] ?? null;
+  const [activeSourceId, setActiveSourceId] = useState(() => initialSource?.id ?? "");
+  const activeSource = configuredSources.find((source) => source.id === activeSourceId) ?? configuredSources[0] ?? null;
+  const sourceTabFor = (source?: GameProfileSourceDefinition | null): BrowseTab => source?.browseMode === "api"
+    ? source.provider === "custom" ? "custom" : source.provider
+    : "custom";
+  const configuredNexusDomain = activeSource?.provider === "nexus"
+    ? activeSource.providerSlug || parseNexusDomainFromUrl(activeSource.gamePageUrl) || parseNexusDomainFromUrl(activeSource.listingUrl) || parseNexusDomainFromUrl(activeSource.startUrl)
+    : runtimeSourceConfig.nexusDomain || parseNexusDomainFromUrl(runtimeSourceConfig.nexusGamePageUrl) || parseNexusDomainFromUrl(runtimeSourceConfig.nexusCategoryUrl) || parseNexusDomainFromUrl(runtimeSourceConfig.nexusEmbeddedStartUrl);
+  const configuredModWorkshopSlug = activeSource?.provider === "modworkshop"
+    ? activeSource.providerSlug || parseModWorkshopSlugFromUrl(activeSource.gamePageUrl) || parseModWorkshopSlugFromUrl(activeSource.listingUrl) || parseModWorkshopSlugFromUrl(activeSource.startUrl)
+    : runtimeSourceConfig.modworkshopSlug || parseModWorkshopSlugFromUrl(runtimeSourceConfig.modworkshopGamePageUrl) || parseModWorkshopSlugFromUrl(runtimeSourceConfig.modworkshopCategoryUrl) || parseModWorkshopSlugFromUrl(runtimeSourceConfig.modworkshopEmbeddedStartUrl);
+  const hasModWorkshopSource = configuredSources.some((source) => source.provider === "modworkshop" && source.browseMode === "api");
+  const hasNexusSource = configuredSources.some((source) => source.provider === "nexus" && source.browseMode === "api");
+  const customBrowserStartUrl = normalizeBrowserUrl(activeSource?.startUrl || activeSource?.listingUrl || activeSource?.gamePageUrl || runtimeSourceConfig.customBrowserStartUrl || "");
+  const customBrowserAllowedDomains = activeSource?.allowedDomains?.length ? activeSource.allowedDomains : runtimeSourceConfig.customBrowserAllowedDomains ?? [];
+  const customBrowserName = activeSource?.displayName || "Custom Browser";
+  const customBrowserDomainList = customBrowserAllowedDomains.map(normalizeAllowedDomain).filter(Boolean);
+  const hasCustomBrowserSource = configuredSources.some((source) => source.browseMode !== "api");
+  const hasConfiguredSources = profileHasConfiguredSources(currentGameProfile) || hasModWorkshopSource || hasNexusSource || hasCustomBrowserSource;
+  const modWorkshopGameKey = configuredModWorkshopSlug || activeSource?.providerGameId || runtimeSourceConfig.modworkshopGameId || currentGameProfile.gameKey || profileId;
+  const modWorkshopCategoryKey = `${activeSourceId || "legacy"}:${modWorkshopGameKey}`;
+  const nexusGameDomain = configuredNexusDomain || null;
+  const nexusGameKey = configuredNexusDomain || activeSource?.providerGameId || runtimeSourceConfig.nexusGameId || currentGameProfile.gameKey || profileId;
+  const exactSourceCacheKey = activeSource ? profileSourceCacheIdentity(profileId, activeSource) : profileId;
+  const sourceGameKeyFor = (source: BrowseTab) => source === "nexus" ? `${exactSourceCacheKey}:${nexusGameKey}` : source === "modworkshop" ? `${exactSourceCacheKey}:${modWorkshopGameKey}` : exactSourceCacheKey;
+  const sourceStartUrlFor = (source: BrowseTab) => {
+    if (activeSource && sourceTabFor(activeSource) === source) {
+      return firstConfiguredUrl(activeSource.startUrl, activeSource.listingUrl, activeSource.gamePageUrl);
+    }
+    if (source === "nexus") {
+      return firstConfiguredUrl(
+        runtimeSourceConfig.nexusEmbeddedStartUrl,
+        runtimeSourceConfig.nexusCategoryUrl,
+        runtimeSourceConfig.nexusGamePageUrl,
+        configuredNexusDomain ? `https://www.nexusmods.com/${configuredNexusDomain}/mods` : "",
+      );
+    }
+    if (source === "modworkshop") {
+      return firstConfiguredUrl(
+        runtimeSourceConfig.modworkshopEmbeddedStartUrl,
+        runtimeSourceConfig.modworkshopCategoryUrl,
+        runtimeSourceConfig.modworkshopGamePageUrl,
+        configuredModWorkshopSlug ? `https://modworkshop.net/g/${configuredModWorkshopSlug}/mods` : "",
+      );
+    }
+    return customBrowserStartUrl;
+  };
+  const restoredSessionHasCards = Boolean(restoredSession?.mods.length);
+  const restoredSessionRef = useRef(restoredSessionHasCards);
+  const [activeTab, setActiveTab] = useState<BrowseTab>(() => initialSource ? sourceTabFor(initialSource) : restoredSession?.activeTab ?? "modworkshop");
+  const [sortMode, setSortMode] = useState<SortMode>(() => normalizeSortMode(restoredSession?.sortMode ?? DEFAULT_SORT, restoredSession?.activeTab ?? "modworkshop"));
+  const [categoryId, setCategoryId] = useState(() => restoredSession?.categoryId ?? "");
+  const [categoryLabel, setCategoryLabel] = useState(() => restoredSession?.categoryLabel ?? "");
+  const [view, setView] = useState<ViewMode>(() => restoredSession?.view ?? "list");
+  const [mods, setMods] = useState<SourceModSummary[]>(() => restoredSession?.mods ?? []);
+  const [pages, setPages] = useState<BrowsePageNumbers>(() => browsePageNumbers(restoredSession?.pages));
+  const [hasMore, setHasMore] = useState<BrowsePageBooleans>(() => browsePageBooleans(restoredSession?.hasMore));
   const [loadingSource, setLoadingSource] = useState<BrowseTab | null>(null);
-  const [status, setStatus] = useState("Safe Browse is ready.");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [sourceSearchQuery, setSourceSearchQuery] = useState("");
-  const [activeModWorkshopSearch, setActiveModWorkshopSearch] = useState("");
+  const [status, setStatus] = useState(() => restoredSession?.status ?? "Safe Browse is ready.");
+  const [searchQuery, setSearchQuery] = useState(() => restoredSession?.searchQuery ?? "");
+  const [sourceSearchQuery, setSourceSearchQuery] = useState(() => restoredSession?.sourceSearchQuery ?? "");
+  const [activeModWorkshopSearch, setActiveModWorkshopSearch] = useState(() => restoredSession?.activeModWorkshopSearch ?? "");
   const [, setModWorkshopSearchPage] = useState(0);
-  const [activeNexusSearch, setActiveNexusSearch] = useState("");
+  const [activeNexusSearch, setActiveNexusSearch] = useState(() => restoredSession?.activeNexusSearch ?? "");
   const [sourceSearching, setSourceSearching] = useState(false);
-  const [selectedMod, setSelectedMod] = useState<SourceModDetail | null>(null);
+  const [selectedMod, setSelectedMod] = useState<SourceModDetail | null>(() => restoredSession?.selectedMod ?? null);
   const [detailLoadingKey, setDetailLoadingKey] = useState<string | null>(null);
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
-  const [sourceDetailTab, setSourceDetailTab] = useState<"description" | "files" | "changelog" | "comments" | "images">("description");
   const [installPickerMod, setInstallPickerMod] = useState<SourceModDetail | null>(null);
+  const [installPickerReplacementFiles, setInstallPickerReplacementFiles] = useState<string[]>([]);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [results, setResults] = useState<StagedDownloadResult[]>([]);
-  const [sourceMatches, setSourceMatches] = useState<Record<string, InstalledSourceMatch>>({});
+  const [sourceMatches, setSourceMatches] = useState<Record<string, InstalledSourceMatch>>(() => restoredSession?.sourceMatches ?? {});
   const [failedImages, setFailedImages] = useState<Record<string, number>>(() => readThumbnailFailures());
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
-  const [cacheNote, setCacheNote] = useState("");
-  const [browseCardsLive, setBrowseCardsLive] = useState(false);
+  const [cacheNote, setCacheNote] = useState(() => restoredSession?.cacheNote ?? "");
+  const [browseCardsLive, setBrowseCardsLive] = useState(() => restoredSession?.browseCardsLive ?? false);
   const [nexusApiKeyMissing, setNexusApiKeyMissing] = useState(false);
+  const [developerMode, setDeveloperMode] = useState(false);
+  const [customBrowserInput, setCustomBrowserInput] = useState(customBrowserStartUrl);
+  const [customBrowserUrl, setCustomBrowserUrl] = useState(customBrowserStartUrl);
+  const [customBrowserFrameKey, setCustomBrowserFrameKey] = useState(0);
+  const [customBrowserLoading, setCustomBrowserLoading] = useState(Boolean(customBrowserStartUrl));
+  const [managedBrowserOpen, setManagedBrowserOpen] = useState(false);
+  const [managedBrowserOpening, setManagedBrowserOpening] = useState(false);
+  const managedBrowserViewportRef = useRef<HTMLDivElement | null>(null);
+  const initialCategoryCacheRef = useRef(readModWorkshopCategoryCacheEntry(profileId, modWorkshopCategoryKey));
+  const [modWorkshopCategories, setModWorkshopCategories] = useState<SourceCategory[]>(() => initialCategoryCacheRef.current?.categories ?? []);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [categoryStatus, setCategoryStatus] = useState<CategoryStatus>(() => initialCategoryCacheRef.current ? (initialCategoryCacheRef.current.stale ? "cached" : "loaded") : "idle");
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [categoryRetryTick, setCategoryRetryTick] = useState(0);
   const browseRequestSeqRef = useRef(0);
-  const enrichingCardKeysRef = useRef<Set<string>>(new Set());
+  const categoryRequestKeyRef = useRef("");
   const modWorkshopSearchCacheRef = useRef<Map<string, SourceModSummary[]>>(new Map());
+  const nexusSearchCacheRef = useRef<Map<string, SourceModSummary[]>>(new Map());
   const sourceMatchRefreshTimerRef = useRef<number | null>(null);
+  const activeSortOptions = useMemo(() => sortOptionsForSource(activeTab), [activeTab]);
+  const activeProfileRef = useRef(profileId);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadProfileSourceSettings = () => {
+      invoke<ProfileSettings>("get_profile_settings", { profileId })
+        .then((value) => { if (!cancelled) setProfileSourceSettings(normalizeProfileSettings(value, profileId)); })
+        .catch(() => { if (!cancelled) setProfileSourceSettings(null); });
+    };
+    loadProfileSourceSettings();
+    const onProfileSettingsChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ profileId?: string; settings?: ProfileSettings }>).detail;
+      if (detail?.profileId === profileId) setProfileSourceSettings(normalizeProfileSettings(detail.settings, profileId));
+    };
+    window.addEventListener("tsuki-profile-settings-changed", onProfileSettingsChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tsuki-profile-settings-changed", onProfileSettingsChanged);
+    };
+  }, [profileId]);
+
+  useEffect(() => {
+    if (activeSource && activeSource.id === activeSourceId) return;
+    const next = configuredSources[0];
+    setActiveSourceId(next?.id ?? "");
+    if (next) setActiveTab(sourceTabFor(next));
+  }, [activeSource, activeSourceId, configuredSources]);
+
+  useEffect(() => {
+    if (activeTab === "modworkshop" && !hasModWorkshopSource) {
+      setActiveTab(hasNexusSource ? "nexus" : hasCustomBrowserSource ? "custom" : "modworkshop");
+    }
+    if (activeTab === "nexus" && !hasNexusSource) {
+      setActiveTab(hasModWorkshopSource ? "modworkshop" : hasCustomBrowserSource ? "custom" : "nexus");
+    }
+    if (activeTab === "custom" && !hasCustomBrowserSource) {
+      setActiveTab(hasModWorkshopSource ? "modworkshop" : hasNexusSource ? "nexus" : "modworkshop");
+    }
+  }, [activeTab, hasCustomBrowserSource, hasModWorkshopSource, hasNexusSource]);
+
+  useEffect(() => {
+    setCustomBrowserInput(customBrowserStartUrl);
+    setCustomBrowserUrl(customBrowserStartUrl);
+    setCustomBrowserFrameKey((value) => value + 1);
+    setCustomBrowserLoading(Boolean(customBrowserStartUrl));
+  }, [activeSourceId, customBrowserStartUrl, profileId]);
+
+  useEffect(() => {
+    if (!activeSource || activeSource.browseMode === "api" || activeSource.browseMode === "iframe") {
+      setManagedBrowserOpen(false);
+      return;
+    }
+
+    let cancelled = false;
+    const label = `${profileId}-${activeSource.id}`;
+    const syncWindowState = () => {
+      invoke<EmbeddedBrowserStatus>("get_embedded_browser_status", { label })
+        .then((browser) => {
+          if (!cancelled) setManagedBrowserOpen(browser.open);
+        })
+        .catch(() => {
+          if (!cancelled) setManagedBrowserOpen(false);
+        });
+    };
+
+    syncWindowState();
+    const timer = window.setInterval(syncWindowState, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      void invoke<string>("control_embedded_browser_window", { label, action: "close" }).catch(() => undefined);
+    };
+  }, [activeSource?.browseMode, activeSource?.id, profileId]);
+
+  useEffect(() => {
+    if (!managedBrowserOpen || !activeSource || activeSource.browseMode === "iframe") return;
+    const element = managedBrowserViewportRef.current;
+    if (!element) return;
+    const label = `${profileId}-${activeSource.id}`;
+    let frame = 0;
+
+    const updateBounds = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const rect = element.getBoundingClientRect();
+        const bounds = currentManagedBrowserBounds();
+        const visible = Boolean(bounds);
+        void invoke("set_embedded_browser_bounds", {
+          label,
+          x: bounds?.x ?? rect.left,
+          y: bounds?.y ?? rect.top,
+          width: bounds?.width ?? Math.max(320, rect.width),
+          height: bounds?.height ?? Math.max(240, rect.height),
+          visible,
+        }).catch(() => undefined);
+      });
+    };
+
+    const observer = new ResizeObserver(updateBounds);
+    observer.observe(element);
+    window.addEventListener("resize", updateBounds);
+    document.addEventListener("scroll", updateBounds, true);
+    updateBounds();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", updateBounds);
+      document.removeEventListener("scroll", updateBounds, true);
+    };
+  }, [activeSource?.browseMode, activeSource?.id, managedBrowserOpen, profileId]);
+
+  useEffect(() => {
+    if (activeProfileRef.current === profileId) {
+      if (profileSwitching) setStatus("Switching profile...");
+      return;
+    }
+
+    activeProfileRef.current = profileId;
+    browseRequestSeqRef.current += 1;
+    modWorkshopSearchCacheRef.current.clear();
+    nexusSearchCacheRef.current.clear();
+    const nextSource = configuredSources[0] ?? null;
+    setActiveSourceId(nextSource?.id ?? "");
+    setActiveTab(nextSource ? sourceTabFor(nextSource) : hasModWorkshopSource ? "modworkshop" : hasNexusSource ? "nexus" : hasCustomBrowserSource ? "custom" : "modworkshop");
+    setSortMode(DEFAULT_SORT);
+    setCategoryId("");
+    setCategoryLabel("");
+    setView("list");
+    setMods([]);
+    setPages(browsePageNumbers());
+    setHasMore(browsePageBooleans({ modworkshop: hasModWorkshopSource, nexus: hasNexusSource, custom: false }));
+    setLoadingSource(null);
+    setSearchQuery("");
+    setSourceSearchQuery("");
+    setActiveModWorkshopSearch("");
+    setActiveNexusSearch("");
+    setSelectedMod(null);
+    setSourceMatches({});
+    setCacheNote("");
+    setBrowseCardsLive(false);
+    const cachedCategories = readModWorkshopCategoryCacheEntry(profileId, modWorkshopCategoryKey);
+    setModWorkshopCategories(cachedCategories?.categories ?? []);
+    setCategoryStatus(cachedCategories ? (cachedCategories.stale ? "cached" : "loaded") : "idle");
+    setCategoryError(null);
+    setStatus(profileSwitching ? "Switching profile..." : hasConfiguredSources ? "Safe Browse is ready." : "No browse sources configured for this profile.");
+  }, [configuredSources, hasConfiguredSources, hasCustomBrowserSource, hasModWorkshopSource, hasNexusSource, modWorkshopCategoryKey, profileId, profileSwitching]);
 
   const sourceMods = useMemo(() => {
-    const base = orderBrowseModsForSource(mods, activeTab, sortMode);
-    return base.filter((mod) => modMatchesQuery(mod, searchQuery));
-  }, [activeTab, mods, searchQuery, sortMode]);
+    const base = orderBrowseModsForSource(mods, activeTab, sortMode).filter((mod) => {
+      if (mod.source !== "modworkshop") return true;
+      return modWorkshopCardMatchesSource(mod.gameId, mod.tags ?? [], activeSource, modWorkshopGameKey);
+    });
+    const activeSearch = activeTab === "modworkshop" ? activeModWorkshopSearch : activeNexusSearch;
+    const filtered = searchQuery && !activeSearch ? base.filter((mod) => modMatchesQuery(mod, searchQuery)) : base;
+    return filtered.slice(0, BROWSE_PAGE_SIZE);
+  }, [activeModWorkshopSearch, activeNexusSearch, activeTab, activeSource, mods, modWorkshopGameKey, searchQuery, sortMode]);
+
+  const sourceModsSignature = useMemo(
+    () => sourceMods.map((mod) => `${mod.source}:${mod.sourceId}`).join("|"),
+    [sourceMods],
+  );
+
+  useEffect(() => {
+    browseSessionSnapshot = {
+      scope: sessionScope,
+      profileId,
+      activeSourceId,
+      activeTab,
+      sortMode,
+      categoryId,
+      categoryLabel,
+      view,
+      mods,
+      pages,
+      hasMore,
+      status,
+      searchQuery,
+      sourceSearchQuery,
+      activeModWorkshopSearch,
+      activeNexusSearch,
+      selectedMod,
+      sourceMatches,
+      browseCardsLive,
+      cacheNote,
+    };
+  }, [
+    sessionScope,
+    activeModWorkshopSearch,
+    activeNexusSearch,
+    activeSourceId,
+    activeTab,
+    browseCardsLive,
+    cacheNote,
+    categoryId,
+    categoryLabel,
+    hasMore,
+    mods,
+    pages,
+    searchQuery,
+    selectedMod,
+    sortMode,
+    sourceMatches,
+    sourceModsSignature,
+    sourceSearchQuery,
+    status,
+    view,
+  ]);
+
+  useEffect(() => {
+    if (activeSortOptions.length === 0) return;
+    if (activeSortOptions.some((option) => option.id === sortMode)) return;
+    setSortMode(normalizeSortMode(sortMode, activeTab));
+  }, [activeSortOptions, activeTab, sortMode]);
 
 
   useEffect(() => {
@@ -922,6 +1363,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         .then((settings) => {
           if (cancelled) return;
           setNexusApiKeyMissing(!settings.nexusApiKey?.trim());
+          setDeveloperMode(settings.developerMode ?? false);
         })
         .catch(() => {
           if (!cancelled) setNexusApiKeyMissing(true);
@@ -937,52 +1379,108 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     };
   }, []);
 
-  // v1.8.4: light, capped card enrichment. This fills real descriptions/tags without blocking scrolling.
   useEffect(() => {
+    if (activeTab !== "modworkshop") return;
+    if (!hasModWorkshopSource || profileSwitching) return;
+    const cachedCategories = readModWorkshopCategoryCacheEntry(profileId, modWorkshopCategoryKey);
+    const hasCache = Boolean(cachedCategories?.categories.length);
+
+    if (hasCache) {
+      setModWorkshopCategories(cachedCategories!.categories);
+    }
+
+    if (hasCache && !cachedCategories!.stale && categoryRetryTick === 0) {
+      setCategoryStatus("loaded");
+      setCategoryError(null);
+      return;
+    }
+
+    const requestKey = `${profileId}:${activeSourceId}:${modWorkshopGameKey}:${categoryRetryTick}:${cachedCategories?.savedAt ?? 0}`;
+    if (categoryRequestKeyRef.current === requestKey) return;
+    categoryRequestKeyRef.current = requestKey;
+
     let cancelled = false;
-    const targets = sourceMods
-      .filter((mod) => needsCardEnrichment(mod))
-      .filter((mod) => !enrichingCardKeysRef.current.has(`${mod.source}-${mod.sourceId}`))
-      .slice(0, sourceSearching ? 0 : 6);
+    setCategoriesLoading(true);
+    setCategoryStatus(hasCache ? "cached" : "loading");
+    setCategoryError(null);
 
-    if (targets.length === 0) return;
-
-    const run = async () => {
-      for (const mod of targets) {
+    invokeWithTimeout<SourceCategory[]>(
+      "fetch_modworkshop_categories",
+      { gameId: modWorkshopGameKey, profileId, profileName: gameName },
+      8000,
+      "ModWorkshop categories timed out.",
+    )
+      .then((categories) => {
         if (cancelled) return;
-        const key = `${mod.source}-${mod.sourceId}`;
-        enrichingCardKeysRef.current.add(key);
-
-        try {
-          const detail = await fetchDetailForMod(mod);
-          if (cancelled) return;
-          const description = cleanDescription(detail.description || detail.shortDescription || mod.shortDescription || "");
-          const nextTags = Array.from(new Set([...(mod.tags ?? []), ...(detail.tags ?? [])].filter(Boolean))).slice(0, 12);
-
-          setMods((current) => current.map((item) => {
-            if (`${item.source}-${item.sourceId}` !== key) return item;
-            return {
-              ...item,
-              name: displayModTitle(detail) || item.name,
-              author: displayAuthor(detail) ?? item.author,
-              shortDescription: description || item.shortDescription,
-              tags: nextTags.length > 0 ? nextTags : item.tags,
-              updatedAt: item.updatedAt ?? detail.updatedAt,
-              downloads: item.downloads ?? detail.downloads,
-              likes: item.likes ?? detail.likes,
-            };
-          }));
-        } catch {
-          // Card enrichment is best-effort. Failures stay in Debug/Test All, not normal cards.
+        const clean = categories
+          .filter((category) => category.id && category.label)
+          .sort((a, b) => a.label.localeCompare(b.label));
+        setModWorkshopCategories(clean);
+        if (clean.length > 0) writeModWorkshopCategoryCache(profileId, modWorkshopCategoryKey, clean);
+        if (clean.length === 0) {
+          setCategoryStatus(hasCache ? "cache-refresh-failed" : "unavailable");
+          const reason = `ModWorkshop returned zero usable categories for ${gameName} (${modWorkshopGameKey}). Cache available: ${hasCache ? "yes" : "no"}.`;
+          setCategoryError(reason);
+          recordModWorkshopCategoryDiagnostic({
+            profileId,
+            profileName: gameName,
+            gameId: modWorkshopGameKey,
+            status: "warning",
+            reason,
+            cacheAvailable: hasCache,
+            cacheUsed: hasCache,
+          });
+          if (!hasCache) setStatus(`ModWorkshop categories are unavailable for ${gameName} (${modWorkshopGameKey}).`);
+        } else {
+          setCategoryStatus("loaded");
+          setCategoryError(null);
+          recordModWorkshopCategoryDiagnostic({
+            profileId,
+            profileName: gameName,
+            gameId: modWorkshopGameKey,
+            status: "success",
+            reason: `Loaded ${clean.length} ModWorkshop categories.`,
+            cacheAvailable: hasCache,
+            cacheUsed: false,
+          });
         }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : String(error);
+          setCategoryStatus(hasCache ? "cache-refresh-failed" : "failed");
+          const reason = `${message} Cache available: ${hasCache ? "yes" : "no"}. Cache used: ${hasCache ? "yes" : "no"}.`;
+          const serviceUnavailable = /(?:HTTP\s*)?50[234]\b|bad gateway|service unavailable|gateway timeout/i.test(message);
+          setCategoryError(serviceUnavailable
+            ? `ModWorkshop is temporarily unavailable (${message.match(/HTTP\s*50[234]|50[234]\s+Bad Gateway/i)?.[0] ?? "server error"}). ${hasCache ? "Tsuki kept the exact cached category list." : "Category filtering will return when the service recovers."}`
+            : reason);
+          recordModWorkshopCategoryDiagnostic({
+            profileId,
+            profileName: gameName,
+            gameId: modWorkshopGameKey,
+            status: "failed",
+            reason,
+            cacheAvailable: hasCache,
+            cacheUsed: hasCache,
+          });
+          setStatus(hasCache ? `${message} Using cached ModWorkshop categories for ${gameName}.` : message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCategoriesLoading(false);
+        }
+      });
 
-        await new Promise((resolve) => window.setTimeout(resolve, 30));
-      }
+    return () => {
+      cancelled = true;
+      if (categoryRequestKeyRef.current === requestKey) categoryRequestKeyRef.current = "";
     };
-
-    void run();
-    return () => { cancelled = true; };
-  }, [activeTab, sourceMods.length, sortMode, searchQuery, sourceSearching]);
+    // Do not depend on categoriesLoading here. Setting it true would clean up
+    // this effect and mark the in-flight request as cancelled before it can
+    // populate the dropdown.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, categoryRetryTick, gameName, hasModWorkshopSource, modWorkshopCategoryKey, modWorkshopGameKey, profileId, profileSwitching]);
 
   function markThumbnailFailed(url: string | null | undefined) {
     if (!url) return;
@@ -1001,18 +1499,19 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     const clean = cleanMods(modsToCheck);
 
     if (clean.length === 0) {
-      setSourceMatches({});
+      if (modsToCheck === sourceMods) setSourceMatches({});
       return;
     }
 
     try {
       const result = await invoke<InstalledSourceMatch[]>("match_installed_source_mods", {
         sourceMods: clean,
+        profileId,
       });
 
       const next: Record<string, InstalledSourceMatch> = {};
       for (const match of result) next[`${match.source}-${match.sourceId}`] = match;
-      setSourceMatches(next);
+      setSourceMatches((current) => clean.length >= sourceMods.length ? next : { ...current, ...next });
     } catch {
       // Installed badges are optional in Browse. Never crash the page for this.
     }
@@ -1028,8 +1527,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
     try {
       const result = match.matchKind === "receipt"
-        ? await invoke<string>("uninstall_source_install", { source: match.source, sourceId: match.sourceId })
-        : await invoke<string>("uninstall_pak_mod_files", { fileNames: match.matchedFiles });
+        ? await invoke<string>("uninstall_source_install", { source: match.source, sourceId: match.sourceId, profileId })
+        : await invoke<string>("uninstall_pak_mod_files", { fileNames: match.matchedFiles, profileId });
 
       setStatus(result);
       window.dispatchEvent(new Event("tsuki-data-refresh"));
@@ -1046,7 +1545,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     if (fileNames.length === 0) return;
     setInstallingKey(`file-uninstall-${fileNames.join("|")}`);
     try {
-      const result = await invoke<string>("uninstall_pak_mod_files", { fileNames });
+      const result = await invoke<string>("uninstall_pak_mod_files", { fileNames, profileId });
       setStatus(result);
       window.dispatchEvent(new Event("tsuki-data-refresh"));
       await refreshSourceMatches(selectedMod ? [selectedMod] : sourceMods);
@@ -1061,7 +1560,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     if (fileNames.length === 0) return;
     setInstallingKey(`file-toggle-${fileNames.join("|")}`);
     try {
-      const result = await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled });
+      const result = await invoke<string>("set_pak_mod_files_enabled", { fileNames, enabled, profileId });
       setStatus(result);
       window.dispatchEvent(new Event("tsuki-data-refresh"));
       await refreshSourceMatches(selectedMod ? [selectedMod] : sourceMods);
@@ -1081,6 +1580,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         sourceId: match.sourceId,
         matchedFiles: fileNames,
         matchKind: match.matchKind,
+        profileId,
       });
       setStatus(result);
     } catch (error) {
@@ -1100,8 +1600,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     try {
       const [source, sourceId] = target.busyId.replace("-uninstall", "").split("-");
       const result = source && sourceId && target.fileNames.some((fileName) => fileName.includes(":\\"))
-        ? await invoke<string>("uninstall_source_install", { source, sourceId })
-        : await invoke<string>("uninstall_pak_mod_files", { fileNames: target.fileNames });
+        ? await invoke<string>("uninstall_source_install", { source, sourceId, profileId })
+        : await invoke<string>("uninstall_pak_mod_files", { fileNames: target.fileNames, profileId });
 
       setStatus(result);
       window.dispatchEvent(new Event("tsuki-data-refresh"));
@@ -1130,6 +1630,157 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     }
   }
 
+  function openCustomBrowserUrl(rawValue?: string | null) {
+    const normalized = normalizeBrowserUrl(rawValue);
+    if (!normalized) {
+      setStatus("Enter a valid website URL for Custom Browser.");
+      return;
+    }
+    if (!browserUrlAllowed(normalized, customBrowserAllowedDomains)) {
+      setStatus(`Blocked by this profile's allowed domains: ${customBrowserAllowedDomains.join(", ")}`);
+      return;
+    }
+    setCustomBrowserInput(normalized);
+    setCustomBrowserUrl(normalized);
+    setCustomBrowserFrameKey((value) => value + 1);
+    setCustomBrowserLoading(true);
+    setStatus(`Loading ${normalized}`);
+  }
+
+  function reloadCustomBrowser() {
+    if (!customBrowserUrl) {
+      setStatus("No Custom Browser URL is configured.");
+      return;
+    }
+    setCustomBrowserFrameKey((value) => value + 1);
+    setCustomBrowserLoading(true);
+    setStatus(`Reloading ${customBrowserUrl}`);
+  }
+
+  async function openCustomBrowserExternal() {
+    await openWebsite(customBrowserUrl || customBrowserInput || customBrowserStartUrl);
+  }
+
+  function currentManagedBrowserBounds() {
+    const rect = managedBrowserViewportRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const x = Math.max(0, rect.left);
+    const y = Math.max(0, rect.top);
+    const right = Math.min(window.innerWidth, rect.right);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    const width = right - x;
+    const height = bottom - y;
+    if (width < 320 || height < 240) return null;
+    return {
+      x,
+      y,
+      width,
+      height,
+    };
+  }
+
+  async function prepareManagedBrowserBounds() {
+    const element = managedBrowserViewportRef.current;
+    if (!element || window.innerWidth < 480 || window.innerHeight < 360) {
+      throw new Error("Restore or enlarge the Tsuki window before opening the embedded browser.");
+    }
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    const bounds = currentManagedBrowserBounds();
+    if (!bounds) {
+      throw new Error("The embedded browser area is not visible. Scroll to Managed Browsing and try again.");
+    }
+    return bounds;
+  }
+
+  async function openCustomBrowserEmbeddedWindow() {
+    const normalized = normalizeBrowserUrl(customBrowserUrl || customBrowserInput || customBrowserStartUrl);
+    if (!normalized) {
+      setStatus("No Custom Browser URL is configured.");
+      return;
+    }
+    if (!browserUrlAllowed(normalized, customBrowserAllowedDomains)) {
+      setStatus(`Blocked by this profile's allowed domains: ${customBrowserAllowedDomains.join(", ")}`);
+      return;
+    }
+
+    setManagedBrowserOpening(true);
+    try {
+      const bounds = await prepareManagedBrowserBounds();
+      const result = await invoke<string>("open_embedded_browser_window", {
+        label: `${profileId}-${activeSource?.id ?? "custom"}`,
+        url: normalized,
+        title: customBrowserName,
+        ...bounds,
+      });
+      setManagedBrowserOpen(true);
+      setStatus(result);
+    } catch (error) {
+      setManagedBrowserOpen(false);
+      setStatus(`Embedded browser failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setManagedBrowserOpening(false);
+    }
+  }
+
+  async function openActiveSourceEmbeddedWindow() {
+    if (activeSource?.browseMode === "external") {
+      await openActiveSourceExternal();
+      return;
+    }
+    if (activeTab === "custom") {
+      await openCustomBrowserEmbeddedWindow();
+      return;
+    }
+
+    const normalized = normalizeBrowserUrl(sourceStartUrlFor(activeTab));
+    if (!normalized) {
+      setStatus(`No ${sourceLabel(activeTab)} start URL is configured for this profile.`);
+      return;
+    }
+
+    setManagedBrowserOpening(true);
+    try {
+      const bounds = await prepareManagedBrowserBounds();
+      const result = await invoke<string>("open_embedded_browser_window", {
+        label: `${profileId}-${activeSource?.id ?? activeTab}`,
+        url: normalized,
+        title: `${gameName} ${activeSource?.displayName ?? sourceLabel(activeTab)}`,
+        ...bounds,
+      });
+      setManagedBrowserOpen(true);
+      setStatus(result);
+    } catch (error) {
+      setManagedBrowserOpen(false);
+      setStatus(`Embedded browser failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setManagedBrowserOpening(false);
+    }
+  }
+
+  async function openActiveSourceExternal() {
+    if (activeTab === "custom") {
+      await openCustomBrowserExternal();
+      return;
+    }
+    await openWebsite(sourceStartUrlFor(activeTab));
+  }
+
+  async function controlActiveBrowser(action: "back" | "forward" | "refresh" | "close") {
+    if (!activeSource) return;
+    try {
+      const result = await invoke<string>("control_embedded_browser_window", {
+        label: `${profileId}-${activeSource.id}`,
+        action,
+      });
+      if (action === "close") setManagedBrowserOpen(false);
+      setStatus(result);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function loadSourceIndexFallback(source: BrowseTab, reset: boolean, reason: string, requestedSort: SortMode = sortMode) {
     void reset;
     void requestedSort;
@@ -1140,29 +1791,39 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       cacheFallbackReason: reason,
     });
     setHasMore((current) => ({ ...current, [source]: false }));
-      setCacheNote(`${sourceLabel(source)} live failed: ${reason}. Cache/source-index kept as placeholders only and did not decide page membership.`);
-      setStatus(`${sourceLabel(source)} live browsing failed. Cache cannot decide page order or membership. Please try again.`);
+      setCacheNote(`${activeSource?.displayName ?? sourceLabel(source)} live request failed. No exact source/profile/game cache entry was used.`);
+      setStatus(reason);
     setBrowseCardsLive(false);
     reportTaskProgress(`Load ${sourceLabel(source)}`, 100, "Live unavailable; cache fallback blocked by policy.");
   }
 
 
 
-  async function loadModWorkshopLivePage(reset = false, requestedSort: SortMode = sortMode, targetPage?: number) {
+  async function loadModWorkshopLivePage(
+    reset = false,
+    requestedSort: SortMode = sortMode,
+    targetPage?: number,
+    options: { query?: string; categoryId?: string; categoryLabel?: string } = {},
+  ) {
+    if (profileSwitching) { setStatus("Switching profile..."); return; }
+    if (!hasConfiguredSources) { setMods([]); setHasMore((current) => ({ ...current, modworkshop: false })); setStatus("No browse sources configured for this profile."); return; }
     if (loadingSource && loadingSource !== "modworkshop") return;
     if (!reset && !hasMore.modworkshop && !targetPage) return;
 
     const requestId = ++browseRequestSeqRef.current;
     const previousPage = Math.max(1, pages.modworkshop || 1);
     const nextPage = Math.max(1, targetPage ?? (reset ? 1 : pages.modworkshop + 1));
+    const browseQuery = options.query ?? activeModWorkshopSearch;
+    const browseCategoryId = options.categoryId ?? categoryId;
+    const browseCategoryLabel = options.categoryLabel ?? categoryLabel;
     const replacePage = true;
 
     let watchdog: number | null = null;
 
     if (reset) {
-      setActiveModWorkshopSearch("");
+      if (!browseQuery.trim()) setActiveModWorkshopSearch("");
       setModWorkshopSearchPage(0);
-      setSearchQuery("");
+      if (!browseQuery.trim()) setSearchQuery("");
       setHasMore((current) => ({ ...current, modworkshop: true }));
       setCacheNote("ModWorkshop page mode: keeping current cards visible while loading page 1.");
       setBrowseCardsLive(false);
@@ -1170,8 +1831,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
     setPages((current) => ({ ...current, modworkshop: nextPage }));
     setLoadingSource("modworkshop");
-    setStatus(`Loading ModWorkshop PAYDAY 3 page ${nextPage}...`);
-    reportTaskProgress("Load ModWorkshop", reset ? 8 : 38, `Public page ${nextPage}`);
+    setStatus(`Loading ModWorkshop ${gameName} page ${nextPage}${browseCategoryLabel ? ` in ${browseCategoryLabel}` : ""}...`);
+    reportTaskProgress("Load ModWorkshop", reset ? 8 : 38, `API page ${nextPage}`);
 
     watchdog = window.setTimeout(() => {
       if (requestId !== browseRequestSeqRef.current) return;
@@ -1185,37 +1846,49 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     try {
       const loaded = await invokeWithTimeout<SourceModSummary[]>(
         "fetch_modworkshop_browse_live_page",
-        { page: nextPage, sort: requestedSort },
+        {
+          page: nextPage,
+          sort: requestedSort,
+          query: browseQuery.trim() || null,
+          categoryId: browseCategoryId.trim() || null,
+          gameId: modWorkshopGameKey,
+          profileId,
+        },
         30_000,
-        "ModWorkshop public live page timed out.",
+        "ModWorkshop live API page timed out.",
       );
 
       if (requestId !== browseRequestSeqRef.current) return;
 
-      const cleaned = cleanMods(loaded).filter((mod) => mod.source === "modworkshop").slice(0, 48);
+      const cleaned = cleanMods(loaded).filter((mod) => mod.source === "modworkshop").slice(0, BROWSE_PAGE_SIZE);
 
       if (cleaned.length === 0) {
         if (reset || nextPage <= 1) {
-          await loadSourceIndexFallback("modworkshop", reset, `ModWorkshop page ${nextPage} returned zero PAYDAY 3 cards.`, requestedSort);
+          setMods((current) => current.filter((mod) => mod.source !== "modworkshop"));
+          setHasMore((current) => ({ ...current, modworkshop: false }));
+          setBrowseCardsLive(true);
+          setCacheNote("");
+          setStatus(`No ModWorkshop mods match the selected ${gameName} version and filters.`);
           return;
         }
 
       setHasMore((current) => ({ ...current, modworkshop: false }));
         setCacheNote(`ModWorkshop live page ${nextPage} returned no cards. Source-index fallback was not used for live pagination.`);
-        setStatus(`ModWorkshop page ${nextPage} returned no live PAYDAY 3 cards. Stopped at the end of the live listing.`);
+        setStatus(`ModWorkshop page ${nextPage} returned no live ${gameName} cards. Stopped at the end of the live listing.`);
         setBrowseCardsLive(false);
         return;
       }
 
       setMods((current) => {
         const base = replacePage ? current.filter((mod) => mod.source !== "modworkshop") : current;
+        writeCache(profileId, "modworkshop", sourceGameKeyFor("modworkshop"), requestedSort, cleaned, nextPage, cleaned.length >= BROWSE_PAGE_SIZE, browseQuery, browseCategoryId);
         return [...base, ...cleaned];
       });
 
       setHasMore((current) => ({ ...current, modworkshop: true }));
       setBrowseCardsLive(true);
-      setCacheNote(`ModWorkshop page mode · Page ${nextPage} · ${cleaned.length} live cards · cache bypassed.`);
-      setStatus(`Loaded ModWorkshop page ${nextPage}: ${cleaned.length} PAYDAY 3 mod cards.`);
+      setCacheNote(`ModWorkshop page mode: loaded ${cleaned.length} cards from live source.`);
+      setStatus(`Loaded ModWorkshop page ${nextPage}: ${cleaned.length} ${gameName} mod cards.`);
       recordCachePolicyDiagnostic({
         browseDataSource: "live",
         detailDataSource: "unchanged",
@@ -1244,9 +1917,16 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     }
   }
 
-  async function loadPage(source: BrowseTab = activeTab, reset = false, requestedSort: SortMode = sortMode) {
+  async function loadPage(source: BrowseTab = activeTab, reset = false, requestedSort: SortMode = sortMode, targetPage?: number) {
+    if (profileSwitching) { setStatus("Switching profile..."); return; }
+    if (!hasConfiguredSources) { setMods([]); setHasMore(browsePageBooleans({ modworkshop: false, nexus: false, custom: false })); setStatus("No browse sources configured for this profile."); return; }
     if (source === "modworkshop") {
-      await loadModWorkshopLivePage(reset, requestedSort);
+      await loadModWorkshopLivePage(reset, requestedSort, targetPage);
+      return;
+    }
+    if (source === "custom" || source === "github") {
+      setHasMore((current) => ({ ...current, [source]: false }));
+      setStatus(source === "custom" ? "Custom Browser is ready." : "GitHub browse cards are not enabled for this profile yet.");
       return;
     }
 
@@ -1254,7 +1934,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     // Keeping old source === "modworkshop" checks here made TypeScript narrow
     // source to "nexus" and reject those dead branches during release build.
     if (source === "nexus" && nexusApiKeyMissing) {
-      setStatus("Nexus browsing needs an API key. Add one in Settings → Sources.");
+      setStatus("Nexus browsing needs an API key. Add one in Settings > API Keys.");
       setHasMore((current) => ({ ...current, nexus: false }));
       return;
     }
@@ -1273,7 +1953,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     }
 
     const requestId = ++browseRequestSeqRef.current;
-    const nextPage = reset ? 1 : pages[source] + 1;
+    const nextPage = Math.max(1, targetPage ?? (reset ? 1 : pages[source] + 1));
     setLoadingSource(source);
     if (reset) {
       // Keep current cards visible until live/fallback cards are ready.
@@ -1286,7 +1966,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     try {
       const loaded = await invokeWithTimeout<SourceModSummary[]>(
         "fetch_source_mods_page",
-        { source, page: nextPage, sort: requestedSort },
+        { source, page: nextPage, sort: requestedSort, profileId, sourceId: activeSourceId },
         reset ? 9000 : 12000,
         `${sourceLabel(source)} live request timed out.`,
       );
@@ -1294,31 +1974,32 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       if (requestId !== browseRequestSeqRef.current) return;
 
       const cleaned = sortBrowseMods(cleanMods(loaded).filter((mod) => mod.source === source), requestedSort);
+      const visiblePage = cleaned.slice(0, BROWSE_PAGE_SIZE);
 
-      if (cleaned.length === 0) {
+      if (visiblePage.length === 0) {
         await loadSourceIndexFallback(source, reset, "Backend returned zero cards.", requestedSort);
         return;
       }
 
       setMods((current) => {
-        const base = reset ? current.filter((mod) => mod.source !== source) : current;
-        const merged = sortBrowseMods(cleanMods([...base, ...cleaned]), requestedSort);
-        writeCache(source, requestedSort, merged.filter((mod) => mod.source === source), nextPage, cleaned.length > 0);
+        const base = current.filter((mod) => mod.source !== source);
+        const merged = cleanMods([...base, ...visiblePage]);
+        writeCache(profileId, source, sourceGameKeyFor(source), requestedSort, visiblePage, nextPage, cleaned.length >= BROWSE_PAGE_SIZE);
         return merged;
       });
 
       setPages((current) => ({ ...current, [source]: nextPage }));
-      setHasMore((current) => ({ ...current, [source]: cleaned.length >= 20 }));
+      setHasMore((current) => ({ ...current, [source]: cleaned.length >= BROWSE_PAGE_SIZE }));
       setBrowseCardsLive(true);
       setCacheNote("");
-      setStatus(`Loaded ${cleaned.length} live/sorted ${sourceLabel(source)} mods.`);
+      setStatus(`Loaded ${visiblePage.length} live/sorted ${sourceLabel(source)} mods on page ${nextPage}.`);
       recordCachePolicyDiagnostic({
         browseDataSource: "live",
         detailDataSource: "unchanged",
         fileListDataSource: "unchanged",
         cacheFallbackReason: "none",
       });
-      reportTaskProgress(`Load ${sourceLabel(source)}`, 100, `Loaded ${cleaned.length} live cards.`);
+      reportTaskProgress(`Load ${sourceLabel(source)}`, 100, `Loaded ${visiblePage.length} live cards.`);
     } catch (error) {
       if (requestId !== browseRequestSeqRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -1336,20 +2017,100 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     document.querySelector(".page-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function handleSortChange(nextSort: SortMode) {
+  function switchBrowseSource(nextSource: BrowseTab, sourceId?: string) {
+    const selected = sourceId ? configuredSources.find((source) => source.id === sourceId) ?? null : null;
+    if (activeSource?.browseMode === "webview_window" && activeSource.id !== sourceId) {
+      void invoke<string>("control_embedded_browser_window", {
+        label: `${profileId}-${activeSource.id}`,
+        action: "close",
+      }).catch(() => undefined);
+    }
+    if (selected) setActiveSourceId(selected.id);
+    const selectedTab = selected ? sourceTabFor(selected) : nextSource;
+    const nextSort = normalizeSortMode(sortMode, selectedTab);
+    setActiveTab(selectedTab);
     setSortMode(nextSort);
-    setCacheNote(`Sorted visible ${sourceLabel(activeTab)} cards by ${nextSort}.`);
+    setSourceSearchQuery(selectedTab === "custom" ? normalizeBrowserUrl(selected?.startUrl || selected?.listingUrl || selected?.gamePageUrl || "") : "");
+    setSearchQuery("");
+    setActiveModWorkshopSearch("");
+    setActiveNexusSearch("");
+    setPages((current) => ({ ...current, [selectedTab]: 0 }));
+    setHasMore((current) => ({ ...current, [selectedTab]: selectedTab !== "custom" }));
 
-    if (activeTab === "modworkshop") {
-      setStatus(`Sorted visible ModWorkshop cards by ${nextSort}. Press Refresh only when you want a live reload.`);
+    if (selectedTab === "nexus") {
+      setCategoryId("");
+      setCategoryLabel("");
+    }
+    if (selectedTab === "custom") {
+      const nextUrl = normalizeBrowserUrl(selected?.startUrl || selected?.listingUrl || selected?.gamePageUrl || "");
+      setStatus(nextUrl ? `${selected?.displayName ?? "Browser"} is ready.` : "No browser start URL is configured for this source.");
+    }
+  }
+
+  function goToBrowsePage(targetPage: number) {
+    const page = Math.max(1, targetPage);
+
+    if (activeTab === "custom") {
+      reloadCustomBrowser();
       return;
     }
 
-    setActiveNexusSearch("");
+    if (activeTab === "modworkshop") {
+      if (activeModWorkshopSearch.trim()) {
+        void searchModWorkshopPage(activeModWorkshopSearch, page, false);
+      } else {
+        void loadModWorkshopLivePage(false, sortMode, page);
+      }
+      return;
+    }
+
+    if (activeNexusSearch.trim()) {
+      void searchNexusPage(page);
+      return;
+    }
+
+    void loadPage(activeTab, false, sortMode, page);
+  }
+
+  function handleSortChange(nextSort: SortMode) {
+    if (activeTab === "custom") return;
+    setSortMode(nextSort);
+    setCacheNote(`Reloading ${sourceLabel(activeTab)} page 1 by ${nextSort}.`);
     setPages((current) => ({ ...current, [activeTab]: 0 }));
     setHasMore((current) => ({ ...current, [activeTab]: true }));
     browseRequestSeqRef.current += 1;
-    void loadPage(activeTab, true, nextSort);
+
+    if (activeTab === "modworkshop") {
+      setModWorkshopSearchPage(0);
+      if (activeModWorkshopSearch.trim()) {
+        void searchModWorkshopPage(activeModWorkshopSearch, 1, true, nextSort);
+      } else {
+        void loadModWorkshopLivePage(true, nextSort, 1);
+      }
+      return;
+    }
+
+    if (activeNexusSearch.trim()) {
+      void searchNexusPage(1, nextSort);
+    } else {
+      void loadPage(activeTab, true, nextSort, 1);
+    }
+  }
+
+  function handleCategoryChange(nextCategoryId: string) {
+    const selected = modWorkshopCategories.find((category) => category.id === nextCategoryId);
+    const nextLabel = selected?.label ?? "";
+    setCategoryId(nextCategoryId);
+    setCategoryLabel(nextLabel);
+    setPages((current) => ({ ...current, modworkshop: 0 }));
+    setHasMore((current) => ({ ...current, modworkshop: true }));
+    browseRequestSeqRef.current += 1;
+
+    if (activeModWorkshopSearch.trim()) {
+      void searchModWorkshopPage(activeModWorkshopSearch, 1, true, sortMode, nextCategoryId, nextLabel);
+    } else {
+      void loadModWorkshopLivePage(true, sortMode, 1, { categoryId: nextCategoryId, categoryLabel: nextLabel });
+    }
   }
 
   async function testModWorkshopLive() {
@@ -1357,7 +2118,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     setStatus("Testing ModWorkshop public live/API routes...");
     setCacheNote("Running ModWorkshop live diagnostic...");
     try {
-      const result = await invoke<string>("diagnose_modworkshop_browse_live");
+      const result = await invoke<string>("diagnose_modworkshop_browse_live", { profileId });
       setStatus(result);
       setCacheNote(result);
     } catch (error) {
@@ -1371,6 +2132,12 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
   void testModWorkshopLive;
 
+  function retryModWorkshopCategories() {
+    setCategoryStatus(modWorkshopCategories.length > 0 ? "cached" : "loading");
+    setCategoryError(null);
+    setCategoryRetryTick((value) => value + 1);
+  }
+
   function refresh() {
     try {
       // Keep the visible/cache cards as a safety net while live requests reload.
@@ -1379,41 +2146,51 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       // optional cache
     }
     if (activeTab === "modworkshop") {
-      setActiveModWorkshopSearch("");
-      setModWorkshopSearchPage(0);
+      setCategoriesLoading(false);
+      setCategoryRetryTick((value) => value + 1);
     }
 
     if (activeTab === "nexus") {
       setActiveNexusSearch("");
+    }
+    if (activeTab === "custom") {
+      reloadCustomBrowser();
+      return;
     }
     setPages((current) => ({ ...current, [activeTab]: 0 }));
     setHasMore((current) => ({ ...current, [activeTab]: true }));
     // Do not wipe visible cards before the replacement data arrives.
     setCacheNote(activeTab === "modworkshop" ? "Reloading ModWorkshop cards while keeping the current library visible..." : "Reloading cards while keeping the current library visible...");
     if (activeTab === "modworkshop") {
-      reportTaskProgress("Refresh ModWorkshop", 5, "Loading public PAYDAY 3 game page without blanking the current view...");
-      void loadModWorkshopLivePage(true, sortMode, 1);
+      reportTaskProgress("Refresh ModWorkshop", 5, "Loading ModWorkshop API page without blanking the current view...");
+      const activeQuery = activeModWorkshopSearch.trim();
+      if (activeQuery) {
+        void searchModWorkshopPage(activeQuery, 1, true, sortMode, categoryId, categoryLabel);
+      } else {
+        void loadModWorkshopLivePage(true, sortMode, 1, { categoryId, categoryLabel });
+      }
       return;
     }
 
     browseRequestSeqRef.current += 1;
     reportTaskProgress(`Refresh ${sourceLabel(activeTab)}`, 5, "Loading live/fallback cards without blanking the current view...");
-    void loadPage(activeTab, true);
+    void loadPage(activeTab, true, sortMode, 1);
   }
 
   async function applyFastModWorkshopSearchResults(query: string, page: number, reset: boolean) {
-    const cacheKey = `${query.toLowerCase()}::${page}::${sortMode}`;
+    void reset;
+      const cacheKey = `${profileId}::${activeSourceId}::${modWorkshopGameKey}::${query.toLowerCase()}::${page}::${sortMode}::${categoryId}`;
     const cached = modWorkshopSearchCacheRef.current.get(cacheKey);
     const localMatches = cached ?? orderBrowseModsForSource(mods, "modworkshop", sortMode)
       .filter((mod) => modMatchesQuery(mod, query));
-    const cleaned = sortBrowseMods(cleanMods(localMatches).filter((mod) => mod.source === "modworkshop"), sortMode).slice(0, 72);
+    const cleaned = sortBrowseMods(cleanMods(localMatches).filter((mod) => mod.source === "modworkshop"), sortMode).slice(0, BROWSE_PAGE_SIZE);
 
     if (cleaned.length === 0) return false;
 
     setMods((current) => {
-      const existing = reset ? current.filter((mod) => mod.source !== "modworkshop") : current;
+      const existing = current.filter((mod) => mod.source !== "modworkshop");
       const merged = sortBrowseMods(cleanMods([...existing, ...cleaned]), sortMode);
-      writeCache("modworkshop", sortMode, merged.filter((mod) => mod.source === "modworkshop"), page, false);
+      writeCache(profileId, "modworkshop", sourceGameKeyFor("modworkshop"), sortMode, merged.filter((mod) => mod.source === "modworkshop"), page, false, query, categoryId);
       return merged;
     });
 
@@ -1431,27 +2208,46 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     setSearchQuery("");
     setActiveModWorkshopSearch("");
     setActiveNexusSearch("");
+    setPages((current) => ({ ...current, [activeTab]: 0 }));
+    setHasMore((current) => ({ ...current, [activeTab]: true }));
     setCacheNote(`Cleared search and filters for ${sourceLabel(activeTab)}.`);
 
+    if (activeTab === "custom") {
+      setHasMore((current) => ({ ...current, custom: false }));
+      openCustomBrowserUrl(customBrowserStartUrl);
+      return;
+    }
+
     if (activeTab === "modworkshop") {
+      setCategoryId("");
+      setCategoryLabel("");
       setStatus("Cleared ModWorkshop search. Loading live public listing page 1.");
-      void loadModWorkshopLivePage(true, sortMode, 1);
+      void loadModWorkshopLivePage(true, sortMode, 1, { categoryId: "", categoryLabel: "", query: "" });
       return;
     }
 
     setStatus("Cleared Nexus search. Reloading normal Nexus browse cards.");
-    await loadPage("nexus", true);
+    await loadPage("nexus", true, sortMode, 1);
   }
 
 
-  async function searchModWorkshopPage(query: string, page: number, reset: boolean) {
+  async function searchModWorkshopPage(
+    query: string,
+    page: number,
+    reset: boolean,
+    requestedSort: SortMode = sortMode,
+    requestedCategoryId: string = categoryId,
+    requestedCategoryLabel: string = categoryLabel,
+  ) {
     const cleanQuery = query.trim();
     if (cleanQuery.length < 2) {
       await clearActiveSourceSearch();
       return;
     }
 
+    const searchSort = requestedSort === DEFAULT_SORT ? "best_match" : requestedSort;
     setActiveTab("modworkshop");
+    setSortMode(searchSort);
     setSearchQuery(cleanQuery);
     setSourceSearching(true);
     setLoadingSource("modworkshop");
@@ -1460,10 +2256,27 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     try {
       await applyFastModWorkshopSearchResults(cleanQuery, page, reset);
 
-      setStatus(`Searching ModWorkshop live routes for "${cleanQuery}"...`);
-      const cacheKey = `${cleanQuery.toLowerCase()}::${page}::${sortMode}`;
+      setStatus(`Searching ModWorkshop live API for "${cleanQuery}"...`);
+      const cacheKey = `${profileId}::${activeSourceId}::${cleanQuery.toLowerCase()}::${page}::${searchSort}::${requestedCategoryId}`;
       const cached = modWorkshopSearchCacheRef.current.get(cacheKey);
-      const results = cached ?? await invokeWithTimeout<SourceModSummary[]>("search_modworkshop_mods_for_query", { query: cleanQuery, page }, 16000, "ModWorkshop search timed out.");
+      const results = cached ?? await invokeWithTimeout<SourceModSummary[]>(
+        "fetch_modworkshop_browse_live_page",
+        {
+          page,
+          sort: searchSort,
+          query: cleanQuery,
+          categoryId: requestedCategoryId.trim() || null,
+          gameId: modWorkshopGameKey,
+          profileId,
+        },
+        16_000,
+        "ModWorkshop search timed out.",
+      ).catch(() => invokeWithTimeout<SourceModSummary[]>(
+        "search_modworkshop_mods_for_query",
+        { query: cleanQuery, page, profileId, gameId: modWorkshopGameKey, categoryId: requestedCategoryId.trim() || null },
+        16_000,
+        "ModWorkshop search fallback timed out.",
+      ));
       if (!cached && results.length > 0) {
         modWorkshopSearchCacheRef.current.set(cacheKey, results);
       }
@@ -1471,8 +2284,15 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
       if (cleaned.length === 0) {
         const fallbackHits: SourceModSummary[] = [];
-        for (let browsePage = 1; browsePage <= 2 && fallbackHits.length < 24; browsePage += 1) {
-          const pageMods = await invoke<SourceModSummary[]>("fetch_modworkshop_browse_live_page", { page: browsePage, sort: sortMode }).catch(() => []);
+        for (let browsePage = 1; browsePage <= 2 && fallbackHits.length < BROWSE_PAGE_SIZE; browsePage += 1) {
+          const pageMods = await invoke<SourceModSummary[]>("fetch_modworkshop_browse_live_page", {
+            page: browsePage,
+            sort: searchSort,
+            query: cleanQuery,
+            categoryId: requestedCategoryId.trim() || null,
+            gameId: modWorkshopGameKey,
+            profileId,
+          }).catch(() => []);
           for (const mod of pageMods) {
             if (modMatchesQuery(mod, cleanQuery) && !fallbackHits.some((existing) => existing.sourceId === mod.sourceId)) {
               fallbackHits.push(mod);
@@ -1480,25 +2300,29 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
           }
         }
 
-        cleaned = cleanMods(fallbackHits).filter((mod) => mod.source === "modworkshop").slice(0, 36);
+        cleaned = cleanMods(fallbackHits).filter((mod) => mod.source === "modworkshop").slice(0, BROWSE_PAGE_SIZE);
       }
+
+      cleaned = cleaned.slice(0, BROWSE_PAGE_SIZE);
 
       setMods((current) => {
         // Do not blank the library on zero-result live searches.
-        const existing = reset && cleaned.length > 0 ? current.filter((mod) => mod.source !== "modworkshop") : current;
+        const existing = current.filter((mod) => mod.source !== "modworkshop");
         const merged = cleanMods([...existing, ...cleaned]);
-        writeCache("modworkshop", sortMode, merged.filter((mod) => mod.source === "modworkshop"), page, cleaned.length > 0);
+        writeCache(profileId, "modworkshop", sourceGameKeyFor("modworkshop"), searchSort, cleaned, page, cleaned.length > 0, cleanQuery, requestedCategoryId);
         return merged;
       });
 
       setActiveModWorkshopSearch(cleanQuery);
+      setCategoryId(requestedCategoryId);
+      setCategoryLabel(requestedCategoryLabel);
       setModWorkshopSearchPage(page);
       setPages((current) => ({ ...current, modworkshop: page }));
-      setHasMore((current) => ({ ...current, modworkshop: cleaned.length > 0 }));
+      setHasMore((current) => ({ ...current, modworkshop: cleaned.length >= BROWSE_PAGE_SIZE }));
       setStatus(
         cleaned.length > 0
           ? `${reset ? "Found" : "Loaded"} ${cleaned.length} ModWorkshop live result(s) for "${cleanQuery}" page ${page}.`
-          : `No ModWorkshop live results for "${cleanQuery}". Kept the current library visible.`
+          : `No ModWorkshop live results for "${cleanQuery}".`
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -1513,11 +2337,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     await searchModWorkshopPage(query, 1, true);
   }
 
-  async function searchNexus() {
-    const query = sourceSearchQuery.trim();
+  async function searchNexusPage(page = 1, requestedSort: SortMode = sortMode) {
+    const query = (page <= 1 ? sourceSearchQuery : activeNexusSearch || sourceSearchQuery).trim();
 
     if (nexusApiKeyMissing) {
-      setStatus("Nexus search needs an API key. Add one in Settings → Sources.");
+      setStatus("Nexus search needs an API key. Add one in Settings > API Keys.");
       return;
     }
 
@@ -1525,35 +2349,49 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       setSearchQuery("");
       setActiveNexusSearch("");
       setStatus("Cleared Nexus search. Loading normal Nexus browse page.");
-      await loadPage("nexus", true);
+      await loadPage("nexus", true, requestedSort, 1);
       return;
     }
 
     setActiveTab("nexus");
+    setSortMode(requestedSort);
+    setSearchQuery(query);
     setSourceSearching(true);
     setLoadingSource("nexus");
     reportTaskProgress("Nexus search", 15, query);
-    setStatus(`Searching Nexus for "${query}" through GraphQL/search fallback...`);
+    setStatus(`Searching Nexus for "${query}" page ${page}...`);
 
     try {
-      const results = await invokeWithTimeout<SourceModSummary[]>("search_nexus_mods_for_query", { query }, 10000, "Nexus search timed out.");
-      reportTaskProgress("Nexus search", 78, `Found ${results.length} raw result(s).`);
-      const cleaned = sortBrowseMods(cleanMods(results).filter((mod) => mod.source === "nexus"), "updated");
+      const cacheKey = `${profileId}::${activeSourceId}::${nexusGameKey}::${activeSource?.providerGameId ?? ""}::${query.toLowerCase()}::${requestedSort}`;
+      const cached = nexusSearchCacheRef.current.get(cacheKey);
+      const results: SourceModSummary[] = cached ?? (await invokeWithTimeout<SourceModSummary[]>(
+        "search_nexus_mods_for_query",
+        { query, profileId, sourceId: activeSourceId },
+        10000,
+        "Nexus search timed out.",
+      ).catch(() => invoke<SourceModSummary[]>("list_source_index", { source: "nexus", limit: 1200, profileId })
+        .then((mods) => mods.filter((mod) => modMatchesQuery(mod, query)))));
+      const cleaned = cached ?? sortBrowseMods(cleanMods(results).filter((mod) => mod.source === "nexus"), requestedSort);
+      if (!cached) nexusSearchCacheRef.current.set(cacheKey, cleaned);
+      const safePage = Math.max(1, page);
+      const start = (safePage - 1) * BROWSE_PAGE_SIZE;
+      const visiblePage = cleaned.slice(start, start + BROWSE_PAGE_SIZE);
+      reportTaskProgress("Nexus search", 78, `Showing ${visiblePage.length} of ${cleaned.length} result(s).`);
 
       setMods((current) => {
         const existing = current.filter((mod) => mod.source !== "nexus");
-        const merged = sortBrowseMods(cleanMods([...existing, ...cleaned]), sortMode);
-        writeCache("nexus", sortMode, merged.filter((mod) => mod.source === "nexus"), 1, false);
+        const merged = cleanMods([...existing, ...visiblePage]);
+        writeCache(profileId, "nexus", sourceGameKeyFor("nexus"), requestedSort, visiblePage, safePage, start + BROWSE_PAGE_SIZE < cleaned.length, query);
         return merged;
       });
 
       setActiveNexusSearch(query);
-      setPages((current) => ({ ...current, nexus: 1 }));
-      setHasMore((current) => ({ ...current, nexus: false }));
+      setPages((current) => ({ ...current, nexus: safePage }));
+      setHasMore((current) => ({ ...current, nexus: start + BROWSE_PAGE_SIZE < cleaned.length }));
       setStatus(
-        cleaned.length > 0
-          ? `Found ${cleaned.length} Nexus result(s) for "${query}".`
-          : `No Nexus search results for "${query}". Try fewer words, then Rebuild Nexus if it is still missing.`
+        visiblePage.length > 0
+          ? `Found ${cleaned.length} Nexus result(s) for "${query}". Showing page ${safePage}.`
+          : `No Nexus search results for "${query}" on page ${safePage}. Try fewer words, then Rebuild Nexus if it is still missing.`
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -1564,7 +2402,15 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     }
   }
 
+  async function searchNexus() {
+    await searchNexusPage(1);
+  }
+
   function searchActiveSource() {
+    if (activeTab === "custom") {
+      openCustomBrowserUrl(sourceSearchQuery || customBrowserInput);
+      return;
+    }
     if (activeTab === "nexus") void searchNexus();
     else void searchModWorkshop();
   }
@@ -1572,39 +2418,56 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
   async function fetchDetailForMod(mod: SourceModSummary) {
     const detail =
       mod.source === "nexus"
-        ? await invokeWithTimeout<SourceModDetail>("fetch_nexus_mod_detail", { modId: mod.sourceId }, 6500, "Nexus detail timed out.")
-        : await invokeWithTimeout<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: mod.sourceId }, 6500, "ModWorkshop detail timed out.");
+        ? await invokeWithTimeout<SourceModDetail>("fetch_nexus_mod_detail", { modId: mod.sourceId, profileId, gameDomain: mod.gameId ?? nexusGameDomain }, 45000, "Nexus file lookup timed out. Retry to refresh the file list.")
+        : await invokeWithTimeout<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: mod.sourceId, profileId }, 35000, "ModWorkshop file lookup timed out. Retry to refresh the file list.");
 
     const safe = safeDetail(detail, "live");
+    rememberSourceAuthor(safe);
     writeDetailCache(safe);
     return safe;
   }
 
   async function openMod(mod: SourceModSummary) {
     const loadingKey = `${mod.source}-${mod.sourceId}`;
-    const cached = readDetailCache(mod);
 
-    setSelectedMod(cached ?? fallbackDetail(mod));
-    setSourceDetailTab("description");
+    setSelectedMod(fallbackDetail(mod));
     setView("detail");
-    reportTaskProgress("Open mod page", cached ? 35 : 15, mod.name);
+    reportTaskProgress("Open mod page", 15, mod.name);
     setDetailLoadingKey(loadingKey);
-    setStatus(cached ? `Opened cached ${mod.name}. Refreshing source page quietly...` : `Opening ${mod.name}. Loading full source page...`);
+    setStatus(`Opening ${mod.name}. Loading cached and live source data...`);
     recordCachePolicyDiagnostic({
       browseDataSource: "unchanged",
-      detailDataSource: cached ? "cache-placeholder" : "fallback-placeholder",
+      detailDataSource: "fallback-placeholder",
       fileListDataSource: "unavailable",
-      cacheFallbackReason: cached ? "temporary cached detail metadata while live detail loads" : "basic placeholder while live detail loads",
+      cacheFallbackReason: "basic placeholder while cached/live detail loads",
     });
+
+    window.setTimeout(() => {
+      const cached = readDetailCache(mod);
+      if (!cached) return;
+
+      setSelectedMod((current) => {
+        if (!current || `${current.source}-${current.sourceId}` !== loadingKey || current.dataSource === "live") return current;
+        return cached;
+      });
+      recordCachePolicyDiagnostic({
+        browseDataSource: "unchanged",
+        detailDataSource: "cache-placeholder",
+        fileListDataSource: "unavailable",
+        cacheFallbackReason: "temporary cached detail metadata while live detail loads",
+      });
+    }, 0);
 
     try {
       reportTaskProgress("Open mod page", 55, "Loading source details...");
+      void refreshSourceMatches([mod]);
       const detail =
         mod.source === "nexus"
-          ? await invokeWithTimeout<SourceModDetail>("fetch_nexus_mod_detail", { modId: mod.sourceId }, 6500, "Nexus detail timed out. Showing cached/basic page so the app stays responsive.")
-          : await invokeWithTimeout<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: mod.sourceId }, 6500, "ModWorkshop detail timed out. Showing cached/basic page so the app stays responsive.");
+          ? await invokeWithTimeout<SourceModDetail>("fetch_nexus_mod_detail", { modId: mod.sourceId, profileId, gameDomain: mod.gameId ?? nexusGameDomain }, 45000, "Nexus detail timed out. Retry to refresh files.")
+          : await invokeWithTimeout<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: mod.sourceId, profileId }, 35000, "ModWorkshop detail timed out. Retry to refresh files.");
 
       const safe = safeDetail(detail, "live");
+      rememberSourceAuthor(safe);
       writeDetailCache(safe);
       setSelectedMod(safe);
       recordCachePolicyDiagnostic({
@@ -1617,7 +2480,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         ...item,
         name: displayModTitle(safe) || item.name,
         author: displayAuthor(safe) ?? item.author,
-        shortDescription: cleanDescription(safe.shortDescription || safe.description || item.shortDescription || "") || item.shortDescription,
+        authorUsername: safe.authorUsername ?? item.authorUsername ?? null,
+        authorUserId: safe.authorUserId ?? item.authorUserId ?? null,
+        authorProfileUrl: safe.authorProfileUrl ?? item.authorProfileUrl ?? null,
+        authorAvatarUrl: safe.authorAvatarUrl ?? item.authorAvatarUrl ?? null,
+        shortDescription: null,
         tags: Array.from(new Set([...(item.tags ?? []), ...(safe.tags ?? [])].filter(Boolean))).slice(0, 12),
         thumbnailUrl: safe.thumbnailUrl ?? item.thumbnailUrl,
         bannerUrl: safe.bannerUrl ?? item.bannerUrl,
@@ -1652,10 +2519,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     try {
       const detail =
         current.source === "nexus"
-          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: current.sourceId })
-          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: current.sourceId });
+          ? await invoke<SourceModDetail>("fetch_nexus_mod_detail", { modId: current.sourceId, profileId, gameDomain: current.gameId ?? nexusGameDomain })
+          : await invoke<SourceModDetail>("fetch_modworkshop_mod_detail", { modId: current.sourceId, profileId });
 
       const safe = safeDetail(detail, "live");
+      rememberSourceAuthor(safe);
       writeDetailCache(safe);
       setSelectedMod(safe);
       recordCachePolicyDiagnostic({
@@ -1668,7 +2536,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         ...item,
         name: displayModTitle(safe) || item.name,
         author: displayAuthor(safe) ?? item.author,
-        shortDescription: cleanDescription(safe.shortDescription || safe.description || item.shortDescription || "") || item.shortDescription,
+        authorUsername: safe.authorUsername ?? item.authorUsername ?? null,
+        authorUserId: safe.authorUserId ?? item.authorUserId ?? null,
+        authorProfileUrl: safe.authorProfileUrl ?? item.authorProfileUrl ?? null,
+        authorAvatarUrl: safe.authorAvatarUrl ?? item.authorAvatarUrl ?? null,
+        shortDescription: null,
         tags: Array.from(new Set([...(item.tags ?? []), ...(safe.tags ?? [])].filter(Boolean))).slice(0, 12),
         thumbnailUrl: safe.thumbnailUrl ?? item.thumbnailUrl,
         bannerUrl: safe.bannerUrl ?? item.bannerUrl,
@@ -1694,6 +2566,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
 
   async function stageFile(mod: SourceModDetail, file: SourceModFile, replaceFileNames: string[] = []) {
+    if (!downloadsEnabled) {
+      setStatus(downloadsBlockedMessage);
+      return;
+    }
     if (!hasLiveFileData(mod)) {
       setStatus(liveFileDataUnavailableMessage());
       return;
@@ -1717,6 +2593,8 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         downloadUrl: file.downloadUrl ?? null,
         modName: mod.name,
         description: mod.description,
+        gameDomain: mod.source === "nexus" ? nexusGameDomain : null,
+        profileId,
       });
 
       setResults((current) => [result, ...current].slice(0, 10));
@@ -1724,11 +2602,11 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
       if (!result.canInstallLater) {
         setStatus(`Downloaded ${file.name}, but install is blocked for review.`);
-        reportTaskProgress("Install failed", 100, "No installable files detected.");
+        reportTaskProgress("Download complete", 100, "Package needs manual or external-manager installation.");
         return;
       }
 
-      setStatus(`Installing ${file.name} into detected PAYDAY 3 paths...`);
+      setStatus(`Installing ${file.name} into ${currentGameProfile.displayName} paths...`);
       reportTaskProgress("Install mod", 76, `Installing ${file.name}`);
 
       const applied = await invoke<InstallApplyResult>("install_staged_file_to_game", {
@@ -1748,6 +2626,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         pageUrl: mod.pageUrl ?? null,
         description: mod.description,
         replaceFileNames,
+        profileId,
       });
 
       setStatus(`Installed ${applied.installedFiles.length} file(s) for ${mod.name}${applied.replacedFiles.length ? ` and replaced ${applied.replacedFiles.length} old file(s)` : ""}.`);
@@ -1778,6 +2657,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
   }
 
   async function updateInstalledSource(mod: SourceModSummary, match: InstalledSourceMatch) {
+    if (!downloadsEnabled) {
+      setStatus(downloadsBlockedMessage);
+      return;
+    }
     setResults([]);
     setStatus(`Loading update file for ${mod.name}...`);
 
@@ -1794,13 +2677,25 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         return;
       }
 
-      await stageFile(detail, files[0], match.matchedFiles);
+      if (files.length > 1) {
+        setInstallPickerReplacementFiles(match.matchedFiles);
+        setSelectedFileIds(defaultSelectedFileIds(files, detail.source));
+        setInstallPickerMod({ ...detail, files });
+        setStatus(`Choose the update file for ${detail.name}. Latest main file is selected.`);
+      } else {
+        await stageFile(detail, files[0], match.matchedFiles);
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function openInstall(mod: SourceModSummary) {
+    setInstallPickerReplacementFiles([]);
+    if (!downloadsEnabled) {
+      setStatus(downloadsBlockedMessage);
+      return;
+    }
     setResults([]);
     setStatus(`Loading files for ${mod.name}...`);
 
@@ -1808,7 +2703,6 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       const safeDetail = await fetchDetailForMod(mod);
       if (!hasLiveFileData(safeDetail)) {
         setSelectedMod(safeDetail);
-        setSourceDetailTab("files");
         setView("detail");
         setStatus(liveFileDataUnavailableMessage());
         return;
@@ -1818,7 +2712,6 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
       if (files.length === 0) {
         setSelectedMod(safeDetail);
-        setSourceDetailTab("files");
         setView("detail");
         setStatus("No installable download files were exposed. Opened the mod page so you can check the source manually.");
         return;
@@ -1839,6 +2732,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
 
   async function installSelected() {
     if (!installPickerMod) return;
+    if (!downloadsEnabled) {
+      setStatus(downloadsBlockedMessage);
+      return;
+    }
     if (!hasLiveFileData(installPickerMod)) {
       setStatus(liveFileDataUnavailableMessage());
       setInstallPickerMod(null);
@@ -1848,7 +2745,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     const files = installableFiles(installPickerMod.files, installPickerMod.source)
       .filter((file) => selectedFileIds.includes(file.id))
       .filter((file) => matchedFileNamesForSourceFile(file, match).length === 0);
-    for (const file of files) await stageFile(installPickerMod, file);
+    for (const file of files) await stageFile(installPickerMod, file, installPickerReplacementFiles);
   }
 
   useEffect(() => {
@@ -1875,10 +2772,19 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, sourceMods.length, sourceSearching, activeModWorkshopSearch, activeNexusSearch]);
+  }, [activeTab, sourceModsSignature, sourceSearching, activeModWorkshopSearch, activeNexusSearch]);
 
   useEffect(() => {
-    const cached = activeTab === "modworkshop" ? null : readCache(activeTab, sortMode);
+    if (restoredSessionRef.current) {
+      restoredSessionRef.current = false;
+      return;
+    }
+
+    if ((activeTab === "modworkshop" && activeModWorkshopSearch.trim()) || (activeTab === "nexus" && activeNexusSearch.trim())) {
+      return;
+    }
+
+    const cached = readCache(profileId, activeTab, sourceGameKeyFor(activeTab), sortMode, 1, "", activeTab === "modworkshop" ? categoryId : "");
 
     setPages((current) => ({ ...current, [activeTab]: 0 }));
     setHasMore((current) => ({ ...current, [activeTab]: true }));
@@ -1898,16 +2804,16 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         cacheFallbackReason: "temporary browse placeholders while live page loads",
       });
     } else {
-      // Do not wipe visible cards before the replacement data arrives.
+      setMods((current) => current.filter((mod) => mod.source !== activeTab));
       setCacheNote("");
       setStatus(`Loading live ${sourceLabel(activeTab)} results...`);
       setBrowseCardsLive(false);
     }
 
     if (activeTab === "modworkshop") void loadModWorkshopLivePage(true, sortMode, 1);
-    else void loadPage(activeTab, true);
+    else void loadPage(activeTab, true, sortMode, 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, sortMode]);
+  }, [activeTab, activeSourceId, exactSourceCacheKey, sortMode, profileId, modWorkshopGameKey, nexusGameKey]);
 
 
   function backToBrowseList() {
@@ -1920,7 +2826,7 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
       setActiveTab(detailSource);
       window.setTimeout(() => {
         if (detailSource === "modworkshop") void loadModWorkshopLivePage(true, sortMode, 1);
-        else void loadPage(detailSource, true);
+        else void loadPage(detailSource, true, sortMode, 1);
       }, 0);
     }
   }
@@ -1931,309 +2837,196 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
     const files = liveFileData ? installableFiles(selectedMod.files, selectedMod.source) : [];
     const fileGroups = groupedSourceFiles(files, selectedMod.source);
     const selectedMatch = sourceMatches[`${selectedMod.source}-${selectedMod.sourceId}`];
-
     const detailSourceName = sourceLabel(selectedMod.source);
-    const pageFlavor = "Source detail";
-    const heroImage = selectedMod.bannerUrl ?? selectedMod.thumbnailUrl;
-    const galleryImages = (selectedMod.images ?? [])
-      .filter((image) => canUseThumbnail(image.imageUrl || image.thumbnailUrl))
-      .slice(0, 8);
-    const descriptionBlocks = descriptionParagraphs(selectedMod.description || selectedMod.shortDescription || "").slice(0, 36);
+    const galleryImages = (selectedMod.images ?? []).filter((image) => canUseThumbnail(image.imageUrl || image.thumbnailUrl)).slice(0, 18);
     const changelogBlocks = descriptionParagraphs(selectedMod.changelog || "").filter((line) => line !== "No description loaded.");
-    const commentBlocks = (selectedMod.comments ?? []).map(cleanDescription).filter(Boolean).slice(0, 8);
-    const logBlocks = (selectedMod.logs ?? []).map(cleanDescription).filter(Boolean).slice(0, 8);
-    const statItems = [
-      selectedMod.updatedAt ? { label: "Updated", value: sourceUpdatedLabel(selectedMod as SourceModSummary) ?? String(selectedMod.updatedAt) } : null,
+    const commentBlocks = (selectedMod.comments ?? []).map(cleanDescription).filter(Boolean).slice(0, 16);
+    const logBlocks = (selectedMod.logs ?? []).map(cleanDescription).filter(Boolean).slice(0, 16);
+    const matchedFiles = selectedMatch?.matchedFiles ?? [];
+    const disabledMatch = matchedFiles.some((name) => /\.disabled$/i.test(name));
+    const fileBucketLabels: Record<SourceFileBucket, string> = { main: "Main files", optional: "Optional files", old: "Old files" };
+    const sourceFileGroups: UnifiedFileGroup[] = (["main", "optional", "old"] as SourceFileBucket[])
+      .filter((bucket) => bucket !== "old" || fileGroups.old.length > 0)
+      .map((bucket) => ({
+        id: bucket,
+        title: fileBucketLabels[bucket],
+        subtitle: bucket === "main" ? "Primary downloads" : bucket === "optional" ? "Optional downloads and requirements" : "Older versions",
+        emptyLabel: `No ${fileBucketLabels[bucket].toLowerCase()} exposed by this source.`,
+        rows: fileGroups[bucket].map((file) => {
+          const matchedNames = matchedFileNamesForSourceFile(file, selectedMatch);
+          const installed = matchedNames.length > 0;
+          const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
+          return {
+            id: file.id,
+            title: file.name,
+            subtitle: sourceFileMetaLine(file),
+            meta: file.uploadedAt ? `Uploaded ${formatSourceDate(file.uploadedAt)}` : null,
+            status: installed ? (disabled ? "Disabled" : "Installed") : "Available",
+            tone: installed ? (disabled ? "warning" as const : "good" as const) : "neutral" as const,
+            actions: installed ? (
+              <>
+                {selectedMatch && <button className="ghost-button compact" type="button" onClick={() => openSourceFileNamesLocation(selectedMatch, matchedNames)} disabled={installingKey !== null}>Open Folder</button>}
+                <button className="ghost-button compact" type="button" onClick={() => setSourceFileNamesEnabled(matchedNames, disabled)} disabled={installingKey !== null}>{disabled ? "Enable" : "Disable"}</button>
+                <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFileNames(matchedNames)} disabled={installingKey !== null}>Uninstall</button>
+              </>
+            ) : (
+              <button className="ghost-button compact install-button" type="button" onClick={() => stageFile(selectedMod, file)} disabled={installingKey !== null || !downloadsEnabled} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>{installingKey === fileKey(selectedMod, file) ? "Installing..." : "Install"}</button>
+            ),
+            progress: <MiniProgress active={installingKey === fileKey(selectedMod, file)} />,
+          };
+        }),
+      }));
+    const installedFileGroups: UnifiedFileGroup[] = matchedFiles.length ? [{
+      id: "installed-files",
+      title: "Installed files",
+      subtitle: "Files currently tracked for this source match.",
+      rows: matchedFiles.map((fileName) => ({
+        id: fileName,
+        title: fileName.split(/[\\/]/).pop() ?? fileName,
+        subtitle: fileName,
+        status: /\.disabled$/i.test(fileName) ? "Disabled" : "Enabled",
+        tone: /\.disabled$/i.test(fileName) ? "warning" as const : "good" as const,
+        actions: selectedMatch ? (
+          <>
+            <button className="ghost-button compact" type="button" onClick={() => openSourceFileNamesLocation(selectedMatch, [fileName])} disabled={installingKey !== null}>Reveal</button>
+            <button className="ghost-button compact" type="button" onClick={() => navigator.clipboard.writeText(fileName)}>Copy Path</button>
+          </>
+        ) : null,
+      })),
+    }] : [];
+    const statistics: UnifiedInfoItem[] = [
+      selectedMod.updatedAt ? { label: "Last Update", value: sourceUpdatedLabel(selectedMod as SourceModSummary) ?? String(selectedMod.updatedAt) } : null,
       typeof selectedMod.downloads === "number" ? { label: "Downloads", value: selectedMod.downloads.toLocaleString() } : null,
       typeof selectedMod.likes === "number" ? { label: "Likes", value: selectedMod.likes.toLocaleString() } : null,
-      selectedMod.version ? { label: "Version", value: selectedMod.version } : null,
-      ...((selectedMod.stats ?? []).slice(0, 4)),
-    ].filter(Boolean) as Array<{ label: string; value: string }>;
+      typeof selectedMod.views === "number" ? { label: "Views", value: selectedMod.views.toLocaleString() } : null,
+      ...((selectedMod.stats ?? []).slice(0, 8)),
+    ].filter(Boolean) as UnifiedInfoItem[];
+    const metadata: UnifiedInfoItem[] = [
+      { label: "Install Status", value: selectedMatch?.installed ? (selectedMatch.enabled === false ? "Disabled" : "Installed") : "Not installed", tone: selectedMatch?.installed ? "good" : "neutral" },
+      { label: "Verification", value: selectedMatch ? `${selectedMatch.confidence}% ${selectedMatch.confidenceLevel ?? "match"}` : "Not matched" },
+      { label: "Update", value: selectedMatch?.updateAvailable ? "Update available" : selectedMatch?.installed ? "Current" : "Unknown", tone: selectedMatch?.updateAvailable ? "warning" : "neutral" },
+      { label: "Category", value: selectedMatch?.sourceFileCategory ?? null },
+      { label: "Files", value: liveFileData ? `${files.length} downloadable` : "Live file list unavailable" },
+    ];
+    const actions: UnifiedAction[] = [
+      selectedMatch?.installed && selectedMatch.updateAvailable ? { key: "update", label: installingKey ? "Updating..." : "Update", onClick: () => updateInstalledSource(selectedMod, selectedMatch), disabled: installingKey !== null || !downloadsEnabled, variant: "update" } : null,
+      selectedMatch?.installed ? { key: "toggle", label: disabledMatch ? "Enable" : "Disable", onClick: () => setSourceFileNamesEnabled(matchedFiles, disabledMatch), disabled: installingKey !== null || matchedFiles.length === 0, variant: "neutral" } : null,
+      !selectedMatch?.installed ? { key: "install", label: installingKey ? "Installing..." : "Install", onClick: () => openInstall(selectedMod), disabled: installingKey !== null || !downloadsEnabled, title: !downloadsEnabled ? downloadsBlockedMessage : undefined, variant: "install" } : null,
+      liveFileData && files.length > 0 ? { key: "browse-files", label: "Browse Files", onClick: () => { setInstallPickerReplacementFiles([]); setSelectedFileIds(defaultSelectedFileIds(files, selectedMod.source)); setInstallPickerMod({ ...selectedMod, files }); }, disabled: installingKey !== null, variant: selectedMatch?.installed ? "neutral" : "primary" } : null,
+      selectedMatch?.installed ? { key: "open-folder", label: "Open Folder", onClick: () => openSourceFileNamesLocation(selectedMatch, matchedFiles), disabled: installingKey !== null || matchedFiles.length === 0, variant: "neutral" } : null,
+      selectedMatch?.installed ? { key: "uninstall", label: installingKey?.endsWith("-uninstall") ? "Uninstalling..." : "Uninstall", onClick: () => uninstallMatchedSource(selectedMatch), disabled: installingKey !== null, variant: "danger" } : null,
+      { key: "refresh", label: loadingThisDetail ? "Refreshing..." : "Refresh", onClick: refreshSelectedDetail, disabled: detailLoadingKey !== null, variant: "neutral" },
+      { key: "share", label: "Share", onClick: () => navigator.clipboard.writeText(selectedMod.pageUrl ?? selectedMod.name), variant: "neutral" },
+    ].filter(Boolean) as UnifiedAction[];
+    const versionHistory: UnifiedTimelineItem[] = [
+      ...changelogBlocks.slice(0, 12).map((entry, index) => ({ id: `changelog-${index}`, title: "Changelog", detail: entry, tone: "neutral" as const })),
+      ...logBlocks.slice(0, 12).map((entry, index) => ({ id: `log-${index}`, title: "Source log", detail: entry, tone: "neutral" as const })),
+    ];
+    const updateItems: UnifiedTimelineItem[] = selectedMatch ? [{
+      id: "source-update",
+      title: selectedMatch.updateAvailable ? "Update available" : "Installed version",
+      detail: selectedMatch.reason,
+      date: selectedMatch.sourceUpdatedAt ?? selectedMatch.sourceFileUploadedAt ?? selectedMatch.sourceFileVersion ?? null,
+      status: selectedMatch.updateAvailable ? "Review" : "Current",
+      tone: selectedMatch.updateAvailable ? "warning" : "good",
+    }] : [];
+    const developerItems: UnifiedInfoItem[] = [
+      { label: "Source ID", value: selectedMod.sourceId },
+      { label: "UID", value: selectedMod.uid },
+      { label: "Data source", value: selectedMod.dataSource },
+      { label: "Detail source", value: selectedMod.detailDataSource },
+      { label: "File list source", value: selectedMod.fileListDataSource },
+      { label: "Match kind", value: selectedMatch?.matchKind },
+      { label: "Receipt ID", value: selectedMatch?.receiptId },
+      { label: "Source File ID", value: selectedMatch?.sourceFileId },
+    ];
+    const liveDependencies = (selectedMod.dependencies ?? []).map((dependency) => enrichDependency({
+      name: dependency.name,
+      required: dependency.required,
+      optional: dependency.optional,
+      sourceKind: dependency.sourceKind as DependencySourceKind | undefined,
+      gameDomain: dependency.gameDomain ?? undefined,
+      numericGameId: dependency.numericGameId ?? undefined,
+      modId: dependency.modId ?? undefined,
+      url: dependency.url ?? undefined,
+      notes: dependency.notes ?? undefined,
+      versionConstraint: dependency.versionConstraint ?? undefined,
+    }, profileId));
+    const graphRoots = buildDependencyGraph(liveDependencies);
+    const dependencyRows: UnifiedDependencyItem[] = [];
+    const listedDependencies = new Set<string>();
+    const addDependencyRow = (dependency: DependencyDefinition, parent?: string) => {
+      if (listedDependencies.has(dependency.id)) return;
+      listedDependencies.add(dependency.id);
+      dependencyRows.push({
+        id: dependency.id,
+        title: <DependencyName dependency={dependency} onOpenNative={(item) => { const summary = dependencyToSourceSummary(item); if (!summary) return false; void openMod(summary); return true; }} />,
+        detail: [parent ? `Required by ${parent}` : dependency.description, dependency.versionConstraint ? `Version ${dependency.versionConstraint}` : null, dependencySourceLabel(dependency)].filter(Boolean).join(" - "),
+        status: dependency.required ? "Required" : dependency.optional ? "Optional" : "Recommended",
+        tone: dependency.required ? "warning" : "neutral",
+        actions: <DependencyActions dependency={dependency} onOpenNative={(item) => { const summary = dependencyToSourceSummary(item); if (!summary) return false; void openMod(summary); return true; }} />,
+      });
+      const node = graphRoots.find((root) => root.dependency.id === dependency.id);
+      node?.children.forEach((child) => addDependencyRow(child.dependency, dependency.name));
+    };
+    graphRoots.forEach((node) => {
+      addDependencyRow(node.dependency);
+      node.children.forEach((child) => addDependencyRow(child.dependency, node.dependency.name));
+    });
 
     return (
-      <section className={`page browse-page safe-browse-page source-detail-page source-detail-${selectedMod.source}`}>
-        <div className="source-page-shell">
-          <div className="source-page-nav">
-            <button className="ghost-button compact" type="button" onClick={backToBrowseList}>
-              ← Back to Browse
-            </button>
-            <span>{pageFlavor}</span>
-          </div>
+      <>
+        {!downloadsEnabled && (
+          <article className="safe-result warning profile-download-disabled" role="status">
+            <strong>Downloads disabled</strong>
+            <span>{downloadsBlockedMessage}</span>
+          </article>
+        )}
+        <UnifiedModPage
+          className="browse-unified-mod-page"
+          backLabel="Back to Browse"
+          onBack={backToBrowseList}
+          source={selectedMod.source}
+          sourceLabel={detailSourceName}
+          sourceAccent={sourceAccent(selectedMod.source)}
+          sourceId={selectedMod.sourceId}
+          title={displayModTitle(selectedMod)}
+          summary={selectedMod.shortDescription || "Source mod page."}
+          description={selectedMod.description || selectedMod.shortDescription || "No description loaded."}
+          author={displayAuthor(selectedMod)}
+          version={selectedMod.version}
+          game={selectedMod.gameId ?? sourceGameKeyFor(selectedMod.source)}
+          category={selectedMatch?.sourceFileCategory ?? null}
+          installStatus={selectedMatch?.installed ? (selectedMatch.enabled === false ? "Disabled" : "Installed") : "Not installed"}
+          verificationStatus={selectedMatch ? `${selectedMatch.confidence}% ${selectedMatch.confidenceLevel ?? "match"}` : "Unmatched"}
+          thumbnailUrl={canUseThumbnail(selectedMod.thumbnailUrl) ? selectedMod.thumbnailUrl : null}
+          bannerUrl={canUseThumbnail(selectedMod.bannerUrl) ? selectedMod.bannerUrl : null}
+          pageUrl={selectedMod.pageUrl}
+          tags={selectedMod.tags ?? []}
+          badges={[
+            { label: detailSourceName, tone: "neutral" as const },
+            loadingThisDetail ? { label: "Loading full page", tone: "warning" as const } : null,
+            !liveFileData ? { label: "Live files unavailable", tone: "warning" as const } : null,
+            selectedMatch?.updateAvailable ? { label: "Update Available", tone: "warning" as const } : null,
+          ].filter(Boolean) as Array<{ label: ReactNode; tone?: "good" | "warning" | "danger" | "neutral" }>}
+          actions={actions}
+          metadata={metadata}
+          statistics={statistics}
+          galleryImages={galleryImages}
+          fileGroups={sourceFileGroups}
+          installedFileGroups={installedFileGroups}
+          dependencies={dependencyRows}
+          versionHistory={versionHistory}
+          updateItems={updateItems}
+          comments={commentBlocks.map((comment, index) => <p key={`comment-${index}`}>{comment}</p>)}
+          developerMode={developerMode}
+          developerItems={developerItems}
+          filesUnavailableMessage={!liveFileData ? liveFileDataUnavailableMessage() : null}
+          onOpenExternal={openWebsite}
+          onImageError={markThumbnailFailed}
+        />
 
-          <div className="source-detail-hero card">
-            <div className="source-detail-hero-media">
-              {canUseThumbnail(heroImage) ? (
-                <img
-                  src={heroImage ?? ""}
-                  alt=""
-                  loading="lazy"
-                  onError={() => markThumbnailFailed(heroImage)}
-                />
-              ) : (
-                <div className="source-detail-fallback">{thumbnailFallbackText(selectedMod.source)}</div>
-              )}
-            </div>
-
-            <div className="source-detail-hero-copy">
-              <p className="eyebrow">{detailSourceName}</p>
-              <h1>{displayModTitle(selectedMod)}</h1>
-              <p>{selectedMod.shortDescription || "Source mod page."}</p>
-              <div className="safe-badge-row source-detail-badges">
-                <span className="status-pill">{detailSourceName}</span>
-                {displayAuthor(selectedMod) && <span className="status-pill">by {displayAuthor(selectedMod)}</span>}
-                {selectedMod.updatedAt && <span className="status-pill">{sourceUpdatedLabel(selectedMod as SourceModSummary)}</span>}
-                {typeof selectedMod.downloads === "number" && <span className="status-pill">{selectedMod.downloads.toLocaleString()} downloads</span>}
-                {loadingThisDetail && <span className="status-pill">loading full page...</span>}
-                {!liveFileData && <span className="status-pill">live files unavailable</span>}
-              </div>
-            </div>
-
-            <div className="source-detail-actions">
-              <button className="ghost-button compact" type="button" onClick={() => openWebsite(selectedMod.pageUrl)}>
-                Open {detailSourceName}
-              </button>
-              {liveFileData && selectedMatch?.installed && selectedMatch.updateAvailable ? (
-                <button className="ghost-button compact update-button" type="button" onClick={() => updateInstalledSource(selectedMod, selectedMatch)} disabled={installingKey !== null}>
-                  {installingKey ? "Updating..." : "Update"}
-                </button>
-              ) : selectedMatch?.installed ? (
-                <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallMatchedSource(selectedMatch)} disabled={installingKey !== null}>
-                  {installingKey?.endsWith("-uninstall") ? "Uninstalling..." : "Uninstall"}
-                </button>
-              ) : liveFileData && files.length === 1 ? (
-                <button className="ghost-button compact install-button" type="button" onClick={() => stageFile(selectedMod, files[0])} disabled={installingKey !== null}>
-                  {installingKey ? "Installing..." : "Install"}
-                </button>
-              ) : null}
-              <button className="ghost-button compact" type="button" onClick={refreshSelectedDetail} disabled={detailLoadingKey !== null}>
-                {detailLoadingKey ? "Refreshing..." : "Refresh page data"}
-              </button>
-              <button className="ghost-button compact" type="button" onClick={() => setInstallPickerMod({ ...selectedMod, files })} disabled={!liveFileData || files.length === 0}>
-                Files
-              </button>
-            </div>
-          </div>
-
-          <div className="source-detail-grid-v2">
-            <main className="source-detail-main-stack source-detail-tabbed-main">
-              <article className="card source-content-card source-tabbed-panel">
-                <div className="mod-page-tabs source-page-tabs">
-                  {([
-                    ["description", "Description"],
-                    ["files", `Files ${files.length}`],
-                    ["changelog", `Changelog ${changelogBlocks.length + logBlocks.length}`],
-                    ["comments", `Comments ${commentBlocks.length}`],
-                    ["images", `Images ${galleryImages.length}`],
-                  ] as Array<[typeof sourceDetailTab, string]>).map(([id, label]) => (
-                    <button className={`mod-page-tab ${sourceDetailTab === id ? "active" : ""}`} key={id} type="button" onClick={() => setSourceDetailTab(id)}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                {sourceDetailTab === "description" && (
-                  <div className="source-tab-pane source-description-prose">
-                    <div className="section-title-row">
-                      <div>
-                        <p className="eyebrow">Overview</p>
-                        <h2>Description</h2>
-                      </div>
-                      <span className="status-pill">{selectedMod.source === "modworkshop" ? "ModWorkshop" : "Nexus"}</span>
-                    </div>
-                    {descriptionBlocks.map((paragraph, index) => <p key={`desc-${index}`}>{renderLinkedText(paragraph, openWebsite)}</p>)}
-                  </div>
-                )}
-
-                {sourceDetailTab === "files" && (
-                  <div className="source-tab-pane source-downloads-expanded-list source-downloads-tab-pane">
-                    <div className="section-title-row">
-                      <div>
-                        <p className="eyebrow">Downloads</p>
-                        <h2>Files</h2>
-                      </div>
-                      <span className="status-pill">{files.length} installable</span>
-                    </div>
-                    {!liveFileData && <p>{liveFileDataUnavailableMessage()}</p>}
-                    {([
-                      ["main", "Main files"],
-                      ["optional", "Optional files"],
-                      ["old", "Old versions"],
-                    ] as Array<[SourceFileBucket, string]>).filter(([bucket]) => bucket !== "old" || fileGroups.old.length > 0).map(([bucket, label]) => (
-                      <div className={`source-downloads-expanded-group ${bucket}`} key={bucket}>
-                        <div className="source-downloads-group-heading">
-                          <h3>{label}</h3>
-                          <span className="status-pill">{fileGroups[bucket].length}</span>
-                        </div>
-                        {fileGroups[bucket].map((file) => {
-                          const matchedNames = matchedFileNamesForSourceFile(file, selectedMatch);
-                          const installed = matchedNames.length > 0;
-                          const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
-                          return (
-                            <div className={`source-download-detail-row source-download-action-row ${installed ? "installed" : ""}`} key={`${bucket}-${file.id}`}>
-                              <div>
-                                <strong>{file.name}</strong>
-                                <span>{sourceFileMetaLine(file)}</span>
-                              </div>
-                              {installed ? (
-                                <div className="source-file-row-actions">
-                                  {selectedMatch && <button className="ghost-button compact" type="button" onClick={() => openSourceFileNamesLocation(selectedMatch, matchedNames)} disabled={installingKey !== null}>Open File Location</button>}
-                                  <button className="ghost-button compact" type="button" onClick={() => setSourceFileNamesEnabled(matchedNames, disabled)} disabled={installingKey !== null}>{disabled ? "Enable" : "Disable"}</button>
-                                  <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFileNames(matchedNames)} disabled={installingKey !== null}>Uninstall</button>
-                                </div>
-                              ) : (
-                                <button className="ghost-button compact install-button" type="button" onClick={() => stageFile(selectedMod, file)} disabled={installingKey !== null}>
-                                  {installingKey === fileKey(selectedMod, file) ? "Installing..." : "Install"}
-                                </button>
-                              )}
-                              <MiniProgress active={installingKey === fileKey(selectedMod, file)} />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {sourceDetailTab === "changelog" && (
-                  <div className="source-tab-pane source-notes-list">
-                    <div className="section-title-row">
-                      <div>
-                        <p className="eyebrow">Updates</p>
-                        <h2>Changelog / logs</h2>
-                      </div>
-                    </div>
-                    {[...changelogBlocks, ...logBlocks].length ? [...changelogBlocks, ...logBlocks].slice(0, 24).map((entry, index) => <p key={`log-${index}`}>{entry}</p>) : (
-                      <div className="source-empty-tab-actions">
-                        <p>No changelog was exposed by the current public source payload yet.</p>
-                        <button className="ghost-button compact" type="button" onClick={() => openWebsite(selectedMod.pageUrl)}>Open source changelog</button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {sourceDetailTab === "comments" && (
-                  <div className="source-tab-pane source-comment-list">
-                    <div className="section-title-row">
-                      <div>
-                        <p className="eyebrow">Community</p>
-                        <h2>Comments</h2>
-                      </div>
-                      <span className="status-pill">{commentBlocks.length}</span>
-                    </div>
-                    {commentBlocks.length ? commentBlocks.map((comment, index) => <p key={`comment-${index}`}>{comment}</p>) : (
-                      <div className="source-empty-tab-actions">
-                        <p>Comments are not exposed by the current public source payload yet.</p>
-                        <button className="ghost-button compact" type="button" onClick={() => openWebsite(selectedMod.pageUrl)}>Open source comments</button>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {sourceDetailTab === "images" && (
-                  <div className="source-tab-pane">
-                    <div className="section-title-row">
-                      <div>
-                        <p className="eyebrow">Images</p>
-                        <h2>Gallery</h2>
-                      </div>
-                      <span className="status-pill">{galleryImages.length} loaded</span>
-                    </div>
-                    <div className="source-image-grid">
-                      {galleryImages.map((image) => (
-                        <button className="source-image-tile" type="button" key={image.id} onClick={() => openWebsite(image.imageUrl)}>
-                          <img src={image.thumbnailUrl ?? image.imageUrl} alt={image.title ?? selectedMod.name} loading="lazy" onError={() => markThumbnailFailed(image.thumbnailUrl ?? image.imageUrl)} />
-                        </button>
-                      ))}
-                      {galleryImages.length === 0 && <p>No images exposed by this source yet.</p>}
-                    </div>
-                  </div>
-                )}
-              </article>
-            </main>
-
-            <aside className="source-detail-side-stack">
-              <article className="card safe-files-card source-files-card-v2">
-                <div className="safe-files-header">
-                    <p className="eyebrow">Downloads</p>
-                    <h2>{selectedMod.source === "modworkshop" ? "Files" : "Nexus files"}</h2>
-                  <span className="status-pill">{files.length} files</span>
-                </div>
-
-                <div className="source-file-buckets">
-                  {!liveFileData && <p>{liveFileDataUnavailableMessage()}</p>}
-                  {([
-                    ["main", "Main files"],
-                    ["optional", "Optional files"],
-                    ["old", "Old versions"],
-                  ] as Array<[SourceFileBucket, string]>).filter(([bucket]) => bucket !== "old" || fileGroups.old.length > 0).map(([bucket, label]) => (
-                    <div className={`source-file-bucket source-file-bucket-${bucket}`} key={bucket}>
-                      <div className="source-file-bucket-heading">
-                        <div>
-                          <h3>{label}</h3>
-                        </div>
-                        <span className="status-pill">{fileGroups[bucket].length}</span>
-                      </div>
-                      <div className="safe-file-list source-file-list-v2">
-                        {fileGroups[bucket].map((file) => {
-                          const matchedNames = matchedFileNamesForSourceFile(file, selectedMatch);
-                          const installed = matchedNames.length > 0;
-                          const disabled = matchedNames.some((name) => /\.disabled$/i.test(name));
-                          return (
-                            <div className="safe-file-row source-file-row-v2" key={file.id}>
-                              <div>
-                                <strong title={file.name}>{file.name}</strong>
-                                <p>{sourceFileMetaLine(file)}</p>
-                              </div>
-                              {installed ? (
-                                <div className="source-file-row-actions">
-                                  {selectedMatch && <button className="ghost-button compact" type="button" onClick={() => openSourceFileNamesLocation(selectedMatch, matchedNames)} disabled={installingKey !== null}>Open File Location</button>}
-                                  <button className="ghost-button compact" type="button" onClick={() => setSourceFileNamesEnabled(matchedNames, disabled)} disabled={installingKey !== null}>{disabled ? "Enable" : "Disable"}</button>
-                                  <button className="ghost-button compact danger-button" type="button" onClick={() => uninstallSourceFileNames(matchedNames)} disabled={installingKey !== null}>Uninstall</button>
-                                </div>
-                              ) : (
-                                <button className="ghost-button compact install-button" type="button" onClick={() => stageFile(selectedMod, file)} disabled={installingKey !== null}>
-                                  {installingKey === fileKey(selectedMod, file) ? "Installing..." : "Install"}
-                                </button>
-                              )}
-                              <MiniProgress active={installingKey === fileKey(selectedMod, file)} />
-                            </div>
-                          );
-                        })}
-                        {fileGroups[bucket].length === 0 && <p className="source-file-empty">No {label.toLowerCase()} exposed by this source.</p>}
-                      </div>
-                    </div>
-                  ))}
-                  {files.length === 0 && <p>No files exposed by this source yet.</p>}
-                </div>
-              </article>
-
-              <article className="card source-meta-card">
-                <p className="eyebrow">Page info</p>
-                <h2>Details</h2>
-                <div className="source-meta-list">
-                  {statItems.map((item) => (
-                    <div key={`${item.label}-${item.value}`}>
-                      <span>{item.label}</span>
-                      <strong>{item.value}</strong>
-                    </div>
-                  ))}
-                  {!statItems.length && <p>No extra page stats loaded yet.</p>}
-                </div>
-              </article>
-
-              {(selectedMod.tags ?? []).length > 0 && (
-                <article className="card source-tag-card">
-                  <p className="eyebrow">Tags</p>
-                  <div className="safe-badge-row">
-                    {(selectedMod.tags ?? []).slice(0, 18).map((tag) => <span className={tagClassName(tag)} key={tag}>{tag}</span>)}
-                  </div>
-                </article>
-              )}
-            </aside>
-          </div>
-        </div>
-
-        {results.length > 0 && <div className="card safe-results">{results.map((result, index) => <ResultNotice result={result} key={`${result.fileName}-${index}`} />)}</div>}
+        {results.length > 0 && <div className="card safe-results">{results.map((result, index) => <ResultNotice result={result} profileId={profileId} key={`${result.fileName}-${index}`} />)}</div>}
 
         {installPickerMod && (
           <InstallPicker
@@ -2242,8 +3035,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
             selectedFileIds={selectedFileIds}
             setSelectedFileIds={setSelectedFileIds}
             installingKey={installingKey}
+            downloadsEnabled={downloadsEnabled}
+            downloadsBlockedMessage={downloadsBlockedMessage}
             onClose={() => setInstallPickerMod(null)}
-            onInstallOne={stageFile}
+            onInstallOne={(mod, file) => stageFile(mod, file, installPickerReplacementFiles)}
             onInstallSelected={installSelected}
             onOpenLocation={openSourceFileNamesLocation}
             onUninstall={uninstallSourceFileNames}
@@ -2267,10 +3062,9 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
             </div>
           </div>
         )}
-      </section>
+      </>
     );
   }
-
   return (
     <section className="page browse-page safe-browse-page">
       <div className="browse-hero card">
@@ -2281,33 +3075,31 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         </div>
 
         <div className="browse-source-switcher">
-          <button
-            className={`source-tab ${activeTab === "modworkshop" ? "active" : ""}`}
-            type="button"
-            onClick={() => {
-              setActiveTab("modworkshop");
-              setSourceSearchQuery("");
-            }}
-          >
-            ModWorkshop
-          </button>
-          <button
-            className={`source-tab ${activeTab === "nexus" ? "active" : ""}`}
-            type="button"
-            onClick={() => {
-              setActiveTab("nexus");
-              setSourceSearchQuery("");
-            }}
-          >
-            Nexus Mods
-          </button>
+          {configuredSources.map((source) => (
+            <button
+              className={`source-tab ${activeSource?.id === source.id ? "active" : ""}`}
+              type="button"
+              key={source.id}
+              title={source.displayName}
+              onClick={() => switchBrowseSource(sourceTabFor(source), source.id)}
+            >
+              <span>{source.displayName}</span>
+            </button>
+          ))}
         </div>
       </div>
 
+      {!downloadsEnabled && (
+        <article className="safe-result warning profile-download-disabled" role="status">
+          <strong>{gameInstalled ? "Downloads pending profile validation" : "Browse-only profile"}</strong>
+          <span>{downloadsBlockedMessage}</span>
+        </article>
+      )}
+
       <div className="browse-toolbar card">
         <div>
-          <h2>{sourceLabel(activeTab)}</h2>
-          <p>{loadingSource === activeTab ? `Loading ${sourceLabel(activeTab)}...` : `${sourceMods.length} mods loaded.`}</p>
+          <h2 title={activeSource?.displayName}>{activeSource?.displayName ?? sourceLabel(activeTab)}{activeTab === "modworkshop" && activeSource?.gameVersion ? ` - ${activeSource.gameVersion}` : ""}</h2>
+          <p>{activeTab === "custom" ? (customBrowserUrl ? customBrowserUrl : "No start URL configured.") : loadingSource === activeTab ? `Loading ${sourceLabel(activeTab)}...` : `${sourceMods.length} mods loaded.`}</p>
           {activeTab === "modworkshop" && activeModWorkshopSearch && (
             <span className="status-pill">Search: {activeModWorkshopSearch}</span>
           )}
@@ -2330,17 +3122,20 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
               onChange={(event) => {
                 const value = event.target.value;
                 setSourceSearchQuery(value);
+                if (activeTab === "custom") return;
                 if (value.trim() === "") {
                   setSearchQuery("");
                   setActiveModWorkshopSearch("");
                   setActiveNexusSearch("");
+                  setPages((current) => ({ ...current, [activeTab]: 0 }));
+                  setHasMore((current) => ({ ...current, [activeTab]: true }));
                   setStatus(`Showing normal ${sourceLabel(activeTab)} browse results.`);
                 }
               }}
-              placeholder="Search PAYDAY 3 mods..."
+              placeholder={activeTab === "custom" ? "Enter website URL..." : `Search ${gameName} mods...`}
             />
             <button className="ghost-button" type="submit" disabled={sourceSearching || (activeTab === "nexus" && nexusApiKeyMissing)}>
-              {sourceSearching ? "Searching..." : "Search"}
+              {activeTab === "custom" ? "Go" : sourceSearching ? "Searching..." : "Search"}
             </button>
             <button
               className="ghost-button compact"
@@ -2354,31 +3149,88 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
             </button>
           </form>
 
-          {activeTab === "nexus" && (
-            <div className="sort-chip-row" aria-label="Sort Nexus mods">
-              {sortOptions.map((option) => (
-                <button
-                  className={`sort-chip ${sortMode === option.id ? "active" : ""}`}
-                  type="button"
-                  key={option.id}
-                  onClick={() => handleSortChange(option.id)}
-                >
-                  {option.label}
-                </button>
+          {activeTab !== "custom" && (
+            <select
+              className="select-input unified-sort-select"
+              value={sortMode}
+              aria-label={`Sort ${sourceLabel(activeTab)} mods`}
+              onChange={(event) => handleSortChange(event.target.value as SortMode)}
+            >
+              {activeSortOptions.map((option) => (
+                <option value={option.id} key={option.id}>{option.label}</option>
               ))}
-            </div>
+            </select>
           )}
 
+          {activeTab === "modworkshop" && modWorkshopCategories.length > 0 && (
+            <select
+              className="select-input unified-category-select"
+              value={categoryId}
+              aria-label="Filter ModWorkshop category"
+              onChange={(event) => handleCategoryChange(event.target.value)}
+              disabled={categoriesLoading || loadingSource !== null}
+            >
+              <option value="">All categories</option>
+              {modWorkshopCategories.map((category) => (
+                <option value={category.id} key={category.id}>{category.label}</option>
+              ))}
+            </select>
+          )}
 
+          {activeTab === "modworkshop" && categoriesLoading && modWorkshopCategories.length === 0 && (
+            <span className="status-pill browse-filter-loading">Loading categories...</span>
+          )}
 
-          <button className="ghost-button" type="button" onClick={refresh} disabled={activeTab === "nexus" && nexusApiKeyMissing}>Refresh</button>
+          {activeTab === "modworkshop" && categoriesLoading && modWorkshopCategories.length > 0 && (
+            <span className="status-pill browse-filter-loading">Refreshing categories...</span>
+          )}
+
+          {activeTab === "modworkshop" && !categoriesLoading && categoryStatus === "loaded" && modWorkshopCategories.length > 0 && (
+            <span className="status-pill browse-filter-loading good">Categories loaded</span>
+          )}
+
+          {activeTab === "modworkshop" && !categoriesLoading && categoryStatus === "cache-refresh-failed" && modWorkshopCategories.length > 0 && (
+            <span className="status-pill browse-filter-loading warning">Using cached categories</span>
+          )}
+
+          {activeTab === "modworkshop" && !categoriesLoading && categoryStatus === "unavailable" && modWorkshopCategories.length === 0 && (
+            <span className="status-pill browse-filter-loading warning">Categories unavailable</span>
+          )}
+
+          {activeTab === "modworkshop" && !categoriesLoading && categoryStatus === "failed" && modWorkshopCategories.length === 0 && (
+            <button className="ghost-button compact" type="button" onClick={retryModWorkshopCategories}>
+              Retry categories
+            </button>
+          )}
+
+          <div className="browse-toolbar-actions">
+            <button className="ghost-button" type="button" onClick={refresh} disabled={activeTab === "nexus" && nexusApiKeyMissing}>{activeTab === "custom" ? "Refresh" : "Refresh"}</button>
+            <button className="ghost-button" type="button" onClick={() => void openActiveSourceEmbeddedWindow()} disabled={managedBrowserOpening || (activeTab === "custom" ? (!customBrowserUrl && !customBrowserInput) : !sourceStartUrlFor(activeTab))}>{managedBrowserOpening ? "Opening..." : activeTab === "custom" && managedBrowserOpen ? "Focus In-App" : "Open In-App"}</button>
+            <button className="ghost-button" type="button" onClick={() => void openActiveSourceExternal()} disabled={activeTab === "custom" ? (!customBrowserUrl && !customBrowserInput) : !sourceStartUrlFor(activeTab)}>Open External</button>
+          </div>
         </div>
       </div>
+
+      {activeTab === "modworkshop" && categoryStatus === "cache-refresh-failed" && modWorkshopCategories.length > 0 && (
+        <div className="safe-result warning">
+          <strong>Using cached ModWorkshop categories</strong>
+          <span>{categoryError ?? "Refresh failed, so Tsuki kept the cached category list visible."}</span>
+          <button className="ghost-button compact" type="button" onClick={retryModWorkshopCategories}>Retry</button>
+        </div>
+      )}
+
+      {activeTab === "modworkshop" && (categoryStatus === "failed" || categoryStatus === "unavailable") && modWorkshopCategories.length === 0 && (
+        <div className="safe-result warning">
+          <strong>{categoryStatus === "failed" ? "Category request failed" : "Categories unavailable"}</strong>
+          <span>{categoryError ?? `No ModWorkshop categories were returned for ${gameName} (${modWorkshopGameKey}).`}</span>
+          <button className="ghost-button compact" type="button" onClick={retryModWorkshopCategories}>Retry</button>
+        </div>
+      )}
 
       {activeTab === "nexus" && nexusApiKeyMissing && (
         <div className="safe-result warning">
           <strong>Nexus API key required</strong>
-          <span>Add a Nexus API key in Settings → Sources before browsing or searching Nexus Mods.</span>
+          <span>Add a Nexus API key in Settings &gt; API Keys.</span>
           <small>ModWorkshop browsing still works without a key.</small>
         </div>
       )}
@@ -2391,116 +3243,142 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
         </div>
       )}
 
-      <div className="source-mod-grid cleaner-grid">
-        {sourceMods.map((mod) => (
-          <article
-            className="source-mod-card cleaner-card"
-            key={`${mod.source}-${mod.sourceId}`}
-            role="button"
-            tabIndex={0}
-            onClick={(event) => {
-              if ((event.target as HTMLElement).closest("button, summary, details, input, select, a")) return;
-              void openMod(mod);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void openMod(mod);
-            }}
-          >
-            <button className="source-mod-thumb cleaner-thumb" type="button" onClick={() => openMod(mod)}>
-              {canUseThumbnail(mod.thumbnailUrl) ? (
-                <img src={mod.thumbnailUrl ?? ""} alt="" loading="lazy" onError={() => markThumbnailFailed(mod.thumbnailUrl)} />
-              ) : (
-                <span className="generated-thumb-label">{thumbnailFallbackText(mod.source)}</span>
-              )}
-            </button>
-
-            <div className="source-mod-body">
-              <div className="source-mod-title-line">
-                <strong>{cardDisplayTitle(mod)}</strong>
-                <span>{sourceLabel(mod.source)}</span>
-              </div>
-
-              {cardDisplayDescription(mod) && <p className="source-card-description">{cardDisplayDescription(mod)}</p>}
-
-              <div className="source-mod-meta">
-                <span>{cardDisplayAuthor(mod) ? `by ${cardDisplayAuthor(mod)}` : mod.source === "modworkshop" ? "Author loading" : "Unknown author"}</span>
-                {mod.version && <span>v{mod.version}</span>}
-                {sourceUpdatedLabel(mod) && <span className="source-card-date">{sourceUpdatedLabel(mod)}</span>}
-                {typeof mod.downloads === "number" && <span>{mod.downloads.toLocaleString()} downloads</span>}
-                {typeof mod.likes === "number" && <span>{mod.likes.toLocaleString()} likes</span>}
-              </div>
-
-              <div className="source-tag-row visible-tags">
-                {sourceMatches[`${mod.source}-${mod.sourceId}`]?.installed && <span className="status-pill installed-pill">Installed</span>}
-                {(mod.tags?.length ? mod.tags : mergedCardTags(mod)).slice(0, 8).map((tag) => <span className={tagClassName(tag)} key={tag}>{tag}</span>)}
-                {(mod.tags?.length ?? 0) === 0 && <span className="status-pill tag-pill tag-general">No tags cached</span>}
-              </div>
-
-              <div className="source-card-actions">
-                {browseCardsLive && sourceMatches[`${mod.source}-${mod.sourceId}`]?.installed && sourceMatches[`${mod.source}-${mod.sourceId}`]?.updateAvailable ? (
-                  <button
-                    className="ghost-button compact update-button"
-                    type="button"
-                    onClick={() => updateInstalledSource(mod, sourceMatches[`${mod.source}-${mod.sourceId}`])}
-                    disabled={installingKey !== null}
-                  >
-                    Update
-                  </button>
-                ) : sourceMatches[`${mod.source}-${mod.sourceId}`]?.installed ? (
-                  <button
-                    className="ghost-button compact danger-button"
-                    type="button"
-                    onClick={() => uninstallMatchedSource(sourceMatches[`${mod.source}-${mod.sourceId}`])}
-                    disabled={installingKey !== null}
-                  >
-                    Uninstall
-                  </button>
-                ) : (
-                  <button className="ghost-button compact install-button" type="button" onClick={() => openInstall(mod)} disabled={installingKey !== null}>Install</button>
-                )}
-                <CardMoreMenu>
-                  <summary aria-label="More options">⋯</summary>
-                  <div>
-                    <button type="button" onClick={() => openWebsite(mod.pageUrl)}>Website</button>
-                    <button type="button" onClick={() => openMod(mod)}>Open details</button>
-                  </div>
-                </CardMoreMenu>
-              </div>
+      {activeTab === "custom" && (
+        <section className={`embedded-browser-panel ${activeSource?.browseMode === "iframe" ? "inline-browser-mode" : "managed-window-mode"}`}>
+          <header>
+            <div>
+              <p className="eyebrow">Embedded browsing</p>
+              <h2>{customBrowserName}</h2>
             </div>
-          </article>
-        ))}
-      </div>
+            <div className="embedded-browser-meta">
+              {customBrowserDomainList.length ? customBrowserDomainList.slice(0, 4).map((domain) => <span key={domain}>{domain}</span>) : <span>Any domain</span>}
+            </div>
+          </header>
+          <div className="managed-browser-toolbar" aria-label="Browser window controls">
+            <div className="managed-browser-navigation">
+              <button className="ghost-button compact" type="button" disabled={activeSource?.browseMode !== "iframe" && !managedBrowserOpen} onClick={() => void controlActiveBrowser("back")} title="Back">Back</button>
+              <button className="ghost-button compact" type="button" disabled={activeSource?.browseMode !== "iframe" && !managedBrowserOpen} onClick={() => void controlActiveBrowser("forward")} title="Forward">Forward</button>
+              <button className="ghost-button compact" type="button" disabled={activeSource?.browseMode !== "iframe" && !managedBrowserOpen} onClick={() => activeSource?.browseMode === "iframe" ? reloadCustomBrowser() : void controlActiveBrowser("refresh")} title="Refresh">Refresh</button>
+            </div>
+            <div className="managed-browser-actions">
+              <button className="ghost-button compact" type="button" disabled={managedBrowserOpening} onClick={() => void openActiveSourceEmbeddedWindow()}>{managedBrowserOpening ? "Opening..." : managedBrowserOpen ? "Focus In-App" : "Open In-App"}</button>
+              <button className="ghost-button compact" type="button" onClick={() => void openActiveSourceExternal()}>Open External</button>
+              <button className="ghost-button compact" type="button" disabled={!managedBrowserOpen} onClick={() => void controlActiveBrowser("close")}>Close</button>
+            </div>
+          </div>
+          {customBrowserUrl && activeSource?.browseMode === "iframe" ? (
+            <div className="embedded-browser-frame-shell">
+              {customBrowserLoading && <div className="embedded-browser-loading">Loading website...</div>}
+              <iframe
+                key={`${customBrowserUrl}-${customBrowserFrameKey}`}
+                title={`${customBrowserName} embedded browser`}
+                src={customBrowserUrl}
+                referrerPolicy="no-referrer-when-downgrade"
+                sandbox={`${downloadsEnabled ? "allow-downloads " : ""}allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts`}
+                onLoad={() => {
+                  setCustomBrowserLoading(false);
+                  setStatus(`Loaded ${customBrowserUrl}`);
+                }}
+              />
+            </div>
+          ) : customBrowserUrl ? (
+            <div ref={managedBrowserViewportRef} className={`managed-browser-window-state ${managedBrowserOpen ? "open" : "closed"}`}>
+              <span className={`managed-browser-status ${managedBrowserOpen ? "open" : "closed"}`} role="status">{managedBrowserOpen ? "Embedded browser open" : "Embedded browser closed"}</span>
+              <strong>{managedBrowserOpen ? `${customBrowserName} is open inside Tsuki` : `Open ${customBrowserName} inside Tsuki`}</strong>
+              <span>{customBrowserUrl}</span>
+              <button className="ghost-button install-button" type="button" disabled={managedBrowserOpening} onClick={() => void openActiveSourceEmbeddedWindow()}>{managedBrowserOpening ? "Opening..." : managedBrowserOpen ? `Focus ${customBrowserName}` : `Open ${customBrowserName}`}</button>
+            </div>
+          ) : (
+            <article className="safe-result warning">
+              <strong>No start URL configured</strong>
+              <span>Add a Starting Page URL or Start URL to this profile's Custom Browser source in Profile Creator.</span>
+            </article>
+          )}
+        </section>
+      )}
 
-      <div className="safe-floating-controls" aria-label="Browse bottom controls">
+      {activeTab !== "custom" && <div className="source-mod-grid cleaner-grid">
+        {sourceMods.map((mod) => {
+          const match = sourceMatches[`${mod.source}-${mod.sourceId}`];
+          const installed = Boolean(match?.installed);
+          const primaryAction = browseCardsLive && installed && match?.updateAvailable
+            ? {
+                label: "Update",
+                variant: "update" as const,
+                disabled: installingKey !== null || !downloadsEnabled,
+                onClick: () => updateInstalledSource(mod, match),
+              }
+            : installed
+              ? {
+                  label: "Uninstall",
+                  variant: "danger" as const,
+                  disabled: installingKey !== null || !downloadsEnabled,
+                  title: !downloadsEnabled ? downloadsBlockedMessage : undefined,
+                  onClick: () => uninstallMatchedSource(match),
+                }
+              : {
+                  label: "Install",
+                  variant: "default" as const,
+                  disabled: installingKey !== null || !downloadsEnabled,
+                  title: !downloadsEnabled ? downloadsBlockedMessage : undefined,
+                  onClick: () => openInstall(mod),
+                };
+
+          return (
+            <ModCard
+              key={`${mod.source}-${mod.sourceId}`}
+              className="source-mod-card cleaner-card lightweight-card"
+              title={displayModTitle(mod)}
+              source={mod.source}
+              sourceLabel={sourceLabel(mod.source)}
+              author={displayAuthor(mod)}
+              version={mod.version}
+              thumbnailUrl={mod.thumbnailUrl}
+              bannerUrl={mod.bannerUrl}
+              tags={sourceCardTags(mod)}
+              likes={mod.likes}
+              downloads={mod.downloads}
+              views={mod.views}
+              updatedLabel={sourceUpdatedLabel(mod)}
+              installed={installed}
+              enabled={match?.enabled ?? null}
+              canUseThumbnail={canUseThumbnail}
+              onThumbnailFailed={markThumbnailFailed}
+              onOpen={() => void openMod(mod)}
+              primaryAction={primaryAction}
+              moreActions={(
+                <>
+                  <button type="button" onClick={() => openWebsite(mod.pageUrl)}>Website</button>
+                  <button type="button" onClick={() => openMod(mod)}>Open details</button>
+                </>
+              )}
+            />
+          );
+        })}
+      </div>}
+
+      {activeTab !== "custom" && <div className="safe-floating-controls" aria-label="Browse bottom controls">
         <button className="ghost-button compact" type="button" onClick={scrollBrowseToTop}>
           Back to Top
         </button>
-        {activeTab === "modworkshop" ? (
-          <>
-            <button className="ghost-button compact" type="button" onClick={() => loadModWorkshopLivePage(false, sortMode, Math.max(1, pages.modworkshop - 1))} disabled={loadingSource !== null || pages.modworkshop <= 1}>
-              Previous Page
-            </button>
-            <span className="safe-page-pill">Page {Math.max(1, pages.modworkshop)}</span>
-            <button className="ghost-button compact" type="button" onClick={() => loadModWorkshopLivePage(false, sortMode, pages.modworkshop + 1)} disabled={loadingSource !== null || !hasMore.modworkshop}>
-              {loadingSource === "modworkshop" ? "Loading..." : hasMore.modworkshop ? "Next Page" : "No More"}
-            </button>
-          </>
-        ) : (
-          <button className="ghost-button compact" type="button" onClick={() => loadPage(activeTab)} disabled={loadingSource !== null || !hasMore[activeTab]}>
-            {loadingSource === activeTab ? "Loading..." : hasMore[activeTab] ? "Load More" : "No More"}
-          </button>
-        )}
-      </div>
+        <button className="ghost-button compact" type="button" onClick={() => goToBrowsePage(Math.max(1, pages[activeTab] - 1))} disabled={loadingSource !== null || pages[activeTab] <= 1}>
+          Previous Page
+        </button>
+        <span className="safe-page-pill">Page {Math.max(1, pages[activeTab])}</span>
+        <button className="ghost-button compact" type="button" onClick={() => goToBrowsePage(pages[activeTab] + 1)} disabled={loadingSource !== null || !hasMore[activeTab]}>
+          {loadingSource === activeTab ? "Loading..." : hasMore[activeTab] ? "Next Page" : "No More"}
+        </button>
+      </div>}
 
-      {sourceMods.length === 0 && (
+      {activeTab !== "custom" && sourceMods.length === 0 && (
         <article className="card">
           <h2>No mods loaded</h2>
           <p>{status}</p>
-          <button className="ghost-button" type="button" onClick={() => activeTab === "modworkshop" ? loadModWorkshopLivePage(true, sortMode, 1) : loadPage(activeTab, true)}>Try loading again</button>
+          <button className="ghost-button" type="button" onClick={() => activeTab === "modworkshop" ? loadModWorkshopLivePage(true, sortMode, 1) : loadPage(activeTab, true, sortMode, 1)}>Try loading again</button>
         </article>
       )}
 
-      {results.length > 0 && <div className="card safe-results">{results.map((result, index) => <ResultNotice result={result} key={`${result.fileName}-${index}`} />)}</div>}
+      {results.length > 0 && <div className="card safe-results">{results.map((result, index) => <ResultNotice result={result} profileId={profileId} key={`${result.fileName}-${index}`} />)}</div>}
 
       {installPickerMod && (
         <InstallPicker
@@ -2509,8 +3387,10 @@ export function BrowsePage({ initialMod = null, onInitialModConsumed }: { initia
           selectedFileIds={selectedFileIds}
           setSelectedFileIds={setSelectedFileIds}
           installingKey={installingKey}
+          downloadsEnabled={downloadsEnabled}
+          downloadsBlockedMessage={downloadsBlockedMessage}
           onClose={() => setInstallPickerMod(null)}
-          onInstallOne={stageFile}
+          onInstallOne={(mod, file) => stageFile(mod, file, installPickerReplacementFiles)}
           onInstallSelected={installSelected}
           onOpenLocation={openSourceFileNamesLocation}
           onUninstall={uninstallSourceFileNames}
@@ -2544,6 +3424,8 @@ function InstallPicker({
   selectedFileIds,
   setSelectedFileIds,
   installingKey,
+  downloadsEnabled,
+  downloadsBlockedMessage,
   onClose,
   onInstallOne,
   onInstallSelected,
@@ -2556,6 +3438,8 @@ function InstallPicker({
   selectedFileIds: string[];
   setSelectedFileIds: Dispatch<SetStateAction<string[]>>;
   installingKey: string | null;
+  downloadsEnabled: boolean;
+  downloadsBlockedMessage: string;
   onClose: () => void;
   onInstallOne: (mod: SourceModDetail, file: SourceModFile) => void;
   onInstallSelected: () => void;
@@ -2569,6 +3453,18 @@ function InstallPicker({
     .filter((file) => matchedFileNamesForSourceFile(file, match).length === 0)
     .map((file) => file.id);
   const selectedUninstalledCount = selectedFileIds.filter((id) => installableUninstalledIds.includes(id)).length;
+  const requirements = (mod.dependencies ?? []).map((dependency) => enrichDependency({
+    name: dependency.name,
+    required: dependency.required,
+    optional: dependency.optional,
+    sourceKind: dependency.sourceKind as DependencySourceKind | undefined,
+    gameDomain: dependency.gameDomain ?? undefined,
+    numericGameId: dependency.numericGameId ?? undefined,
+    modId: dependency.modId ?? undefined,
+    url: dependency.url ?? undefined,
+    notes: dependency.notes ?? undefined,
+    versionConstraint: dependency.versionConstraint ?? undefined,
+  }));
 
   return (
     <div className="image-preview-overlay safe-overlay" role="dialog" aria-modal="true">
@@ -2582,10 +3478,25 @@ function InstallPicker({
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds(defaultSelectedFileIds(files, mod.source).filter((id) => installableUninstalledIds.includes(id)))}>Latest Main</button>
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds(installableUninstalledIds)}>Select All</button>
           <button className="ghost-button compact" type="button" onClick={() => setSelectedFileIds([])}>Select None</button>
-          <button className="ghost-button compact install-button" type="button" onClick={onInstallSelected} disabled={installingKey !== null || selectedUninstalledCount === 0}>
+          <button className="ghost-button compact install-button" type="button" onClick={onInstallSelected} disabled={!downloadsEnabled || installingKey !== null || selectedUninstalledCount === 0} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>
             {installingKey ? "Installing..." : `Install Selected (${selectedUninstalledCount})`}
           </button>
         </div>
+
+        {!downloadsEnabled && (
+          <article className="safe-result warning" role="status">
+            <strong>Downloads disabled</strong>
+            <span>{downloadsBlockedMessage}</span>
+          </article>
+        )}
+
+        {requirements.length > 0 && <section className="quick-file-bucket optional">
+          <div className="quick-file-bucket-heading"><strong>Requirements</strong><small>{requirements.length} linked</small></div>
+          {requirements.map((dependency) => <div className="quick-file-row" key={dependency.id}>
+            <div><DependencyName dependency={dependency} /><small>{dependency.required ? "Required" : "Optional"} - {dependencySourceLabel(dependency)}</small></div>
+            <DependencyActions dependency={dependency} />
+          </div>)}
+        </section>}
 
         <div className="quick-file-list quick-file-bucket-list">
           {([
@@ -2644,7 +3555,7 @@ function InstallPicker({
                       </div>
                     ) : (
                       <div className="quick-file-actions source-file-row-actions">
-                        <button className="ghost-button compact install-button" type="button" onClick={() => onInstallOne(mod, file)} disabled={installingKey !== null}>
+                        <button className="ghost-button compact install-button" type="button" onClick={() => onInstallOne(mod, file)} disabled={!downloadsEnabled || installingKey !== null} title={!downloadsEnabled ? downloadsBlockedMessage : undefined}>
                           {installingKey === key ? "Installing..." : "Install"}
                         </button>
                       </div>

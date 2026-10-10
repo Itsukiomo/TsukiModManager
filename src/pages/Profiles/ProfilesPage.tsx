@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import type { GameProfile } from "../../models/gameProfiles";
 
 interface ModProfile {
   id: string;
+  gameProfileId: string;
   name: string;
   createdUnix: number;
   enabledPakFiles: string[];
   enabledReceiptIds: string[];
+  migrationState?: string | null;
 }
 
 function formatProfileDate(seconds?: number) {
@@ -14,7 +17,11 @@ function formatProfileDate(seconds?: number) {
   return new Date(seconds * 1000).toLocaleString();
 }
 
-export function ProfilesPage() {
+interface ProfilesPageProps {
+  currentGameProfile: GameProfile;
+}
+
+export function ProfilesPage({ currentGameProfile }: ProfilesPageProps) {
   const [profiles, setProfiles] = useState<ModProfile[]>([]);
   const [profileName, setProfileName] = useState("");
   const [, setStatus] = useState("Profiles ready.");
@@ -32,9 +39,10 @@ export function ProfilesPage() {
 
   async function refreshProfiles() {
     try {
-      const result = await invoke<ModProfile[]>("list_mod_profiles");
-      setProfiles(result);
-      setStatus(result.length ? `${result.length} saved profile${result.length === 1 ? "" : "s"}.` : "No profiles saved yet.");
+      const result = await invoke<ModProfile[]>("list_mod_profiles", { gameProfileId: currentGameProfile.profileId });
+      const ownedProfiles = result.filter((profile) => profile.gameProfileId === currentGameProfile.profileId);
+      setProfiles(ownedProfiles);
+      setStatus(ownedProfiles.length ? `${ownedProfiles.length} saved profile${ownedProfiles.length === 1 ? "" : "s"}.` : "No profiles saved yet.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -45,6 +53,7 @@ export function ProfilesPage() {
     try {
       const result = await invoke<ModProfile>("save_current_mod_profile", {
         name: profileName.trim() || `Profile ${new Date().toLocaleString()}`,
+        gameProfileId: currentGameProfile.profileId,
       });
       setProfileName("");
       setExpandedProfileId(result.id);
@@ -60,7 +69,7 @@ export function ProfilesPage() {
   async function applyProfile(profile: ModProfile) {
     setBusyId(profile.id);
     try {
-      const result = await invoke<string>("apply_mod_profile", { profileId: profile.id });
+      const result = await invoke<string>("apply_mod_profile", { profileId: profile.id, gameProfileId: currentGameProfile.profileId });
       setStatus(result);
       window.dispatchEvent(new Event("tsuki-data-refresh"));
       await refreshProfiles();
@@ -76,7 +85,7 @@ export function ProfilesPage() {
 
     setBusyId(`delete-${profile.id}`);
     try {
-      const result = await invoke<string>("delete_mod_profile", { profileId: profile.id });
+      const result = await invoke<string>("delete_mod_profile", { profileId: profile.id, gameProfileId: currentGameProfile.profileId });
       setStatus(result);
       setExpandedProfileId((current) => current === profile.id ? null : current);
       await refreshProfiles();
@@ -90,7 +99,7 @@ export function ProfilesPage() {
   async function openProfilesFolder() {
     setBusyId("open-profiles-folder");
     try {
-      await invoke<string>("open_mod_profiles_folder");
+      await invoke<string>("open_mod_profiles_folder", { gameProfileId: currentGameProfile.profileId });
       showFolderNotice("Profiles folder opened.");
     } catch (error) {
       showFolderNotice(error instanceof Error ? error.message : String(error));
@@ -113,7 +122,7 @@ export function ProfilesPage() {
 
   useEffect(() => {
     void refreshProfiles();
-  }, []);
+  }, [currentGameProfile.profileId]);
 
   return (
     <section className="page profiles-page simple-profiles-page">
@@ -122,7 +131,7 @@ export function ProfilesPage() {
           <p className="eyebrow">Loadouts</p>
           <h1>Profiles</h1>
           <p className="page-description">
-            Save your current enabled mods as a loadout, then apply it later.
+            Save your current enabled mods for {currentGameProfile.displayName} as a loadout, then apply it later.
           </p>
         </div>
         <div className="profile-header-actions">

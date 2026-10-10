@@ -1,14 +1,16 @@
 # Tsuki Mod Manager
 
-Tsuki Mod Manager is a standalone mod manager for **PAYDAY 3**. It helps install, track, restore, and manage PAYDAY 3 mods from supported sources like Nexus Mods and ModWorkshop.
+Tsuki Mod Manager 2.0 is a standalone, profile-based mod manager for supported games. It browses Nexus Mods and ModWorkshop, installs supported archive formats, tracks receipt-owned files, and hands external-manager formats to the appropriate manager.
 
 This is not a normal PAYDAY 3 mod archive. Do **not** install Tsuki through Vortex, MO2, or another mod manager.
 
 ## Features
 
-* Browse supported PAYDAY 3 mod sources
+* Browse sources scoped to the selected game and version
 * Install and track mods installed through Tsuki
-* Manage PAK mods and UE4SS-style mods
+* Manage supported PAK, UE4SS, Lua, REFramework, SDK and other profile-specific formats
+* Select the newest eligible mod file or choose between multiple files
+* Download signed Outlast Trials native support separately after consent
 * Launch PAYDAY 3 in modded or vanilla mode
 * Temporarily move mods outside PAYDAY 3 folders for vanilla launch
 * Restore hidden mods after vanilla closes or crashes
@@ -21,12 +23,14 @@ This is not a normal PAYDAY 3 mod archive. Do **not** install Tsuki through Vort
 1. Download the latest `TsukiModManager` release.
 2. Run the setup installer.
 3. Open Tsuki Mod Manager.
-4. Let Tsuki auto-detect your PAYDAY 3 install.
-5. If auto-detect fails, set your PAYDAY 3 folder manually in Settings.
+4. Select a game profile and let Tsuki detect its installation.
+5. If detection fails, choose the game folder in that profile's settings.
 6. Add a Nexus Mods API key only if you want Nexus browsing.
 7. Add a ModWorkshop API key only if a future feature requires it.
 
 ## Important Notes
+
+Read [the 2.0 release notes](RELEASE_NOTES_2.0.0.md) for tested scope and known limitations. Routing and receipt tests are not proof of compatibility for every mod or game build. External-manager handoffs require import and activation in that manager. PAYDAY 3 UE5 and PAYDAY 2 64-bit loaders are third-party beta dependencies. Bulk content indexing may be incomplete and is not required for in-app downloads.
 
 * Tsuki is a standalone application, not a PAYDAY 3 mod.
 * Do not install Tsuki using Vortex or another mod manager.

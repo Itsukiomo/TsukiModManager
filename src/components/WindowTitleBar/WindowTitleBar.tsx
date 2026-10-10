@@ -1,8 +1,11 @@
 import "./WindowTitleBar.css";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
+import type { GameProfile } from "../../models/gameProfiles";
 import type { AppPage } from "../../models/navigation";
-import tsukiLogo from "../../assets/tsuki-logo.png";
+import type { ActiveProfileRuntime } from "../../models/profileRuntime";
+import { Download, RefreshCw, Play, Sparkles, Minus, Square, X } from "lucide-react";
+import tsukiLogo from "../../assets/tsuki-lunar-logo-v2-ui.png";
 
 interface AppUpdateStatus {
   currentVersion: string;
@@ -25,6 +28,10 @@ interface WindowTitleBarProps {
   updateBusy: boolean;
   onCheckUpdate: () => void;
   onInstallUpdate: () => void;
+  currentGameProfile: GameProfile;
+  profileRuntime?: ActiveProfileRuntime | null;
+  profileSwitching?: boolean;
+  specialFlow?: boolean;
 }
 
 const pageLabels: Record<AppPage, string> = {
@@ -32,21 +39,32 @@ const pageLabels: Record<AppPage, string> = {
   browse: "Browse",
   installed: "Installed Mods",
   profiles: "Profiles",
+  games: "Select Game",
+  profileCreator: "Create Profile",
   repair: "Repair",
   backups: "Backups",
   settings: "Settings",
 };
 
-async function safeInvoke(command: string) {
+async function safeInvoke(command: string, args?: Record<string, unknown>) {
   try {
-    await invoke(command);
+    await invoke(command, args);
   } catch (error) {
     console.error(`Window command failed: ${command}`, error);
   }
 }
 
-export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdate, onInstallUpdate }: WindowTitleBarProps) {
+export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdate, onInstallUpdate, currentGameProfile, profileRuntime, profileSwitching = false, specialFlow = false }: WindowTitleBarProps) {
   const [launchBusy, setLaunchBusy] = useState(false);
+  const [launchStatus, setLaunchStatus] = useState("");
+  const runtimeReady = !profileSwitching && profileRuntime?.profileId === currentGameProfile.profileId && profileRuntime.ready !== false;
+  const launchConfigured = currentGameProfile.profileId === "builtin.payday3" || Boolean(profileRuntime?.executable);
+  const canLaunch = runtimeReady && launchConfigured;
+  const launchDisabledTitle = profileSwitching
+    ? "Profile runtime is switching."
+    : runtimeReady
+      ? launchConfigured ? `Launch ${profileRuntime?.gameName ?? currentGameProfile.displayName}` : "This profile does not have a launch executable configured."
+      : "Profile runtime is not ready.";
   async function minimizeWindow() {
     await safeInvoke("window_minimize");
   }
@@ -63,7 +81,9 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
     if (launchBusy) return;
     setLaunchBusy(true);
     try {
-      await safeInvoke("launch_payday3_vanilla");
+      setLaunchStatus(await invoke<string>("launch_active_profile_vanilla", { profileId: currentGameProfile.profileId }));
+    } catch (error) {
+      setLaunchStatus(error instanceof Error ? error.message : String(error));
     } finally {
       window.setTimeout(() => setLaunchBusy(false), 7000);
     }
@@ -73,7 +93,9 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
     if (launchBusy) return;
     setLaunchBusy(true);
     try {
-      await safeInvoke("launch_payday3_modded");
+      setLaunchStatus(await invoke<string>("launch_active_profile_modded", { profileId: currentGameProfile.profileId }));
+    } catch (error) {
+      setLaunchStatus(error instanceof Error ? error.message : String(error));
     } finally {
       window.setTimeout(() => setLaunchBusy(false), 7000);
     }
@@ -93,45 +115,52 @@ export function WindowTitleBar({ activePage, appUpdate, updateBusy, onCheckUpdat
       <div className="window-brand" data-tauri-drag-region>
         <img className="window-logo-image" src={tsukiLogo} alt="" />
         <div>
-          <strong>Tsuki Mod Manager</strong>
+          <strong>Tsuki <small>Mod Manager</small></strong>
           <span>{pageLabels[activePage]}</span>
         </div>
       </div>
 
       <div className="window-titlebar-center" data-tauri-drag-region>
-        <span>PAYDAY 3 mod library</span>
+        <span title={specialFlow ? "Profile workflow" : profileRuntime?.gameName ?? currentGameProfile.displayName}>{specialFlow ? "Profile workflow" : profileRuntime?.gameName ?? currentGameProfile.displayName}</span>
       </div>
 
       <div className="window-update-actions">
         {appUpdate?.updateAvailable ? (
           <button type="button" className="window-update-button" onClick={onInstallUpdate} disabled={updateBusy}>
+            <Download size={14} aria-hidden="true" />
             {updateBusy ? "Updating..." : `Update Available ${appUpdate.latestVersion ?? ""}`}
           </button>
         ) : (
           <button type="button" className="window-update-button subtle" onClick={onCheckUpdate} disabled={updateBusy} title={appUpdate?.error ?? "Check for Tsuki app updates"}>
+            <RefreshCw size={14} className={updateBusy ? "window-icon-busy" : undefined} aria-hidden="true" />
             {updateBusy ? "Checking..." : "Check Updates"}
           </button>
         )}
       </div>
 
-      <div className="window-launch-actions">
-        <button type="button" className="window-launch-button" onClick={launchVanilla} disabled={launchBusy}>
-          {launchBusy ? "Launching..." : "Launch Vanilla"}
-        </button>
-        <button type="button" className="window-launch-button primary" onClick={launchModded} disabled={launchBusy}>
-          Launch Modded
-        </button>
-      </div>
+      {!specialFlow && (
+        <div className="window-launch-actions">
+          {launchStatus && <span className="window-launch-status" role="status" title={launchStatus}>{launchStatus}</span>}
+          <button type="button" className="window-launch-button" onClick={launchVanilla} disabled={launchBusy || !canLaunch} title={launchDisabledTitle}>
+            <Play size={14} aria-hidden="true" />
+            {launchBusy ? "Launching..." : "Launch Vanilla"}
+          </button>
+          <button type="button" className="window-launch-button primary" onClick={launchModded} disabled={launchBusy || !canLaunch} title={launchDisabledTitle}>
+            <Sparkles size={14} aria-hidden="true" />
+            Launch Modded
+          </button>
+        </div>
+      )}
 
       <div className="window-actions">
-        <button type="button" className="window-control minimize" onClick={minimizeWindow} aria-label="Minimize">
-          —
+        <button type="button" className="window-control minimize" onClick={minimizeWindow} aria-label="Minimize" title="Minimize">
+          <Minus size={15} aria-hidden="true" />
         </button>
-        <button type="button" className="window-control maximize" onClick={toggleMaximizeWindow} aria-label="Maximize or restore">
-          □
+        <button type="button" className="window-control maximize" onClick={toggleMaximizeWindow} aria-label="Maximize or restore" title="Maximize or restore">
+          <Square size={12} aria-hidden="true" />
         </button>
-        <button type="button" className="window-control close" onClick={closeWindow} aria-label="Close">
-          ×
+        <button type="button" className="window-control close" onClick={closeWindow} aria-label="Close" title="Close">
+          <X size={16} aria-hidden="true" />
         </button>
       </div>
     </header>

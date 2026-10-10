@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Profile Card Layout Test</title></head>
+<body>
+  <div id="root"></div>
+  <script type="module">
+    import React from 'react';
+    import {createRoot} from 'react-dom/client';
+    import '/src/App.css';
+    import {GameSelectorPage} from '/src/pages/GameSelector/GameSelectorPage.tsx';
+    import {BUILTIN_GAME_PROFILES} from '/src/models/gameProfiles.ts';
+    document.documentElement.dataset.theme = 'moonveil';
+    function Preview() {
+      const [profiles, setProfiles] = React.useState(BUILTIN_GAME_PROFILES);
+      const selected = profiles.find(profile => profile.profileId === 'builtin.payday3');
+      const noop = () => {};
+      return React.createElement('div', {className: 'special-flow-shell'}, React.createElement(GameSelectorPage, {
+        profiles, currentProfile: selected, appCapabilities: {isDeveloperMode: false, canEditOfficialProfiles: false},
+        onSelectProfile: noop, onCreateProfile: noop, onEditProfile: noop, onDeleteDraft: noop,
+        onDuplicateProfile: noop, onOpenSettings: noop, onOpenProfileSettings: noop,
+        onVersionChange: (id, version) => setProfiles(current => current.map(profile => profile.profileId === id ? {...profile, gameVersion: version} : profile)),
+      }));
+    }
+    createRoot(document.getElementById('root')).render(React.createElement(Preview));
+  </script>
+</body>
+</html>

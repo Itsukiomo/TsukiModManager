@@ -1,4 +1,4 @@
-export type ModSourceKind = "modworkshop" | "nexus";
+export type ModSourceKind = "modworkshop" | "nexus" | "github";
 
 export interface SourceSettings {
   modworkshopApiKey?: string | null;
@@ -20,6 +20,10 @@ export interface SourceModSummary {
   nexus?: NexusIdentity | null;
   name: string;
   author?: string | null;
+  authorUsername?: string | null;
+  authorUserId?: string | null;
+  authorProfileUrl?: string | null;
+  authorAvatarUrl?: string | null;
   version?: string | null;
   thumbnailUrl?: string | null;
   bannerUrl?: string | null;
@@ -27,8 +31,14 @@ export interface SourceModSummary {
   updatedAt?: string | null;
   downloads?: number | null;
   likes?: number | null;
+  views?: number | null;
   shortDescription?: string | null;
   tags: string[];
+}
+
+export interface SourceCategory {
+  id: string;
+  label: string;
 }
 
 export interface SourceModFile {
@@ -49,11 +59,26 @@ export interface SourceModImage {
   thumbnailUrl?: string | null;
 }
 
+export interface SourceDependency {
+  id: string;
+  name: string;
+  required?: boolean;
+  optional?: boolean;
+  sourceKind?: "nexus" | "modworkshop" | "github" | "official" | "external";
+  gameDomain?: string | null;
+  numericGameId?: string | null;
+  modId?: string | null;
+  url?: string | null;
+  notes?: string | null;
+  versionConstraint?: string | null;
+}
+
 export interface SourceModDetail extends SourceModSummary {
   description: string;
   changelog?: string | null;
   files: SourceModFile[];
   images: SourceModImage[];
+  dependencies?: SourceDependency[];
   comments?: string[];
   bugs?: string[];
   logs: string[];
@@ -109,11 +134,16 @@ export interface InstalledSourceMatch {
   source: ModSourceKind;
   sourceId: string;
   installed: boolean;
+  missing?: boolean;
+  broken?: boolean;
   enabled: boolean;
   updateAvailable: boolean;
   confidence: number;
+  confidenceLevel?: "high" | "medium" | "low" | string;
+  ownershipClassification?: "tsuki_installed" | "tsuki_imported" | "local_detected" | "unknown_local" | "legacy_migrated" | string;
   reason: string;
   matchedFiles: string[];
+  receiptId?: string | null;
   installedModifiedUnix?: number | null;
   sourceUpdatedAt?: string | null;
   sourceUpdatedUnix?: number | null;
@@ -123,6 +153,14 @@ export interface InstalledSourceMatch {
   sourceFileCategory?: string | null;
   sourceFileUploadedAt?: string | null;
   sourceFileVersion?: string | null;
+  displayName?: string | null;
+  author?: string | null;
+  thumbnailUrl?: string | null;
+  bannerUrl?: string | null;
+  pageUrl?: string | null;
+  notes?: string | null;
+  thumbnailSource?: string | null;
+  thumbnailMissingReason?: string | null;
 }
 
 
@@ -130,6 +168,9 @@ export interface AppliedInstallFile {
   archivePath: string;
   destination: string;
   sizeBytes: number;
+  routeKind?: string | null;
+  fileType?: string | null;
+  modRootFolder?: string | null;
 }
 
 export interface InstallApplyResult {

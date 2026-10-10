@@ -1,0 +1,60 @@
+/* One image-led surface shared by Home, Browse, and Installed. */
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) {
+  height: var(--mod-card-height, 370px) !important;
+  min-height: var(--mod-card-height, 370px) !important;
+  max-height: var(--mod-card-height, 370px) !important;
+  overflow: hidden !important;
+  border-radius: 8px !important;
+}
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-hero {
+  flex: 1 1 auto !important;
+  height: 100% !important;
+  min-height: 100% !important;
+  max-height: none !important;
+  aspect-ratio: auto !important;
+  border-radius: 7px !important;
+}
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-hero img { object-fit: cover !important; }
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-body {
+  position: absolute !important;
+  z-index: 2;
+  inset: auto 0 0;
+  display: grid !important;
+  grid-template-rows: 17px 14px 22px minmax(30px, auto);
+  gap: 4px !important;
+  padding: 24px 11px 9px !important;
+  min-height: 0 !important;
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--panel) 48%, transparent) 24%, color-mix(in srgb, var(--panel) 68%, transparent) 100%) !important;
+}
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-body h3 {
+  display: block !important;
+  min-height: 0 !important;
+  max-height: 17px !important;
+  font-size: 13px !important;
+  line-height: 17px !important;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-author { font-size: 11px !important; line-height: 14px !important; }
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-tags { margin: 0 !important; min-height: 22px !important; }
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-footer {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  min-height: 30px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  gap: 6px !important;
+}
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-stats { flex: 1; min-width: 0; flex-wrap: wrap; gap: 4px 6px; overflow: hidden; font-size: 10px; }
+html[data-theme] .tsuki-mod-card.image-led-card:is(.image-led-card, .home-showcase-card, .source-mod-card, .installed-card-shell) .tsuki-mod-card-actions { flex: 0 0 auto; width: auto !important; flex-direction: row !important; margin: 0 !important; gap: 5px !important; align-items: center !important; }
+html[data-theme] .tsuki-mod-card.image-led-card .tsuki-mod-card-fallback { padding-bottom: 90px; }
+html[data-theme] .tsuki-mod-card.image-led-card .tsuki-mod-card-fallback::before,
+html[data-theme] .tsuki-mod-card.image-led-card .tsuki-mod-card-fallback::after { display: none; }
+html[data-theme] .tsuki-mod-card.image-led-card .tsuki-mod-card-loading { bottom: 150px; }
+html[data-theme] .home-feature-panels .tsuki-mod-card.image-led-card.home-feature-hero-card { --mod-card-height: 480px; }
+@media (max-width: 700px) {
+  html[data-theme] .home-feature-panels .tsuki-mod-card.image-led-card.home-feature-hero-card { --mod-card-height: 420px; }
+}

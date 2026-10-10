@@ -1,0 +1,32 @@
+html[data-theme] .mod-state-toggle.toggle-pill,
+html[data-theme] .installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions > .mod-state-toggle.toggle-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 62px;
+  width: 62px !important;
+  min-width: 62px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  padding: 0 8px !important;
+  gap: 5px !important;
+  border-radius: 999px !important;
+  border: 1px solid #a59aef !important;
+  background: linear-gradient(120deg, #7153a8, #415e91) !important;
+  color: #fff !important;
+  box-shadow: inset 0 1px 0 #ffffff35, 0 2px 4px #0002 !important;
+  font-size: 11px !important;
+  font-weight: 700;
+  line-height: 1 !important;
+  cursor: pointer;
+}
+html[data-theme] .mod-state-toggle.toggle-pill.off,
+html[data-theme] .installed-clean-page .tsuki-mod-card.installed-card-shell .tsuki-mod-card-actions > .mod-state-toggle.toggle-pill.off {
+  border-color: color-mix(in srgb, var(--accent-a) 38%, var(--line)) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-a) 16%, var(--panel)), color-mix(in srgb, var(--accent-b) 6%, var(--panel))) !important;
+  color: var(--muted) !important;
+}
+.mod-state-toggle > svg { flex: 0 0 15px; }
+html[data-theme] .mod-state-toggle > span { padding: 0 !important; margin: 0 !important; line-height: 1 !important; color: inherit !important; }
+html[data-theme] .mod-state-toggle.toggle-pill:hover:not(:disabled) { filter: brightness(1.18); }
+html[data-theme] .mod-state-toggle.toggle-pill:disabled { opacity: 0.55; cursor: not-allowed; }

@@ -1,0 +1,5 @@
+{
+  "generator": "Built-in image_gen tool",
+  "asset": "lunar-startup-v1.png",
+  "prompt": "Create a production bitmap background for the Tsuki desktop mod manager loading screen, landscape 16:9. Minimal elegant lunar atmosphere, charcoal black space with a sharply detailed photorealistic silver crescent moon in the upper center at 52% x, 30% y, moderate size approximately 22% of image height. Fine lunar crater detail, illuminated right rim. A low stark grey lunar terrain horizon occupies only bottom 10% of frame. Very subtle sparse tiny white stars. Palette black, neutral silver and white, not blue or purple. Broad clean negative space in middle lower half reserved for centered app branding. Calm high-end editorial composition, no gradients as abstract decoration, no glow orbs, no bokeh, no text, no logos, no UI, no borders. Image must function as a full-window background at desktop and narrow mobile aspect ratios."
+}

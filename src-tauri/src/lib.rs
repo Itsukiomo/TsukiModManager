@@ -1,6 +1,7 @@
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -13,8 +14,8 @@ use std::process::Command;
 use std::os::windows::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, Manager, WindowEvent};
 use zip::write::SimpleFileOptions;
 use zip::ZipArchive;
 use sha2::{Digest, Sha256};
@@ -23,8 +24,12 @@ mod source_models;
 mod source_http;
 mod nexus;
 mod modworkshop;
+mod text_encoding;
+mod profile_installs;
+mod managed_loaders;
+mod source_catalog;
 
-const APP_VERSION: &str = "1.8.3";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_DIR_NAME: &str = "Tsuki Mod Manager";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const DEFAULT_THEME_ID: &str = "moonveil";
@@ -32,8 +37,10 @@ const DEFAULT_THEME_ID: &str = "moonveil";
 // or set it in Settings -> App Update on the user's machine.
 // Example: https://raw.githubusercontent.com/<you>/<repo>/main/latest.json
 const DEFAULT_APP_UPDATE_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Itsukiomo/TsukiModManager/main/latest.json";
+const BUILTIN_PAYDAY3_PROFILE_ID: &str = "builtin.payday3";
 
 static LAUNCH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static ACTIVE_STAGED_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
 static PAYDAY_PROCESS_CACHE: Mutex<Option<(u128, bool)>> = Mutex::new(None);
 
 #[cfg(target_os = "windows")]
@@ -63,11 +70,88 @@ fn acquire_launch_guard() -> Result<LaunchProgressGuard, String> {
     Ok(LaunchProgressGuard)
 }
 
+
+struct StagedDownloadGuard;
+
+impl Drop for StagedDownloadGuard {
+    fn drop(&mut self) {
+        ACTIVE_STAGED_DOWNLOADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn acquire_staged_download_guard(limit: usize) -> Result<StagedDownloadGuard, String> {
+    let max_downloads = limit.clamp(1, 8);
+
+    loop {
+        let current = ACTIVE_STAGED_DOWNLOADS.load(Ordering::SeqCst);
+        if current >= max_downloads {
+            return Err(format!(
+                "The download queue is full ({} active, limit {}). Wait for an active download to finish or increase the simultaneous download limit in Settings.",
+                current, max_downloads
+            ));
+        }
+
+        if ACTIVE_STAGED_DOWNLOADS
+            .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Ok(StagedDownloadGuard);
+        }
+    }
+}
 fn now_unix_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+fn is_builtin_payday3_profile(profile_id: Option<&str>) -> bool {
+    match profile_id.map(str::trim).filter(|value| !value.is_empty()) {
+        None => true,
+        Some("payday3") | Some("payday-3") | Some(BUILTIN_PAYDAY3_PROFILE_ID) => true,
+        Some(_) => false,
+    }
+}
+
+fn profile_not_payday3_message(profile_id: Option<&str>) -> String {
+    let label = profile_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("current profile");
+
+    format!(
+        "This command is PAYDAY 3-specific and is disabled for {}. Configure profile-specific paths/sources before scanning or mutating installed files.",
+        label
+    )
+}
+
+fn empty_profile_pak_scan_result() -> PakScanResult {
+    PakScanResult {
+        game_root: String::new(),
+        pak_mods_path: String::new(),
+        pak_mods_path_exists: false,
+        pak_file_count: 0,
+        pak_mods: Vec::new(),
+    }
+}
+
+fn safe_nexus_game_domain(value: Option<&str>) -> Option<String> {
+    let raw = value?.trim().trim_matches(|ch| ch == '/' || ch == '\\');
+    let first = raw
+        .split(|ch| ch == '/' || ch == '\\' || ch == '?' || ch == '#')
+        .find(|part| !part.trim().is_empty())?
+        .trim()
+        .to_ascii_lowercase();
+
+    if first
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        Some(first)
+    } else {
+        None
+    }
 }
 
 
@@ -138,6 +222,10 @@ struct InstallReceiptFile {
     relative_path: String,
     size_bytes: Option<u64>,
     sha256: Option<String>,
+    #[serde(default)]
+    original_path: Option<String>,
+    #[serde(default)]
+    backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +247,12 @@ struct InstallReceipt {
     banner_url: Option<String>,
     page_url: Option<String>,
     installed_at_unix: Option<u64>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
     files: Vec<InstallReceiptFile>,
 }
 
@@ -297,10 +391,14 @@ struct SourceUpdateStatus {
 #[serde(rename_all = "camelCase")]
 struct ModProfile {
     id: String,
+    #[serde(default)]
+    game_profile_id: String,
     name: String,
     created_unix: u64,
     enabled_pak_files: Vec<String>,
     enabled_receipt_ids: Vec<String>,
+    #[serde(default)]
+    migration_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -527,7 +625,7 @@ fn restore_mods_after_vanilla_launch() -> Result<String, String> {
 
     if !session.pak_files.is_empty() {
         let count = session.pak_files.len();
-        match set_pak_mod_files_enabled(session.pak_files.clone(), true) {
+        match set_pak_mod_files_enabled(session.pak_files.clone(), true, None) {
             Ok(_) => restored_paks = count,
             Err(error) => skipped.push(format!("pak restore: {}", error)),
         }
@@ -777,33 +875,204 @@ struct MovieValidationItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AppSettings {
     game_path: Option<String>,
+    current_game_profile_id: Option<String>,
+    active_game_profile_id: Option<String>,
+    active_mod_profile_by_game_profile_id: std::collections::BTreeMap<String, String>,
     theme_id: String,
+    appearance_mode: String,
+    accent_color: String,
+    interface_density: String,
+    animations_enabled: bool,
+    transparency_enabled: bool,
+    font_scale: u32,
+    thumbnail_size: u32,
+    sidebar_density: String,
+    startup_destination: String,
+    notifications_enabled: bool,
+    language: String,
+    default_launch_action: String,
+    confirm_destructive_actions: bool,
+    auto_update_checks: bool,
+    remember_window_state: bool,
+    window_state: Option<SavedWindowState>,
+    download_folder: Option<String>,
+    simultaneous_downloads: usize,
+    download_retry_count: usize,
+    download_bandwidth_limit_mb_s: u64,
+    verify_hashes: bool,
+    keep_downloaded_archives: bool,
+    keep_uninstalled_mods: bool,
+    browser_mode: String,
+    external_link_behavior: String,
+    remember_website_logins: bool,
+    intercept_supported_downloads: bool,
+    keep_embedded_browsing_in_sites: bool,
+    protect_wrong_game_downloads: bool,
+    remember_last_website_per_profile: bool,
+    profile_default_sources: Vec<String>,
+    profile_default_dependency_setup: String,
+    profile_default_backup_behavior: String,
+    profile_default_installation_flow: String,
+    profile_default_browser_mode: String,
+    profile_default_index_behavior: String,
+    app_update_manifest_url: Option<String>,
+    update_channel: String,
+    profile_update_checks: bool,
+    dependency_update_checks: bool,
+    index_update_checks: bool,
+    ignored_versions: Vec<String>,
+    source_index_v2_remote_enabled: Option<bool>,
+    source_index_v2_remote_url: Option<String>,
+    index_overnight: bool,
+    index_pause_while_game_running: bool,
+    index_pause_on_battery: bool,
+    index_build_mode: String,
+    index_bandwidth_limit_mb_s: u64,
+    index_temp_storage_limit_gb: u32,
+    index_remote_behavior: String,
     modworkshop_api_key: Option<String>,
     nexus_api_key: Option<String>,
     show_age_restricted_nexus: bool,
-    app_update_manifest_url: Option<String>,
-    keep_downloaded_archives: bool,
-    keep_uninstalled_mods: bool,
+    developer_mode: Option<bool>,
+    verbose_logging: bool,
+    experimental_features: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             game_path: None,
+            current_game_profile_id: None,
+            active_game_profile_id: None,
+            active_mod_profile_by_game_profile_id: std::collections::BTreeMap::new(),
             theme_id: DEFAULT_THEME_ID.to_string(),
+            appearance_mode: "system".to_string(),
+            accent_color: "#9b72ff".to_string(),
+            interface_density: "comfortable".to_string(),
+            animations_enabled: true,
+            transparency_enabled: true,
+            font_scale: 100,
+            thumbnail_size: 160,
+            sidebar_density: "comfortable".to_string(),
+            startup_destination: "home".to_string(),
+            notifications_enabled: true,
+            language: "system".to_string(),
+            default_launch_action: "ask".to_string(),
+            confirm_destructive_actions: true,
+            auto_update_checks: true,
+            remember_window_state: true,
+            window_state: None,
+            download_folder: None,
+            simultaneous_downloads: 3,
+            download_retry_count: 2,
+            download_bandwidth_limit_mb_s: 0,
+            verify_hashes: true,
+            keep_downloaded_archives: true,
+            keep_uninstalled_mods: false,
+            browser_mode: "fallback".to_string(),
+            external_link_behavior: "ask".to_string(),
+            remember_website_logins: true,
+            intercept_supported_downloads: true,
+            keep_embedded_browsing_in_sites: true,
+            protect_wrong_game_downloads: true,
+            remember_last_website_per_profile: true,
+            profile_default_sources: vec!["modworkshop".to_string(), "nexus".to_string(), "github".to_string()],
+            profile_default_dependency_setup: "ask".to_string(),
+            profile_default_backup_behavior: "before-replace".to_string(),
+            profile_default_installation_flow: "guided".to_string(),
+            profile_default_browser_mode: "global".to_string(),
+            profile_default_index_behavior: "auto".to_string(),
+            app_update_manifest_url: None,
+            update_channel: "stable".to_string(),
+            profile_update_checks: true,
+            dependency_update_checks: true,
+            index_update_checks: true,
+            ignored_versions: Vec::new(),
+            source_index_v2_remote_enabled: Some(true),
+            source_index_v2_remote_url: None,
+            index_overnight: false,
+            index_pause_while_game_running: true,
+            index_pause_on_battery: true,
+            index_build_mode: "metadata".to_string(),
+            index_bandwidth_limit_mb_s: 0,
+            index_temp_storage_limit_gb: 8,
+            index_remote_behavior: "auto".to_string(),
             modworkshop_api_key: None,
             nexus_api_key: None,
             show_age_restricted_nexus: true,
-            app_update_manifest_url: None,
-            keep_downloaded_archives: true,
-            keep_uninstalled_mods: false,
+            developer_mode: Some(false),
+            verbose_logging: false,
+            experimental_features: false,
         }
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ProfileSettings {
+    game_version: Option<String>,
+    profile_id: String,
+    updated_at_unix: u64,
+    game_root_override: Option<String>,
+    executable_override: Option<String>,
+    working_directory_override: Option<String>,
+    launch_arguments: String,
+    launch_environment: Vec<String>,
+    default_launch_action: String,
+    browser_mode_override: String,
+    preferred_browser_source: String,
+    remember_last_website: bool,
+    enabled_sources: Vec<String>,
+    index_behavior: String,
+    dependency_setup: String,
+    dependency_updates: String,
+    backup_behavior: String,
+    backup_retention_count: u32,
+    setup_reminders: bool,
+    dismissed_setup_checks: Vec<String>,
+    last_settings_category: Option<String>,
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            profile_id: String::new(),
+            game_version: None,
+            updated_at_unix: 0,
+            game_root_override: None,
+            executable_override: None,
+            working_directory_override: None,
+            launch_arguments: String::new(),
+            launch_environment: Vec::new(),
+            default_launch_action: "inherit".to_string(),
+            browser_mode_override: "inherit".to_string(),
+            preferred_browser_source: "auto".to_string(),
+            remember_last_website: true,
+            enabled_sources: Vec::new(),
+            index_behavior: "inherit".to_string(),
+            dependency_setup: "inherit".to_string(),
+            dependency_updates: "inherit".to_string(),
+            backup_behavior: "inherit".to_string(),
+            backup_retention_count: 5,
+            setup_reminders: true,
+            dismissed_setup_checks: Vec::new(),
+            last_settings_category: None,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheStats {
@@ -812,6 +1081,11 @@ struct CacheStats {
     download_cache_path: String,
     extraction_cache_path: String,
     uninstalled_path: String,
+    receipts_path: String,
+    indexes_path: String,
+    backups_path: String,
+    logs_path: String,
+    thumbnails_path: String,
     download_cache_size_bytes: u64,
     extraction_cache_size_bytes: u64,
     total_cache_size_bytes: u64,
@@ -819,8 +1093,206 @@ struct CacheStats {
     temporary_extraction_folder_count: usize,
     uninstalled_storage_size_bytes: u64,
     uninstalled_entry_count: usize,
+    receipts_size_bytes: u64,
+    receipt_count: usize,
+    indexes_size_bytes: u64,
+    index_file_count: usize,
+    backups_size_bytes: u64,
+    backup_count: usize,
+    logs_size_bytes: u64,
+    log_count: usize,
+    thumbnails_size_bytes: u64,
+    thumbnail_count: usize,
 }
 
+fn allowed_theme_id(value: &str) -> bool {
+    matches!(
+        value,
+        "moonveil"
+            | "true-dark"
+            | "polar-day"
+            | "neon-rift"
+            | "aqua-ghost"
+            | "ember-forge"
+            | "sakura-night"
+            | "emerald-grid"
+            | "royal-indigo"
+            | "classic-light"
+    )
+}
+
+fn normalize_theme_id(value: &str) -> String {
+    let trimmed = value.trim();
+    let canonical = match trimmed {
+        "basic-light" => "classic-light",
+        "basic-dark" | "midnight" | "mono-eclipse" => "true-dark",
+        "crimson-noir" | "solar-dusk" => "ember-forge",
+        "solar-byte" => "polar-day",
+        "deep-space" => "neon-rift",
+        "void-rose" => "sakura-night",
+        other => other,
+    };
+
+    if allowed_theme_id(canonical) {
+        canonical.to_string()
+    } else {
+        DEFAULT_THEME_ID.to_string()
+    }
+}
+
+fn clean_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_choice(value: &mut String, allowed: &[&str], fallback: &str) {
+    if !allowed.contains(&value.as_str()) {
+        *value = fallback.to_string();
+    }
+}
+
+fn normalize_hex_color(value: &mut String, fallback: &str) {
+    let valid = value.len() == 7
+        && value.starts_with('#')
+        && value.chars().skip(1).all(|ch| ch.is_ascii_hexdigit());
+    if !valid {
+        *value = fallback.to_string();
+    }
+}
+
+fn normalize_string_list(values: Vec<String>, allowed: &[&str], fallback: &[&str]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let trimmed = value.trim().to_lowercase();
+        if allowed.contains(&trimmed.as_str()) && !normalized.contains(&trimmed) {
+            normalized.push(trimmed);
+        }
+    }
+
+    if normalized.is_empty() {
+        fallback.iter().map(|value| value.to_string()).collect()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_free_string_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && !normalized.iter().any(|existing: &String| existing.eq_ignore_ascii_case(trimmed)) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    normalized
+}
+
+fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
+    settings.game_path = clean_optional_string(settings.game_path);
+    settings.current_game_profile_id = clean_optional_string(settings.current_game_profile_id);
+    settings.active_game_profile_id = clean_optional_string(settings.active_game_profile_id);
+    settings.active_mod_profile_by_game_profile_id = settings
+        .active_mod_profile_by_game_profile_id
+        .into_iter()
+        .filter_map(|(game_profile_id, mod_profile_id)| {
+            let game_profile_id = clean_profile_id(&game_profile_id).ok()?;
+            let mod_profile_id = clean_optional_string(Some(mod_profile_id))?;
+            Some((game_profile_id, mod_profile_id))
+        })
+        .collect();
+    settings.theme_id = normalize_theme_id(&settings.theme_id);
+    normalize_choice(&mut settings.appearance_mode, &["system", "light", "dark"], "system");
+    normalize_hex_color(&mut settings.accent_color, "#9b72ff");
+    normalize_choice(&mut settings.interface_density, &["compact", "comfortable", "spacious"], "comfortable");
+    settings.font_scale = settings.font_scale.clamp(90, 125);
+    settings.thumbnail_size = settings.thumbnail_size.clamp(96, 280);
+    normalize_choice(&mut settings.sidebar_density, &["comfortable", "compact", "icons"], "comfortable");
+    normalize_choice(&mut settings.startup_destination, &["home", "browse", "installed", "games", "last"], "home");
+    normalize_choice(&mut settings.language, &["system", "en"], "system");
+    normalize_choice(&mut settings.default_launch_action, &["ask", "vanilla", "modded", "remember"], "ask");
+    settings.download_folder = clean_optional_string(settings.download_folder);
+    settings.simultaneous_downloads = settings.simultaneous_downloads.clamp(1, 8);
+    settings.download_retry_count = settings.download_retry_count.clamp(0, 6);
+    settings.download_bandwidth_limit_mb_s = settings.download_bandwidth_limit_mb_s.clamp(0, 250);
+    normalize_choice(&mut settings.browser_mode, &["native", "embedded", "fallback", "ask"], "fallback");
+    normalize_choice(&mut settings.external_link_behavior, &["ask", "external", "block"], "ask");
+    settings.profile_default_sources = normalize_string_list(settings.profile_default_sources, &["modworkshop", "nexus", "github"], &["modworkshop", "nexus", "github"]);
+    normalize_choice(&mut settings.profile_default_dependency_setup, &["ask", "auto", "off"], "ask");
+    normalize_choice(&mut settings.profile_default_backup_behavior, &["before-replace", "every-install", "needed", "disabled"], "before-replace");
+    normalize_choice(&mut settings.profile_default_installation_flow, &["guided", "quick", "ask"], "guided");
+    normalize_choice(&mut settings.profile_default_browser_mode, &["global", "native", "embedded", "ask"], "global");
+    normalize_choice(&mut settings.profile_default_index_behavior, &["auto", "manual", "disabled"], "auto");
+    settings.app_update_manifest_url = clean_optional_string(settings.app_update_manifest_url);
+    settings.update_channel = "stable".to_string();
+    settings.ignored_versions = normalize_free_string_list(settings.ignored_versions);
+    settings.source_index_v2_remote_url = clean_optional_string(settings.source_index_v2_remote_url);
+    settings.index_bandwidth_limit_mb_s = settings.index_bandwidth_limit_mb_s.clamp(0, 250);
+    settings.index_temp_storage_limit_gb = settings.index_temp_storage_limit_gb.clamp(1, 64);
+    normalize_choice(&mut settings.index_build_mode, &["metadata", "manifest", "full"], "metadata");
+    normalize_choice(&mut settings.index_remote_behavior, &["auto", "ask", "manual", "disabled"], "auto");
+    if settings.index_remote_behavior == "disabled" {
+        settings.source_index_v2_remote_enabled = Some(false);
+    } else if settings.source_index_v2_remote_enabled.is_none() {
+        settings.source_index_v2_remote_enabled = Some(true);
+    }
+    settings.modworkshop_api_key = clean_optional_string(settings.modworkshop_api_key);
+    settings.nexus_api_key = clean_optional_string(settings.nexus_api_key);
+    if settings.developer_mode.is_none() {
+        settings.developer_mode = Some(false);
+    }
+    settings
+}
+
+fn normalize_profile_settings(mut settings: ProfileSettings, profile_id: &str) -> ProfileSettings {
+    settings.profile_id = profile_id.trim().to_string();
+    settings.game_version = clean_optional_string(settings.game_version);
+    if profile_id == BUILTIN_PAYDAY3_PROFILE_ID && settings.game_version.as_deref() != Some("UE4.27") {
+        settings.game_version = Some("UE5.5".to_string());
+    }
+    settings.game_root_override = clean_optional_string(settings.game_root_override);
+    settings.executable_override = clean_optional_string(settings.executable_override);
+    settings.working_directory_override = clean_optional_string(settings.working_directory_override);
+    settings.launch_arguments = settings.launch_arguments.trim().to_string();
+    settings.launch_environment = normalize_free_string_list(settings.launch_environment);
+    normalize_choice(
+        &mut settings.default_launch_action,
+        &["inherit", "ask", "vanilla", "modded", "remember"],
+        "inherit",
+    );
+    normalize_choice(
+        &mut settings.browser_mode_override,
+        &["inherit", "native", "embedded", "fallback", "ask"],
+        "inherit",
+    );
+    normalize_choice(
+        &mut settings.preferred_browser_source,
+        &["auto", "modworkshop", "nexus", "github", "custom"],
+        "auto",
+    );
+    settings.enabled_sources = normalize_string_list(
+        settings.enabled_sources,
+        &["modworkshop", "nexus", "github", "custom"],
+        &[],
+    );
+    normalize_choice(&mut settings.index_behavior, &["inherit", "auto", "manual", "disabled"], "inherit");
+    normalize_choice(&mut settings.dependency_setup, &["inherit", "ask", "auto", "off"], "inherit");
+    normalize_choice(&mut settings.dependency_updates, &["inherit", "auto", "ask", "off"], "inherit");
+    normalize_choice(
+        &mut settings.backup_behavior,
+        &["inherit", "before-replace", "every-install", "needed", "disabled"],
+        "inherit",
+    );
+    settings.backup_retention_count = settings.backup_retention_count.clamp(0, 50);
+    settings.dismissed_setup_checks = normalize_free_string_list(settings.dismissed_setup_checks);
+    settings.last_settings_category = clean_optional_string(settings.last_settings_category);
+    settings
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -874,6 +1346,10 @@ fn backups_dir() -> Result<PathBuf, String> {
 }
 
 fn downloads_cache_dir() -> Result<PathBuf, String> {
+    if let Some(folder) = load_settings_internal().download_folder {
+        return Ok(PathBuf::from(folder));
+    }
+
     Ok(app_data_dir()?.join("cache").join("downloads"))
 }
 
@@ -916,10 +1392,26 @@ fn settings_file_path() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join(SETTINGS_FILE_NAME))
 }
 
+fn profile_settings_dir() -> Result<PathBuf, String> {
+    let dir = app_data_dir()?.join("profile-settings");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create profile settings folder {}: {}", dir.display(), err))?;
+    Ok(dir)
+}
+
+fn profile_settings_file_path(profile_id: &str) -> Result<PathBuf, String> {
+    let trimmed = profile_id.trim();
+    if trimmed.is_empty() {
+        return Err("Profile id is required.".to_string());
+    }
+
+    Ok(profile_settings_dir()?.join(format!("{}.json", sanitize_file_component(trimmed))))
+}
+
 fn ensure_app_data_dirs() -> Result<PathBuf, String> {
     let root = app_data_dir()?;
 
-    for folder in ["logs", "backups", "cache", "receipts", "profiles", "uninstalled", "diagnostics"] {
+    for folder in ["logs", "backups", "cache", "receipts", "profiles", "profile-settings", "profile-data", "game-profile-drafts", "uninstalled", "diagnostics"] {
         fs::create_dir_all(root.join(folder))
             .map_err(|err| format!("Failed to create {}: {}", folder, err))?;
     }
@@ -944,6 +1436,12 @@ struct RuntimeLockStatus {
     vanilla_session_active: bool,
     toggle_locked: bool,
     message: String,
+}
+
+#[tauri::command]
+fn migrate_text_encoding_stores() -> Result<text_encoding::TextEncodingMigrationReport, String> {
+    let root = ensure_app_data_dirs()?;
+    text_encoding::run_persisted_text_encoding_migration(&root)
 }
 
 #[tauri::command]
@@ -1180,8 +1678,6 @@ fn read_source_index_database() -> SourceIndexDatabase {
 }
 
 fn write_source_index_database(database: &SourceIndexDatabase) {
-    const MAX_SOURCE_INDEX_RECORDS: usize = 1500;
-
     let Ok(path) = source_index_file_path() else {
         return;
     };
@@ -1197,7 +1693,6 @@ fn write_source_index_database(database: &SourceIndexDatabase) {
         version: database.version,
         records: records
             .into_iter()
-            .take(MAX_SOURCE_INDEX_RECORDS)
             .map(|record| (source_index_key(&record.source, &record.source_id), record))
             .collect(),
     };
@@ -1280,6 +1775,10 @@ fn upsert_source_index_detail(detail: &SourceModDetail) {
         game_id: None,
         name: detail.name.clone(),
         author: detail.author.clone(),
+        author_username: detail.author_username.clone(),
+        author_user_id: detail.author_user_id.clone(),
+        author_profile_url: detail.author_profile_url.clone(),
+        author_avatar_url: detail.author_avatar_url.clone(),
         version: detail.version.clone(),
         thumbnail_url: detail.thumbnail_url.clone(),
         banner_url: detail.banner_url.clone(),
@@ -1308,10 +1807,10 @@ fn upsert_source_index_detail(detail: &SourceModDetail) {
 }
 
 #[tauri::command]
-fn list_source_index(source: Option<String>, limit: Option<usize>) -> Result<Vec<SourceModSummary>, String> {
-    let database = read_source_index_database();
+fn list_source_index(source: Option<String>, limit: Option<usize>, profile_id: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+    let database = source_catalog::read_catalog(profile_id.as_deref())?;
     let source_filter = source.map(|value| value.to_lowercase());
-    let max_items = limit.unwrap_or(1200).clamp(1, 5000);
+    let max_items = limit.unwrap_or(1200).clamp(1, 100_000);
 
     let mut records = database.records.into_values().collect::<Vec<_>>();
     records.sort_by(|a, b| b.indexed_at_unix.cmp(&a.indexed_at_unix));
@@ -1343,7 +1842,137 @@ fn get_source_index_status() -> Result<String, String> {
         source_index_file_path()?.display()
     ))
 }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceIndexDiagnostics {
+    remote_enabled: bool,
+    last_refresh_at: Option<u64>,
+    index_version: Option<String>,
+    record_count: usize,
+    file_entry_count: usize,
+    hash_cache_entries: usize,
+    refresh_error: Option<String>,
+    total_records: usize,
+    hash_entries: usize,
+    archive_manifests: usize,
+    unknown_mods: usize,
+    duplicate_hashes: usize,
+    broken_entries: usize,
+    matching_success_rate: u32,
+}
 
+#[tauri::command]
+fn get_source_index_diagnostics(profile_id: Option<String>) -> Result<SourceIndexDiagnostics, String> {
+    let settings = load_settings_internal();
+    let database = source_catalog::read_catalog(profile_id.as_deref())?;
+    let record_count = database.records.len();
+    let file_entry_count = database
+        .records
+        .values()
+        .map(|record| record.file_names.len().max(record.file_ids.len()))
+        .sum::<usize>();
+    let archive_manifests = database
+        .records
+        .values()
+        .filter(|record| record.archive_fingerprint.as_ref().map(|value| !value.trim().is_empty()).unwrap_or(false))
+        .count();
+    let last_refresh_at = database.records.values().map(|record| record.indexed_at_unix).max();
+    let hash_cache_entries = read_hash_cache().len();
+    let receipts = if is_builtin_payday3_profile(profile_id.as_deref()) { list_install_receipts_internal().unwrap_or_default() }
+        else { profile_installs::list_profile_receipts_internal(profile_id.as_deref().unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID)).unwrap_or_default() };
+    let unknown_mods = receipts
+        .iter()
+        .filter(|receipt| receipt.source_mod_id.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true))
+        .count();
+    let matched_receipts = receipts.len().saturating_sub(unknown_mods);
+    let matching_success_rate = if receipts.is_empty() {
+        0
+    } else {
+        ((matched_receipts as f64 / receipts.len() as f64) * 100.0).round() as u32
+    };
+
+    let mut fingerprints = std::collections::BTreeMap::<String, usize>::new();
+    for record in database.records.values() {
+        if let Some(fingerprint) = record.archive_fingerprint.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+            *fingerprints.entry(fingerprint.to_string()).or_insert(0) += 1;
+        }
+    }
+    let duplicate_hashes = fingerprints.values().filter(|count| **count > 1).count();
+    let (indexed_archives, indexed_files, indexed_duplicates) = source_catalog::index_file_statistics(profile_id.as_deref().unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID));
+
+    Ok(SourceIndexDiagnostics {
+        remote_enabled: settings.source_index_v2_remote_enabled.unwrap_or(true) && settings.index_remote_behavior != "disabled",
+        last_refresh_at,
+        index_version: Some(database.version.to_string()),
+        record_count,
+        file_entry_count: file_entry_count.max(indexed_files),
+        hash_cache_entries,
+        refresh_error: None,
+        total_records: record_count,
+        hash_entries: indexed_files,
+        archive_manifests: archive_manifests.max(indexed_archives),
+        unknown_mods,
+        duplicate_hashes: duplicate_hashes.max(indexed_duplicates),
+        broken_entries: 0,
+        matching_success_rate,
+    })
+}
+
+fn source_index_recently_refreshed(max_age: Duration) -> bool {
+    let Ok(path) = source_index_file_path() else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified.elapsed().map(|elapsed| elapsed < max_age).unwrap_or(false)
+}
+
+fn refresh_source_index_v2_remote_internal() -> Result<String, String> {
+    let settings = load_settings_internal();
+    if !settings.source_index_v2_remote_enabled.unwrap_or(true) || settings.index_remote_behavior == "disabled" {
+        return Ok("Remote source index refresh is disabled in Settings.".to_string());
+    }
+
+    let mut notes = Vec::new();
+    for source in ["modworkshop", "nexus"] {
+        match fetch_source_mods_page_sync(source.to_string(), 1, Some("recent".to_string()), serde_json::Value::Null) {
+            Ok(mods) => notes.push(format!("{}: {} record(s)", source, mods.len())),
+            Err(error) => notes.push(format!("{}: {}", source, error)),
+        }
+    }
+
+    Ok(format!("Remote source index refresh finished. {}", notes.join(" | ")))
+}
+
+#[tauri::command]
+async fn refresh_source_index_v2_remote() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(refresh_source_index_v2_remote_internal)
+        .await
+        .map_err(|err| format!("Remote source index refresh task failed: {:?}", err))?
+}
+
+#[tauri::command]
+async fn refresh_source_index_v2_remote_if_stale() -> Result<String, String> {
+    if source_index_recently_refreshed(Duration::from_secs(6 * 60 * 60)) {
+        return Ok("Remote source index is fresh.".to_string());
+    }
+
+    refresh_source_index_v2_remote().await
+}
+
+#[tauri::command]
+async fn diagnose_modworkshop_categories() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mods = fetch_modworkshop_mods_page(1, "recent")?;
+        Ok(format!("ModWorkshop public browsing returned {} PAYDAY 3 mod(s).", mods.len()))
+    })
+    .await
+    .map_err(|err| format!("ModWorkshop diagnostic task failed: {:?}", err))?
+}
 
 fn load_settings_internal() -> AppSettings {
     let Ok(settings_path) = settings_file_path() else {
@@ -1354,16 +1983,88 @@ fn load_settings_internal() -> AppSettings {
         return AppSettings::default();
     };
 
-    serde_json::from_str::<AppSettings>(&contents).unwrap_or_default()
+    serde_json::from_str::<AppSettings>(&contents)
+        .map(normalize_app_settings)
+        .unwrap_or_default()
 }
 
 fn save_settings_internal(settings: &AppSettings) -> Result<(), String> {
     let root = ensure_app_data_dirs()?;
     let settings_path = root.join(SETTINGS_FILE_NAME);
-    let contents = serde_json::to_string_pretty(settings)
+    let normalized = normalize_app_settings(settings.clone());
+    let contents = serde_json::to_string_pretty(&normalized)
         .map_err(|err| format!("Failed to serialize settings: {}", err))?;
 
     fs::write(settings_path, contents).map_err(|err| format!("Failed to save settings: {}", err))
+}
+
+fn load_profile_settings_internal(profile_id: &str) -> ProfileSettings {
+    let Ok(path) = profile_settings_file_path(profile_id) else {
+        return normalize_profile_settings(ProfileSettings::default(), profile_id);
+    };
+
+    let Ok(contents) = fs::read_to_string(path) else {
+        return normalize_profile_settings(ProfileSettings::default(), profile_id);
+    };
+
+    serde_json::from_str::<ProfileSettings>(&contents)
+        .map(|settings| normalize_profile_settings(settings, profile_id))
+        .unwrap_or_else(|_| normalize_profile_settings(ProfileSettings::default(), profile_id))
+}
+
+fn save_profile_settings_internal(profile_id: &str, settings: &ProfileSettings) -> Result<ProfileSettings, String> {
+    let mut normalized = normalize_profile_settings(settings.clone(), profile_id);
+    normalized.updated_at_unix = now_unix_seconds();
+    let path = profile_settings_file_path(profile_id)?;
+    let value = serde_json::to_value(&normalized)
+        .map_err(|err| format!("Failed to serialize profile settings: {}", err))?;
+    write_json_file(&path, &value, "profile settings")?;
+    Ok(normalized)
+}
+
+fn reset_profile_settings_scope(settings: &mut ProfileSettings, defaults: &ProfileSettings, scope: &str) -> Result<(), String> {
+    match scope.trim() {
+        "overview" | "identity" => {
+            settings.last_settings_category = None;
+        }
+        "gameLaunch" | "game-launch" | "game" | "launch" => {
+            settings.game_root_override = defaults.game_root_override.clone();
+            settings.executable_override = defaults.executable_override.clone();
+            settings.working_directory_override = defaults.working_directory_override.clone();
+            settings.launch_arguments = defaults.launch_arguments.clone();
+            settings.launch_environment = defaults.launch_environment.clone();
+            settings.default_launch_action = defaults.default_launch_action.clone();
+        }
+        "browsing" | "browser" => {
+            settings.browser_mode_override = defaults.browser_mode_override.clone();
+            settings.preferred_browser_source = defaults.preferred_browser_source.clone();
+            settings.remember_last_website = defaults.remember_last_website;
+        }
+        "sources" => {
+            settings.enabled_sources = defaults.enabled_sources.clone();
+        }
+        "modIndex" | "mod-index" => {
+            settings.index_behavior = defaults.index_behavior.clone();
+        }
+        "dependencies" => {
+            settings.dependency_setup = defaults.dependency_setup.clone();
+            settings.dependency_updates = defaults.dependency_updates.clone();
+        }
+        "backups" => {
+            settings.backup_behavior = defaults.backup_behavior.clone();
+            settings.backup_retention_count = defaults.backup_retention_count;
+        }
+        "setup" => {
+            settings.setup_reminders = defaults.setup_reminders;
+            settings.dismissed_setup_checks = defaults.dismissed_setup_checks.clone();
+        }
+        "all" => {
+            *settings = defaults.clone();
+        }
+        other => return Err(format!("Unknown profile settings reset scope: {}", other)),
+    }
+
+    Ok(())
 }
 
 fn current_timestamp() -> String {
@@ -1378,21 +2079,82 @@ fn system_time_unix(time: SystemTime) -> Option<u64> {
 }
 
 fn payday_paths_from_root(game_root: &Path) -> PaydayPaths {
+    let version = load_profile_settings_internal(BUILTIN_PAYDAY3_PROFILE_ID).game_version;
+    payday_paths_for_version(game_root, version.as_deref().unwrap_or("UE5.5"))
+}
+
+fn payday_paths_for_version(game_root: &Path, version: &str) -> PaydayPaths {
+    let game_dir = if game_root.join("Content/PAYDAY3/Binaries/WinGDK").is_dir() {
+        game_root.join("Content/PAYDAY3")
+    } else { game_root.join("PAYDAY3") };
+    let win64 = game_dir.join("Binaries").join(if game_dir.join("Binaries/WinGDK").is_dir() { "WinGDK" } else { "Win64" });
     PaydayPaths {
         game_root: game_root.to_path_buf(),
-        pak_mods: game_root.join("PAYDAY3").join("Content").join("Paks").join("~mods"),
-        win64: game_root.join("PAYDAY3").join("Binaries").join("Win64"),
-        ue4ss_mods: game_root
-            .join("PAYDAY3")
-            .join("Binaries")
-            .join("Win64")
-            .join("Mods"),
+        pak_mods: game_dir.join("Content/Paks/~mods"),
+        ue4ss_mods: if version == "UE4.27" { win64.join("Mods") } else { win64.join("UE4SS/Mods") },
+        win64,
     }
 }
 
+fn payday_uses_ue5_layout(paths: &PaydayPaths) -> bool {
+    paths.ue4ss_mods == paths.win64.join("UE4SS/Mods")
+}
+
+fn payday_ue5_loader_ready(paths: &PaydayPaths, require_pak: bool) -> bool {
+    let loader_present = paths.win64.join("dwmapi.dll").is_file()
+        && paths.win64.join("UE4SS/UE4SS.dll").is_file();
+    if !require_pak { return loader_present; }
+    let allow_mods = paths.ue4ss_mods.join("AllowModsMod");
+    let enabled = fs::read_to_string(paths.ue4ss_mods.join("mods.txt")).ok().map(|text| text.lines().any(|line| {
+        let clean = line.split(';').next().unwrap_or("").trim();
+        clean.split_once(':').map(|(name, value)| name.trim().eq_ignore_ascii_case("AllowModsMod") && value.trim() == "1").unwrap_or(false)
+    })).unwrap_or(false) || allow_mods.join("enabled.txt").is_file();
+    loader_present && allow_mods.join("dlls/AllowModsMod.dll").is_file() && enabled
+}
+
+fn allowmods_patch_failed(log: &str) -> bool {
+    let session = log.rsplit("Starting C++ mod 'AllowModsMod'").next().unwrap_or(log);
+    session.lines().any(|line| line.contains("[AllowModsMod]") && line.contains("Unable to patch"))
+}
+
+fn payday_ue5_runtime_warning(paths: &PaydayPaths) -> Option<String> {
+    let log_path = paths.win64.join("UE4SS/UE4SS.log");
+    let metadata = fs::metadata(&log_path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let mut markers = vec![paths.win64.join("UE4SS/Mods/AllowModsMod/dlls/AllowModsMod.dll")];
+    markers.extend(payday_exe_candidates(paths).into_iter().filter(|path| path.is_file()));
+    if markers.iter().any(|path| fs::metadata(path).and_then(|m| m.modified()).map(|time| time > modified).unwrap_or(true)) { return None; }
+    let mut file = File::open(&log_path).ok()?;
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(metadata.len().saturating_sub(4 * 1024 * 1024))).ok()?;
+    let mut contents = Vec::new();
+    file.take(4 * 1024 * 1024).read_to_end(&mut contents).ok()?;
+    allowmods_patch_failed(&String::from_utf8_lossy(&contents)).then(|| "The latest recorded AllowModsMod session could not patch this game build. Dependency files are present, but PAK activation is not verified. Check the official UE5 loader updates; reinstalling the same package is not a confirmed fix.".to_string())
+}
+
+fn validate_payday_ue5_dependencies(paths: &PaydayPaths, entries: &[ArchiveInspectEntry]) -> Result<(), String> {
+    if !payday_uses_ue5_layout(paths) { return Ok(()); }
+    let has_destination = |relative: &str| entries.iter().any(|entry| !entry.blocked && Path::new(&entry.destination) == paths.win64.join(relative));
+    let bundled_loader = has_destination("dwmapi.dll") && has_destination("UE4SS/UE4SS.dll")
+        && entries.iter().any(|entry| entry.archive_path.to_lowercase().ends_with("ue4ss/ue4ss.dll"));
+    if has_destination("UE4SS/UE4SS.dll") && !bundled_loader {
+        return Err("This archive does not have the current PAYDAY 3 UE5 loader layout. Choose the UE5 package with dwmapi.dll and UE4SS/UE4SS.dll; legacy loader files must not overwrite it.".to_string());
+    }
+    let needs_pak = entries.iter().any(|entry| !entry.blocked && entry.route_kind == "pak-mods");
+    let needs_script = entries.iter().any(|entry| !entry.blocked && Path::new(&entry.destination).starts_with(&paths.ue4ss_mods));
+    if needs_pak && !payday_ue5_loader_ready(paths, true) {
+        return Err("PAYDAY 3 UE5 PAK mods require PD3 UE4SS V3.01 + Allow Pak Mods (ModWorkshop 47771), including enabled AllowModsMod. Install the UE5 package first; -fileopenlog and the UE4 Logic Mod Loader are not compatible.".to_string());
+    }
+    if needs_script && !bundled_loader && !payday_ue5_loader_ready(paths, false) {
+        return Err("PAYDAY 3 UE5 script mods require the PAYDAY-specific UE5 UE4SS package (ModWorkshop 47771). Generic or legacy UE4SS in Win64 does not satisfy this dependency.".to_string());
+    }
+    Ok(())
+}
+
 fn is_payday3_root(path: &Path) -> bool {
-    path.join("PAYDAY3").join("Content").join("Paks").exists()
-        && path.join("PAYDAY3").join("Binaries").join("Win64").exists()
+    [path.join("PAYDAY3"), path.join("Content/PAYDAY3")].iter().any(|game_dir|
+        game_dir.join("Content/Paks").is_dir()
+            && (game_dir.join("Binaries/Win64").is_dir() || game_dir.join("Binaries/WinGDK").is_dir()))
 }
 
 fn common_steam_roots() -> Vec<PathBuf> {
@@ -1437,7 +2199,163 @@ fn parse_steam_libraries(steam_root: &Path) -> Vec<PathBuf> {
     libraries
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameProfileInstallationProbe {
+    profile_id: String,
+    steam_app_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameProfileInstallationResult {
+    profile_id: String,
+    installed: bool,
+    storefront: Option<String>,
+    game_root: Option<String>,
+    matched_app_id: Option<String>,
+}
+
+fn steam_manifest_value(contents: &str, key: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let quoted = line.split('"').collect::<Vec<_>>();
+        if quoted.len() >= 4 && quoted[1].eq_ignore_ascii_case(key) {
+            Some(quoted[3].replace("\\\\", "\\"))
+        } else {
+            None
+        }
+    })
+}
+
+fn discovered_steam_libraries() -> Vec<PathBuf> {
+    let mut libraries = Vec::new();
+    for steam_root in common_steam_roots().into_iter().filter(|root| root.exists()) {
+        for library in parse_steam_libraries(&steam_root) {
+            if library.exists() && !libraries.iter().any(|known: &PathBuf| known == &library) {
+                libraries.push(library);
+            }
+        }
+    }
+    libraries
+}
+
+fn detect_profile_installation(
+    probe: GameProfileInstallationProbe,
+    steam_libraries: &[PathBuf],
+) -> GameProfileInstallationResult {
+    if let Some(manual_root) = load_profile_settings_internal(&probe.profile_id)
+        .game_root_override
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir() && profile_installs::validate_builtin_profile_root(&probe.profile_id, path).is_ok())
+    {
+        return GameProfileInstallationResult {
+            profile_id: probe.profile_id,
+            installed: true,
+            storefront: Some("manual".to_string()),
+            game_root: Some(manual_root.display().to_string()),
+            matched_app_id: None,
+        };
+    }
+
+    for app_id in probe
+        .steam_app_ids
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && value.chars().all(|character| character.is_ascii_digit()))
+    {
+        for library in steam_libraries {
+            let manifest_path = library
+                .join("steamapps")
+                .join(format!("appmanifest_{}.acf", app_id));
+            let Ok(contents) = fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Some(install_dir) = steam_manifest_value(&contents, "installdir") else {
+                continue;
+            };
+            let game_root = library.join("steamapps").join("common").join(install_dir);
+            if game_root.is_dir() && profile_installs::validate_builtin_profile_root(&probe.profile_id, &game_root).is_ok() {
+                return GameProfileInstallationResult {
+                    profile_id: probe.profile_id,
+                    installed: true,
+                    storefront: Some("steam".to_string()),
+                    game_root: Some(game_root.display().to_string()),
+                    matched_app_id: Some(app_id.to_string()),
+                };
+            }
+        }
+    }
+
+    GameProfileInstallationResult {
+        profile_id: probe.profile_id,
+        installed: false,
+        storefront: None,
+        game_root: None,
+        matched_app_id: None,
+    }
+}
+
+#[tauri::command]
+fn detect_game_profile_installations(
+    profiles: Vec<GameProfileInstallationProbe>,
+) -> Result<Vec<GameProfileInstallationResult>, String> {
+    let steam_libraries = discovered_steam_libraries();
+    Ok(profiles
+        .into_iter()
+        .map(|probe| detect_profile_installation(probe, &steam_libraries))
+        .collect())
+}
+
+fn builtin_profile_steam_app_ids(profile_id: &str) -> &'static [&'static str] {
+    match profile_id {
+        "builtin.cyberpunk2077" => &["1091500"],
+        "builtin.outlast-trials" => &["1304930"],
+        "builtin.payday-the-heist" => &["24240"],
+        "builtin.payday2" => &["218620"],
+        BUILTIN_PAYDAY3_PROFILE_ID => &["1272080"],
+        "builtin.resident-evil-7" => &["418370"],
+        "builtin.resident-evil-village" => &["1196590"],
+        "builtin.resident-evil-requiem" => &["3764200"],
+        "builtin.borderlands" => &["8980", "729040"],
+        "builtin.borderlands2" => &["49520"],
+        "builtin.borderlands3" => &["397540"],
+        "builtin.borderlands4" => &["1285190"],
+        "builtin.tiny-tinas-wonderlands" => &["1286680"],
+        "builtin.spider-man-remastered" => &["1817070"],
+        "builtin.spider-man-2" => &["2651280"],
+        "builtin.monster-hunter-wilds" => &["2246340"],
+        _ => &[],
+    }
+}
+
+fn require_game_profile_installation(profile_id: Option<&str>) -> Result<String, String> {
+    let profile_id = profile_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "A game profile is required before downloading or installing files.".to_string())?;
+    let clean = clean_profile_id(profile_id)?;
+    let probe = GameProfileInstallationProbe {
+        profile_id: clean.clone(),
+        steam_app_ids: builtin_profile_steam_app_ids(&clean)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+    };
+    let result = detect_profile_installation(probe, &discovered_steam_libraries());
+    if !result.installed {
+        return Err(format!(
+            "Downloads are disabled because the selected game profile is not installed: {}.",
+            clean
+        ));
+    }
+    Ok(clean)
+}
+
 fn detect_payday3_paths_internal() -> Option<PaydayPaths> {
+    if let Some(root) = load_profile_settings_internal(BUILTIN_PAYDAY3_PROFILE_ID).game_root_override {
+        let root = PathBuf::from(root.trim());
+        if is_payday3_root(&root) { return Some(payday_paths_from_root(&root)); }
+    }
     let settings = load_settings_internal();
 
     if let Some(game_path) = settings.game_path {
@@ -1776,7 +2694,11 @@ fn raw_disabled_pak_destination(paths: &PaydayPaths, file_name: &str) -> PathBuf
 }
 
 #[tauri::command]
-fn set_pak_mod_files_enabled(file_names: Vec<String>, enabled: bool) -> Result<String, String> {
+fn set_pak_mod_files_enabled(file_names: Vec<String>, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Err(profile_not_payday3_message(profile_id.as_deref()));
+    }
+
     if let Some(message) = runtime_mutation_locked_message() {
         return Err(message);
     }
@@ -2600,7 +3522,14 @@ fn extra_win64_companion_files_for_receipt(paths: &PaydayPaths, receipt: &Instal
             continue;
         }
 
-        if let Ok(relative) = path.strip_prefix(&paths.win64) {
+        if let Ok(relative) = path.strip_prefix(&paths.ue4ss_mods) {
+            if let Some(mod_name) = relative.components().next() {
+                let mod_name = mod_name.as_os_str().to_string_lossy().to_string();
+                let mod_root = paths.ue4ss_mods.join(&mod_name);
+                if mod_root.is_dir() && !roots.iter().any(|root| root == &mod_root) { roots.push(mod_root); }
+                keys.push(compact_receipt_key(&mod_name));
+            }
+        } else if let Ok(relative) = path.strip_prefix(&paths.win64) {
             let parts = relative.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>();
             if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("Mods") {
                 let mod_root = paths.win64.join("Mods").join(&parts[1]);
@@ -2669,6 +3598,8 @@ fn install_receipt_file_for_existing_path(path: &Path) -> InstallReceiptFile {
         relative_path: path.display().to_string(),
         size_bytes,
         sha256: sha256_file(path).ok(),
+        original_path: None,
+        backup_path: None,
     }
 }
 
@@ -3191,6 +4122,7 @@ fn rebuild_installed_state_database_internal() -> Result<InstalledStateDatabase,
         .unwrap_or_default()
         .iter()
         .map(|receipt| installed_state_record_from_receipt(&paths, receipt))
+        .filter(|record| record.files.iter().any(|file| file.live))
         .collect::<Vec<_>>();
 
     records.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -3615,8 +4547,8 @@ fn check_update_for_record(record: InstalledStateRecord) -> SourceUpdateStatus {
     };
 
     let detail = match record.source.as_str() {
-        "modworkshop" => fetch_modworkshop_mod_detail(record.id.clone()),
-        "nexus" => fetch_nexus_mod_detail(record.id.clone()),
+        "modworkshop" => fetch_modworkshop_mod_detail(record.id.clone(), None),
+        "nexus" => fetch_nexus_mod_detail(record.id.clone(), None, None),
         other => Err(format!("Unsupported source for update checks: {}", other)),
     };
 
@@ -3711,7 +4643,11 @@ fn check_installed_source_updates_internal() -> Result<Vec<SourceUpdateStatus>, 
 }
 
 #[tauri::command]
-async fn check_installed_source_updates() -> Result<Vec<SourceUpdateStatus>, String> {
+async fn check_installed_source_updates(profile_id: Option<String>) -> Result<Vec<SourceUpdateStatus>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok(Vec::new());
+    }
+
     tauri::async_runtime::spawn_blocking(check_installed_source_updates_internal)
         .await
         .map_err(|err| format!("Update check task failed: {}", err))?
@@ -3723,7 +4659,14 @@ fn list_installed_state_records_internal() -> Result<Vec<InstalledStateRecord>, 
 }
 
 #[tauri::command]
-async fn list_installed_state_records() -> Result<Vec<InstalledStateRecord>, String> {
+async fn list_installed_state_records(profile_id: Option<String>) -> Result<Vec<InstalledStateRecord>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        return tauri::async_runtime::spawn_blocking(move || profile_installs::sync_profile_installed_state(&profile_id))
+            .await
+            .map_err(|err| format!("Profile installed-state task failed: {}", err))?;
+    }
+
     tauri::async_runtime::spawn_blocking(list_installed_state_records_internal)
         .await
         .map_err(|err| format!("Installed-state task failed: {}", err))?
@@ -3739,7 +4682,11 @@ fn prune_stale_receipts_internal() -> Result<usize, String> {
 }
 
 #[tauri::command]
-fn prune_stale_install_receipts() -> Result<String, String> {
+fn prune_stale_install_receipts(profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok("No stale receipts for this profile.".to_string());
+    }
+
     let removed = prune_stale_receipts_internal()?;
 
     Ok(format!(
@@ -4023,19 +4970,36 @@ fn uninstall_receipt_internal(receipt: &InstallReceipt) -> Result<String, String
 }
 
 #[tauri::command]
-fn uninstall_managed_install(receipt_id: String) -> Result<String, String> {
+fn uninstall_managed_install(receipt_id: String, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        return profile_installs::uninstall_profile_receipt_internal(&profile_id, &receipt_id);
+    }
+
     let receipt = find_receipt_by_id(&receipt_id)?;
     uninstall_receipt_internal(&receipt)
 }
 
 #[tauri::command]
-fn uninstall_source_install(source: String, source_id: String) -> Result<String, String> {
+fn uninstall_source_install(source: String, source_id: String, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        let receipt = profile_installs::find_profile_receipt_by_source(&profile_id, &source, &source_id)?;
+        return profile_installs::uninstall_profile_receipt_internal(&profile_id, &receipt.id);
+    }
+
     let receipt = find_receipt_by_source(&source, &source_id)?;
     uninstall_receipt_internal(&receipt)
 }
 
 #[tauri::command]
-fn set_source_install_enabled(source: String, source_id: String, enabled: bool) -> Result<String, String> {
+fn set_source_install_enabled(source: String, source_id: String, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        let receipt = profile_installs::find_profile_receipt_by_source(&profile_id, &source, &source_id)?;
+        return profile_installs::set_profile_receipt_enabled_internal(&profile_id, &receipt.id, enabled);
+    }
+
     let receipt = find_receipt_by_source(&source, &source_id)?;
     set_receipt_mod_enabled_internal(&receipt.id, enabled)
 }
@@ -4073,14 +5037,26 @@ fn list_managed_installs_internal() -> Result<Vec<ManagedInstallInfo>, String> {
 }
 
 #[tauri::command]
-async fn list_managed_installs() -> Result<Vec<ManagedInstallInfo>, String> {
+async fn list_managed_installs(profile_id: Option<String>) -> Result<Vec<ManagedInstallInfo>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        return tauri::async_runtime::spawn_blocking(move || profile_installs::list_profile_managed_installs_internal(&profile_id))
+            .await
+            .map_err(|err| format!("Profile managed-install task failed: {}", err))?;
+    }
+
     tauri::async_runtime::spawn_blocking(list_managed_installs_internal)
         .await
         .map_err(|err| format!("Managed install task failed: {}", err))?
 }
 
 #[tauri::command]
-fn set_managed_install_enabled(receipt_id: String, enabled: bool) -> Result<String, String> {
+fn set_managed_install_enabled(receipt_id: String, enabled: bool, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        return profile_installs::set_profile_receipt_enabled_internal(&profile_id, &receipt_id, enabled);
+    }
+
     set_receipt_mod_enabled_internal(&receipt_id, enabled)
 }
 
@@ -4124,13 +5100,40 @@ fn dependency_item(id: &str, label: &str, path: PathBuf, details: &str, recommen
 }
 
 #[tauri::command]
-fn get_dependency_report() -> Result<DependencyReport, String> {
+fn get_dependency_report(profile_id: Option<String>) -> Result<DependencyReport, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.as_deref().ok_or_else(|| "Choose a profile before checking dependencies.".to_string())?;
+        return profile_installs::get_profile_dependency_report(profile_id);
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
     let mut items = Vec::new();
     let mut warnings = Vec::new();
 
+    if payday_uses_ue5_layout(&paths) {
+        let ready = payday_ue5_loader_ready(&paths, true);
+        for (id, label, relative) in [
+            ("pd3-ue5-proxy", "UE5 dwmapi proxy", "dwmapi.dll"),
+            ("pd3-ue5-ue4ss", "PAYDAY 3 UE5 UE4SS", "UE4SS/UE4SS.dll"),
+            ("pd3-ue5-allowmods", "UE5 AllowModsMod", "UE4SS/Mods/AllowModsMod/dlls/AllowModsMod.dll"),
+        ] {
+            items.push(dependency_item(id, label, paths.win64.join(relative),
+                "UE5-specific package layout; file detection does not verify binary compatibility.",
+                "Use PD3 UE4SS V3.01 + Allow Pak Mods: https://modworkshop.net/mod/47771 (UE5 file, not older files)."));
+        }
+        items.push(DependencyStatusItem {
+            id: "pd3-ue5-pak-ready".to_string(), label: "UE5 PAK dependency files".to_string(),
+            status: if ready { "found" } else { "missing/disabled" }.to_string(), found: ready,
+            path: Some(paths.ue4ss_mods.join("mods.txt").display().to_string()),
+            details: "Requires dwmapi.dll, UE4SS/UE4SS.dll, AllowModsMod DLL and an enabled AllowModsMod entry.".to_string(),
+            recommendation: "UE5 does not support -fileopenlog or the UE4 Logic Mod Loader.".to_string(),
+        });
+        if !ready { warnings.push("UE5 PAK mods are blocked until the PAYDAY-specific loader and enabled AllowModsMod are detected.".to_string()); }
+        if let Some(warning) = payday_ue5_runtime_warning(&paths) { warnings.push(warning); }
+        return Ok(DependencyReport { game_root: paths.game_root.display().to_string(), win64: paths.win64.display().to_string(), mods_folder: paths.ue4ss_mods.display().to_string(), items, warnings });
+    }
     let ue4ss_dll = paths.win64.join("UE4SS.dll");
     let xinput = paths.win64.join("xinput1_3.dll");
     let ue4ss_settings = paths.win64.join("UE4SS-settings.ini");
@@ -4271,7 +5274,11 @@ fn receipt_repair_item(paths: &PaydayPaths, receipt: &InstallReceipt) -> Receipt
 }
 
 #[tauri::command]
-fn list_receipt_repair_items() -> Result<Vec<ReceiptRepairItem>, String> {
+fn list_receipt_repair_items(profile_id: Option<String>) -> Result<Vec<ReceiptRepairItem>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok(Vec::new());
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
@@ -4290,7 +5297,12 @@ fn list_receipt_repair_items() -> Result<Vec<ReceiptRepairItem>, String> {
 }
 
 #[tauri::command]
-fn remove_receipt_by_id(receipt_id: String) -> Result<String, String> {
+fn remove_receipt_by_id(receipt_id: String, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        let profile_id = profile_id.ok_or_else(|| "A game profile is required.".to_string())?;
+        return profile_installs::remove_profile_receipt_internal(&profile_id, &receipt_id);
+    }
+
     let receipt = find_receipt_by_id(&receipt_id)?;
     let path = receipt_file_path(&receipt.id)?;
 
@@ -4329,7 +5341,11 @@ fn collect_movie_files(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tauri::command]
-fn validate_movie_replacer_receipts() -> Result<Vec<MovieValidationItem>, String> {
+fn validate_movie_replacer_receipts(profile_id: Option<String>) -> Result<Vec<MovieValidationItem>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok(Vec::new());
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
     let movie_root = payday_movies_path(&paths);
@@ -4385,224 +5401,1749 @@ fn validate_movie_replacer_receipts() -> Result<Vec<MovieValidationItem>, String
 }
 
 
-fn legacy_mod_profiles_dir() -> Result<PathBuf, String> {
-    Ok(app_data_dir()?.join("profiles"))
+const UNASSIGNED_GAME_PROFILE_ID: &str = "migration.unassigned";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileImageReferenceWire { kind: String, value: String, updated_at: String }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileArtworkImportResult { image_reference: ProfileImageReferenceWire, source_path: String, source_exists: bool, managed_path: String, managed_exists: bool }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileArtworkResolveResult { final_src: String, source_path: String, source_exists: bool, managed_root: String, resolver: String, byte_length: usize }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameFolderScanExecutable { file_name: String, path: String, relative_path: String, size_bytes: Option<u64>, score: Option<u32> }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameFolderScanFolder { name: String, path: String, relative_path: String }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameFolderScanResult { game_folder: String, suggested_game_name: String, executables: Vec<GameFolderScanExecutable>, suggested_executable: Option<GameFolderScanExecutable>, folders: Vec<GameFolderScanFolder>, frameworks: Vec<String>, steam_app_ids: Vec<String>, architecture_hints: Vec<String>, visited_entries: Option<usize> }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileRuntimeIssue { level: String, code: String, message: String, section: Option<String> }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveProfileRuntimeWire { profile_id: String, definition_revision: u64, game_id: String, game_name: String, game_root: Option<String>, executable: Option<String>, named_paths: Vec<String>, sources: Vec<String>, source_config: serde_json::Value, mod_types: Vec<String>, install_rules: Vec<String>, toggle_rules: Vec<String>, dependencies: Vec<String>, conflict_rules: Vec<String>, storage_path: String, installed_state_path: String, receipts_path: String, backups_path: String, disabled_state_path: String, browse_cache_path: String, thumbnail_cache_path: String, source_index_path: String, dependency_state_path: String, setup_state_path: String, launch_configuration: serde_json::Value, loaded_receipt_count: usize, loaded_installed_mod_count: usize, ready: bool, error: Option<String> }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileRuntimeOpenResult { profile_id: String, storage_path: String, profile_path: String, draft_path: String, setup_state_path: String, index_path: String, test_workspace_path: String, blocking: Vec<ProfileRuntimeIssue>, warnings: Vec<ProfileRuntimeIssue>, revision: u64, opened_at_unix: u64, preview_setup: bool }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileCreatorRuntimeTestResult { status: String, what_was_tested: String, input_used: Vec<String>, resolved_paths: Vec<String>, actions: Vec<String>, warnings: Vec<String>, errors: Vec<String>, technical_details: Vec<String>, profile_revision: u64, outdated: bool }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceTestConfigResult { status: String, message: String, user_message: Option<String>, technical_details: Option<String>, source_type: Option<String>, reachable: bool, authenticated: bool, mapping_valid: bool, final_url: Option<String>, http_status: Option<u16> }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddedBrowserStatus { open: bool, url: Option<String> }
+
+fn clean_profile_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() { return Err("Game profile id is required.".to_string()); }
+    let mut out = String::new();
+    for ch in trimmed.chars() { if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') { out.push(ch); } else { out.push('_'); } }
+    let clean = out.trim_matches('.').to_string();
+    if clean.is_empty() { Err("Game profile id is invalid.".to_string()) } else { Ok(clean.chars().take(140).collect()) }
 }
 
-fn mod_profiles_dir() -> Result<PathBuf, String> {
-    if let Some(paths) = detect_payday3_paths_internal() {
-        return Ok(paths.pak_mods.join("Tsuki_Profiles"));
+fn profile_data_root_dir() -> Result<PathBuf, String> { Ok(app_data_dir()?.join("profile-data")) }
+fn profile_data_dir_for(profile_id: &str) -> Result<PathBuf, String> { Ok(profile_data_root_dir()?.join(clean_profile_id(profile_id)?)) }
+
+fn ensure_profile_data_dirs(profile_id: &str) -> Result<PathBuf, String> {
+    let root = profile_data_dir_for(profile_id)?;
+    for folder in ["installed-state", "receipts", "backups", "cache", "cache\\browse", "cache\\thumbnails", "source-index", "dependencies", "setup", "disabled-state", "mod-profiles", "browser", "test-workspace"] {
+        fs::create_dir_all(root.join(folder)).map_err(|err| format!("Failed to create profile data folder {}: {}", folder, err))?;
+    }
+    Ok(root)
+}
+
+fn game_profile_drafts_dir() -> Result<PathBuf, String> { let dir = app_data_dir()?.join("game-profile-drafts"); fs::create_dir_all(&dir).map_err(|err| format!("Failed to create game profile drafts folder {}: {}", dir.display(), err))?; Ok(dir) }
+fn game_profile_draft_path(profile_id: &str) -> Result<PathBuf, String> { Ok(game_profile_drafts_dir()?.join(format!("{}.json", clean_profile_id(profile_id)?))) }
+fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> { value.get(key).and_then(|entry| entry.as_bool()) }
+fn draft_profile_id(draft: &serde_json::Value) -> Option<String> { json_string(draft, "profileId") }
+fn draft_overview_string(draft: &serde_json::Value, key: &str) -> Option<String> { draft.get("overview").and_then(|overview| json_string(overview, key)) }
+fn draft_section_items<'a>(draft: &'a serde_json::Value, section: &str) -> Vec<&'a serde_json::Value> { draft.get("sections").and_then(|sections| sections.get(section)).and_then(|items| items.as_array()).map(|items| items.iter().collect()).unwrap_or_default() }
+fn item_title(item: &serde_json::Value) -> Option<String> { json_string(item, "title") }
+fn item_field_value(item: &serde_json::Value, label: &str) -> Option<String> {
+    item.get("fields").and_then(|fields| fields.as_array()).and_then(|fields| {
+        fields.iter().find_map(|field| { let field_label = json_string(field, "label")?; if field_label.eq_ignore_ascii_case(label) { json_string(field, "value") } else { None } })
+    })
+}
+fn item_any_field_value(item: &serde_json::Value, labels: &[&str]) -> Option<String> {
+    labels
+        .iter()
+        .find_map(|label| item_field_value(item, label))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+fn split_source_list_value(value: Option<String>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(|ch| matches!(ch, ',' | '\n' | '\r' | ';' | '|'))
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn source_url_with_protocol(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{}", trimmed)
+    }
+}
+
+fn parse_http_source_url(value: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(&source_url_with_protocol(value)).ok()?;
+    if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+fn source_host_matches(url: &reqwest::Url, suffix: &str) -> bool {
+    let Some(host) = url.host_str().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+    let clean = suffix.to_ascii_lowercase();
+    host == clean || host.ends_with(&format!(".{}", clean))
+}
+
+fn source_url_path_parts(url: &reqwest::Url) -> Vec<String> {
+    url.path_segments()
+        .map(|segments| segments.map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+fn clean_source_slug(value: &str) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .trim_matches(|ch| ch == '/' || ch == '\\')
+        .split(|ch| matches!(ch, '/' | '\\' | '?' | '#'))
+        .find(|part| !part.trim().is_empty())?
+        .trim()
+        .to_ascii_lowercase();
+
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        && !trimmed.contains(' ')
+    {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn source_id_is_numeric(value: &str) -> bool {
+    !value.trim().is_empty() && value.trim().chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn parse_nexus_game_url_fields(value: &str) -> Option<(String, String, bool)> {
+    let url = parse_http_source_url(value)?;
+    if !source_host_matches(&url, "nexusmods.com") {
+        return None;
+    }
+    let parts = source_url_path_parts(&url);
+    let domain_index = if parts.first().map(|part| part.eq_ignore_ascii_case("games")).unwrap_or(false) {
+        1
+    } else {
+        0
+    };
+    let domain = clean_source_slug(parts.get(domain_index)?)?;
+    let is_category_url = parts.len() > domain_index + 1 || url.query().is_some();
+    Some((domain, url.to_string(), is_category_url))
+}
+
+fn parse_modworkshop_game_url_fields(value: &str) -> Option<(Option<String>, Option<String>, String, bool)> {
+    let mut url = parse_http_source_url(value)?;
+    if !source_host_matches(&url, "modworkshop.net") {
+        return None;
     }
 
-    legacy_mod_profiles_dir()
+    let mut parts = source_url_path_parts(&url);
+    let mut slug = None::<String>;
+    let mut numeric_id = None::<String>;
+
+    if let Some(index) = parts
+        .iter()
+        .position(|part| matches!(part.to_ascii_lowercase().as_str(), "g" | "game" | "games"))
+    {
+        if let Some(candidate) = parts.get(index + 1) {
+            if source_id_is_numeric(candidate) {
+                numeric_id = Some(candidate.to_string());
+            } else {
+                slug = clean_source_slug(candidate);
+            }
+        }
+    }
+
+    for (key, value) in url.query_pairs() {
+        if !matches!(key.as_ref(), "game" | "game_id" | "gameId") {
+            continue;
+        }
+        if source_id_is_numeric(&value) {
+            numeric_id.get_or_insert_with(|| value.to_string());
+        } else if slug.is_none() {
+            slug = clean_source_slug(&value);
+        }
+    }
+
+    if let Some(value) = slug.as_deref() {
+        let canonical = normalize_modworkshop_game_route(value).ok()?;
+        if let Some(index) = parts
+            .iter()
+            .position(|part| matches!(part.to_ascii_lowercase().as_str(), "g" | "game" | "games"))
+        {
+            if let Some(route) = parts.get_mut(index + 1) {
+                *route = canonical.clone();
+                url.set_path(&format!("/{}", parts.join("/")));
+            }
+        }
+        slug = Some(canonical);
+    }
+
+    if slug.is_none() && numeric_id.is_none() {
+        return None;
+    }
+
+    let is_category_url = parts.iter().any(|part| part.to_ascii_lowercase().starts_with("categor"))
+        || url.query_pairs().any(|(key, _)| matches!(key.as_ref(), "category" | "category_id" | "tags" | "tag"));
+
+    Some((slug, numeric_id, url.to_string(), is_category_url))
 }
 
-fn profile_file_name(name: &str) -> String {
-    let clean = sanitize_file_component(name);
-
-    if clean.is_empty() {
-        format!("Profile_{}.json", current_timestamp())
+fn github_repository_component(value: &str) -> Option<String> {
+    let clean = value.trim().trim_end_matches(".git");
+    if !clean.is_empty()
+        && clean.len() <= 100
+        && clean.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        Some(clean.to_string())
     } else {
-        format!("{}.json", clean)
+        None
+    }
+}
+
+fn parse_github_repository_url(value: &str) -> Option<(String, String)> {
+    let url = parse_http_source_url(value)?;
+    if !source_host_matches(&url, "github.com") {
+        return None;
+    }
+    let parts = source_url_path_parts(&url);
+    Some((
+        github_repository_component(parts.first()?)?,
+        github_repository_component(parts.get(1)?)?,
+    ))
+}
+
+fn source_type_from_item(item: &serde_json::Value) -> String { item_field_value(item, "Source Type").or_else(|| item_title(item)).unwrap_or_else(|| "custom_browser".to_string()).trim().to_ascii_lowercase().replace(' ', "_") }
+
+fn is_game_profile_draft_value(value: &serde_json::Value) -> bool { value.get("overview").map(|entry| entry.is_object()).unwrap_or(false) && value.get("sections").map(|entry| entry.is_object()).unwrap_or(false) }
+fn stamp_game_profile_draft(mut draft: serde_json::Value, profile_id: &str, path: &Path) -> serde_json::Value {
+    if !draft.is_object() { draft = serde_json::json!({}); }
+    let now = current_timestamp();
+    let object = draft.as_object_mut().expect("draft object");
+    object.insert("schemaVersion".to_string(), object.get("schemaVersion").cloned().unwrap_or_else(|| serde_json::Value::from(3)));
+    object.insert("profileId".to_string(), serde_json::Value::String(profile_id.to_string()));
+    object.entry("profileType".to_string()).or_insert_with(|| serde_json::Value::String("user_created".to_string()));
+    object.entry("status".to_string()).or_insert_with(|| serde_json::Value::String("draft".to_string()));
+    object.entry("lifecycleState".to_string()).or_insert_with(|| serde_json::Value::String("draft".to_string()));
+    object.entry("setupStatus".to_string()).or_insert_with(|| serde_json::Value::String("incomplete".to_string()));
+    object.entry("createdAt".to_string()).or_insert_with(|| serde_json::Value::String(now.clone()));
+    object.entry("updatedAt".to_string()).or_insert_with(|| serde_json::Value::String(now));
+    object.entry("sourceConfigMigrationVersion".to_string()).or_insert_with(|| serde_json::Value::from(2));
+    object.entry("sourceConfigMigrationState".to_string()).or_insert_with(|| serde_json::Value::String("identity-fields-split".to_string()));
+    object.insert("draftStoragePath".to_string(), serde_json::Value::String(path.display().to_string()));
+    draft
+}
+fn read_json_file(path: &Path) -> Option<serde_json::Value> { serde_json::from_str(&fs::read_to_string(path).ok()?).ok() }
+fn write_json_file(path: &Path, value: &serde_json::Value, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create {} folder {}: {}", label, parent.display(), err))?;
+    }
+
+    let contents = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("Failed to serialize {}: {}", label, err))?;
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|value| value.to_str()).unwrap_or("json")
+    ));
+    let backup_path = path.with_extension(format!(
+        "{}.bak",
+        path.extension().and_then(|value| value.to_str()).unwrap_or("json")
+    ));
+
+    fs::write(&tmp_path, contents)
+        .map_err(|err| format!("Failed to write temporary {} {}: {}", label, tmp_path.display(), err))?;
+
+    if path.exists() {
+        fs::copy(path, &backup_path)
+            .map_err(|err| format!("Failed to back up existing {} {}: {}", label, path.display(), err))?;
+        eprintln!("Replacing {} {} after backup {}", label, path.display(), backup_path.display());
+    } else {
+        eprintln!("Writing new {} {}", label, path.display());
+    }
+
+    match fs::rename(&tmp_path, path) {
+        Ok(_) => Ok(()),
+        Err(rename_error) => {
+            fs::copy(&tmp_path, path)
+                .map_err(|copy_error| format!(
+                    "Failed to replace {} {}: rename failed: {}; copy failed: {}",
+                    label,
+                    path.display(),
+                    rename_error,
+                    copy_error,
+                ))?;
+            let _ = fs::remove_file(&tmp_path);
+            Ok(())
+        }
+    }
+}
+fn read_game_profile_draft(profile_id: &str) -> Result<serde_json::Value, String> { let clean = clean_profile_id(profile_id)?; let path = game_profile_draft_path(&clean)?; let value = read_json_file(&path).ok_or_else(|| format!("Game profile draft was not found: {}", profile_id))?; Ok(stamp_game_profile_draft(value, &clean, &path)) }
+fn save_game_profile_draft_value(profile_id: &str, draft: serde_json::Value) -> Result<serde_json::Value, String> { let clean = clean_profile_id(profile_id)?; let path = game_profile_draft_path(&clean)?; let stamped = stamp_game_profile_draft(draft, &clean, &path); write_json_file(&path, &stamped, "game profile draft")?; Ok(stamped) }
+fn legacy_game_profile_draft_dirs() -> Result<Vec<PathBuf>, String> { let root = app_data_dir()?; Ok(vec![root.join("profile-drafts"), root.join("game-profiles").join("drafts"), root.join("profiles")]) }
+fn migrate_game_profile_drafts() -> Result<(usize, usize), String> {
+    let target_dir = game_profile_drafts_dir()?;
+    let mut migrated = 0usize;
+    let mut malformed = 0usize;
+    for folder in legacy_game_profile_draft_dirs()? {
+        if !folder.exists() || folder == target_dir { continue; }
+        let Ok(entries) = fs::read_dir(&folder) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+            let Some(value) = read_json_file(&path) else {
+                malformed += 1;
+                eprintln!("Malformed legacy game profile draft was left in place: {}", path.display());
+                continue;
+            };
+            if !is_game_profile_draft_value(&value) {
+                malformed += 1;
+                eprintln!("Legacy game profile draft missing overview/sections was left in place: {}", path.display());
+                continue;
+            }
+            let Some(profile_id) = draft_profile_id(&value) else {
+                malformed += 1;
+                eprintln!("Legacy game profile draft missing profileId was left in place: {}", path.display());
+                continue;
+            };
+            let Ok(target_path) = game_profile_draft_path(&profile_id) else {
+                malformed += 1;
+                eprintln!("Legacy game profile draft had an invalid profileId and was left in place: {}", path.display());
+                continue;
+            };
+            if target_path.exists() { continue; }
+            let stamped = stamp_game_profile_draft(value, &profile_id, &target_path);
+            match write_json_file(&target_path, &stamped, "migrated game profile draft") {
+                Ok(_) => migrated += 1,
+                Err(error) => eprintln!("Failed to migrate game profile draft {}: {}", path.display(), error),
+            }
+        }
+    }
+    Ok((migrated, malformed))
+}
+
+#[tauri::command]
+fn list_game_profile_drafts() -> Result<Vec<serde_json::Value>, String> {
+    let (migrated, mut malformed) = migrate_game_profile_drafts()?;
+    let folder = game_profile_drafts_dir()?;
+    let mut drafts = Vec::new();
+    let mut found = 0usize;
+    for entry in fs::read_dir(&folder).map_err(|err| format!("Failed to read game profile drafts folder: {}", err))? {
+        let entry = entry.map_err(|err| format!("Failed to read game profile draft entry: {}", err))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+        found += 1;
+        let Some(value) = read_json_file(&path) else {
+            malformed += 1;
+            eprintln!("Malformed game profile draft was left in place: {}", path.display());
+            continue;
+        };
+        if !is_game_profile_draft_value(&value) {
+            malformed += 1;
+            eprintln!("Game profile draft missing overview/sections was left in place: {}", path.display());
+            continue;
+        }
+        let Some(profile_id) = draft_profile_id(&value) else {
+            malformed += 1;
+            eprintln!("Game profile draft missing profileId was left in place: {}", path.display());
+            continue;
+        };
+        if profile_id == BUILTIN_PAYDAY3_PROFILE_ID { continue; }
+        drafts.push(stamp_game_profile_draft(value, &profile_id, &path));
+    }
+    drafts.sort_by(|a, b| json_string(b, "updatedAt").cmp(&json_string(a, "updatedAt")));
+    let _ = write_runtime_process_diagnostic(&RuntimeProcessDiagnostic {
+        time_unix: now_unix_seconds(),
+        label: "Game Profile Drafts".to_string(),
+        status: if malformed == 0 { "success".to_string() } else { "warning".to_string() },
+        reason: format!("Loaded {} displayed game profile draft(s) from AppData.", drafts.len()),
+        details: vec![
+            format!("Drafts found: {}", found),
+            "Storage source: AppData/game-profile-drafts plus migrated legacy draft folders".to_string(),
+            format!("Drafts migrated: {}", migrated),
+            format!("Drafts malformed: {}", malformed),
+            format!("Drafts displayed: {}", drafts.len()),
+        ],
+    });
+    Ok(drafts)
+}
+#[tauri::command]
+fn create_game_profile_draft(draft: serde_json::Value) -> Result<serde_json::Value, String> { let profile_id = draft_profile_id(&draft).unwrap_or_else(|| format!("user.{}", current_timestamp())); let clean = clean_profile_id(&profile_id)?; let path = game_profile_draft_path(&clean)?; if let Some(existing) = read_json_file(&path) { return Ok(stamp_game_profile_draft(existing, &clean, &path)); } save_game_profile_draft_value(&clean, draft) }
+
+#[tauri::command]
+fn save_game_profile_draft(profile_id: String, draft: serde_json::Value) -> Result<serde_json::Value, String> { save_game_profile_draft_value(&profile_id, draft) }
+
+#[tauri::command]
+fn delete_game_profile_draft(profile_id: String) -> Result<String, String> {
+    let clean = clean_profile_id(&profile_id)?;
+    if clean == BUILTIN_PAYDAY3_PROFILE_ID {
+        return Err("The built-in PAYDAY 3 profile cannot be deleted.".to_string());
+    }
+    let path = game_profile_draft_path(&clean)?;
+    if !path.exists() {
+        eprintln!("Game profile draft delete skipped; no draft existed for {} at {}", clean, path.display());
+        return Ok(format!("No draft existed for {}.", clean));
+    }
+    fs::remove_file(&path)
+        .map_err(|err| format!("Failed to delete game profile draft {}: {}", path.display(), err))?;
+    eprintln!("Deleted game profile draft {} at {}", clean, path.display());
+    Ok(format!("Deleted draft {}.", clean))
+}
+
+#[tauri::command]
+fn duplicate_game_profile_draft(profile_id: String) -> Result<serde_json::Value, String> { let source = read_game_profile_draft(&profile_id)?; let duplicate_id = format!("user.{}", current_timestamp()); let mut duplicate = source.clone(); if !duplicate.is_object() { duplicate = serde_json::json!({}); } if let Some(object) = duplicate.as_object_mut() { object.insert("profileId".to_string(), serde_json::Value::String(duplicate_id.clone())); object.insert("status".to_string(), serde_json::Value::String("draft".to_string())); object.insert("lifecycleState".to_string(), serde_json::Value::String("draft".to_string())); if let Some(overview) = object.get_mut("overview").and_then(|value| value.as_object_mut()) { if let Some(title) = overview.get("profileTitle").and_then(|value| value.as_str()).map(|value| value.to_string()) { overview.insert("profileTitle".to_string(), serde_json::Value::String(format!("{} Copy", title))); } } } save_game_profile_draft_value(&duplicate_id, duplicate) }
+
+#[tauri::command]
+fn export_game_profile_draft_to_path(profile_id: String, export_path: String) -> Result<String, String> { let draft = read_game_profile_draft(&profile_id)?; let path = PathBuf::from(export_path.trim()); if path.as_os_str().is_empty() { return Err("Export path is required.".to_string()); } write_json_file(&path, &draft, "exported game profile")?; Ok(format!("Exported game profile draft to {}", path.display())) }
+
+fn insert_config_string(config: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: Option<String>) {
+    if let Some(clean) = clean_optional_string(value) {
+        config.entry(key.to_string()).or_insert(serde_json::Value::String(clean));
+    }
+}
+
+fn insert_config_array(config: &mut serde_json::Map<String, serde_json::Value>, key: &str, values: Vec<String>) {
+    if !values.is_empty() {
+        config.entry(key.to_string()).or_insert(serde_json::json!(values));
+    }
+}
+
+fn builtin_payday3_source_config() -> serde_json::Value {
+    serde_json::json!({
+        "modworkshopDisplayName": "ModWorkshop",
+        "modworkshopGameName": "PAYDAY 3",
+        "modworkshopGameId": "853",
+        "modworkshopSlug": "payday-3",
+        "modworkshopGamePageUrl": "https://modworkshop.net/g/payday-3/mods",
+        "modworkshopEmbeddedStartUrl": "https://modworkshop.net/g/payday-3/mods",
+        "modworkshopAllowedDomains": ["modworkshop.net", "www.modworkshop.net", "storage.modworkshop.net", "api.modworkshop.net"],
+        "modworkshopBrowseMode": "Built-in/API",
+        "nexusDisplayName": "Nexus Mods",
+        "nexusGameName": "PAYDAY 3",
+        "nexusDomain": "payday3",
+        "nexusGameId": "5717",
+        "nexusGamePageUrl": "https://www.nexusmods.com/payday3",
+        "nexusEmbeddedStartUrl": "https://www.nexusmods.com/payday3/mods",
+        "nexusAllowedDomains": ["nexusmods.com", "www.nexusmods.com", "staticdelivery.nexusmods.com", "users.nexusmods.com"],
+        "nexusBrowseMode": "Built-in/API",
+    })
+}
+
+fn builtin_nexus_source_pair(
+    id_prefix: &str,
+    game_name: &str,
+    domain: &str,
+    numeric_game_id: &str,
+    label_suffix: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let suffix = label_suffix.map(|value| format!(" - {}", value)).unwrap_or_default();
+    let game_page_url = format!("https://www.nexusmods.com/{}", domain);
+    let start_url = format!("{}/mods", game_page_url);
+    let allowed_domains = serde_json::json!([
+        "nexusmods.com",
+        "www.nexusmods.com",
+        "staticdelivery.nexusmods.com",
+        "users.nexusmods.com"
+    ]);
+    vec![
+        serde_json::json!({
+            "id": format!("{}-nexus-api", id_prefix),
+            "displayName": format!("Nexus Mods{}", suffix),
+            "provider": "nexus",
+            "enabled": true,
+            "browseMode": "api",
+            "apiEnabled": true,
+            "apiKeySource": "Global Settings",
+            "gameName": game_name,
+            "providerSlug": domain,
+            "providerGameId": numeric_game_id,
+            "gamePageUrl": game_page_url,
+            "listingUrl": start_url,
+            "startUrl": start_url,
+            "allowedDomains": allowed_domains,
+            "captureDownloads": true,
+        }),
+        serde_json::json!({
+            "id": format!("{}-nexus-browser", id_prefix),
+            "displayName": format!("Nexus Browser{}", suffix),
+            "provider": "nexus",
+            "enabled": true,
+            "browseMode": "webview_window",
+            "apiEnabled": false,
+            "apiKeySource": serde_json::Value::Null,
+            "gameName": game_name,
+            "providerSlug": domain,
+            "providerGameId": numeric_game_id,
+            "gamePageUrl": game_page_url,
+            "listingUrl": start_url,
+            "startUrl": start_url,
+            "allowedDomains": allowed_domains,
+            "captureDownloads": true,
+        }),
+    ]
+}
+
+fn builtin_modworkshop_source_pair(
+    id_prefix: &str,
+    game_name: &str,
+    slug: &str,
+    numeric_game_id: &str,
+) -> Vec<serde_json::Value> {
+    let game_page_url = format!("https://modworkshop.net/g/{}/mods", slug);
+    let allowed_domains = serde_json::json!([
+        "modworkshop.net",
+        "www.modworkshop.net",
+        "storage.modworkshop.net",
+        "api.modworkshop.net"
+    ]);
+    vec![
+        serde_json::json!({
+            "id": format!("{}-modworkshop-api", id_prefix),
+            "displayName": "ModWorkshop",
+            "provider": "modworkshop",
+            "enabled": true,
+            "browseMode": "api",
+            "apiEnabled": true,
+            "apiKeySource": serde_json::Value::Null,
+            "gameName": game_name,
+            "providerSlug": slug,
+            "providerGameId": numeric_game_id,
+            "gamePageUrl": game_page_url,
+            "listingUrl": game_page_url,
+            "startUrl": game_page_url,
+            "allowedDomains": allowed_domains,
+            "captureDownloads": true,
+        }),
+        serde_json::json!({
+            "id": format!("{}-modworkshop-browser", id_prefix),
+            "displayName": "ModWorkshop Browser",
+            "provider": "modworkshop",
+            "enabled": true,
+            "browseMode": "webview_window",
+            "apiEnabled": false,
+            "apiKeySource": serde_json::Value::Null,
+            "gameName": game_name,
+            "providerSlug": slug,
+            "providerGameId": numeric_game_id,
+            "gamePageUrl": game_page_url,
+            "listingUrl": game_page_url,
+            "startUrl": game_page_url,
+            "allowedDomains": allowed_domains,
+            "captureDownloads": true,
+        }),
+    ]
+}
+
+fn builtin_nexus_profile_source_config(
+    id_prefix: &str,
+    game_name: &str,
+    domain: &str,
+    numeric_game_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "sources": builtin_nexus_source_pair(id_prefix, game_name, domain, numeric_game_id, None)
+    })
+}
+
+fn builtin_payday_profile_source_config(
+    id_prefix: &str,
+    game_name: &str,
+    modworkshop_slug: &str,
+    modworkshop_game_id: &str,
+    nexus_domain: &str,
+    nexus_game_id: &str,
+) -> serde_json::Value {
+    let mut sources = builtin_modworkshop_source_pair(id_prefix, game_name, modworkshop_slug, modworkshop_game_id);
+    sources.extend(builtin_nexus_source_pair(id_prefix, game_name, nexus_domain, nexus_game_id, None));
+    serde_json::json!({ "sources": sources })
+}
+
+fn builtin_profile_source_config(profile_id: &str) -> Option<serde_json::Value> {
+    match profile_id {
+        "builtin.cyberpunk2077" => Some(builtin_nexus_profile_source_config("cyberpunk2077", "Cyberpunk 2077", "cyberpunk2077", "3333")),
+        "builtin.outlast-trials" => Some(builtin_nexus_profile_source_config("outlast-trials", "The Outlast Trials", "theoutlasttrials", "5376")),
+        "builtin.payday-the-heist" => Some(builtin_payday_profile_source_config("payday-the-heist", "PAYDAY: The Heist", "pdth", "2", "paydaytheheist", "4339")),
+        "builtin.payday2" => Some(builtin_payday_profile_source_config("payday2", "PAYDAY 2", "payday-2", "1", "payday2", "648")),
+        BUILTIN_PAYDAY3_PROFILE_ID => {
+            let mut config = builtin_payday3_source_config();
+            let sources = builtin_payday_profile_source_config("payday3", "PAYDAY 3", "payday-3", "853", "payday3", "5717")
+                .get("sources")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            config.as_object_mut().expect("PAYDAY 3 source config").insert("sources".to_string(), sources);
+            Some(config)
+        }
+        "builtin.resident-evil-7" => Some(builtin_nexus_profile_source_config("resident-evil-7", "Resident Evil 7 biohazard", "residentevil7", "3111")),
+        "builtin.resident-evil-village" => Some(builtin_nexus_profile_source_config("resident-evil-village", "Resident Evil Village", "residentevilvillage", "3669")),
+        "builtin.resident-evil-requiem" => Some(builtin_nexus_profile_source_config("resident-evil-requiem", "Resident Evil Requiem", "residentevilrequiem", "8863")),
+        "builtin.borderlands" => {
+            let mut sources = builtin_nexus_source_pair(
+                "borderlands",
+                "Borderlands Game of the Year",
+                "borderlands",
+                "360",
+                Some("Classic"),
+            );
+            sources.extend(builtin_nexus_source_pair(
+                "borderlands-enhanced",
+                "Borderlands Game of the Year Enhanced",
+                "borderlandsgotyenhanced",
+                "2776",
+                Some("Enhanced"),
+            ));
+            Some(serde_json::json!({ "sources": sources }))
+        }
+        "builtin.borderlands2" => Some(serde_json::json!({
+            "sources": builtin_nexus_source_pair(
+                "borderlands2",
+                "Borderlands 2",
+                "borderlands2",
+                "428",
+                None,
+            )
+        })),
+        "builtin.borderlands3" => Some(builtin_nexus_profile_source_config("borderlands3", "Borderlands 3", "borderlands3", "2953")),
+        "builtin.borderlands4" => Some(builtin_nexus_profile_source_config("borderlands4", "Borderlands 4", "borderlands4", "8148")),
+        "builtin.tiny-tinas-wonderlands" => Some(builtin_nexus_profile_source_config("tiny-tinas-wonderlands", "Tiny Tina's Wonderlands", "tinytinaswonderlands", "4394")),
+        "builtin.spider-man-remastered" => Some(builtin_nexus_profile_source_config("spider-man-remastered", "Marvel's Spider-Man Remastered", "marvelsspidermanremastered", "4536")),
+        "builtin.spider-man-2" => Some(builtin_nexus_profile_source_config("spider-man-2", "Marvel's Spider-Man 2", "marvelsspiderman2", "6082")),
+        "builtin.monster-hunter-wilds" => Some(builtin_nexus_profile_source_config("monster-hunter-wilds", "Monster Hunter Wilds", "monsterhunterwilds", "6993")),
+        _ => None,
+    }
+}
+
+fn source_config_from_draft(draft: &serde_json::Value) -> serde_json::Value {
+    let mut config = serde_json::Map::new();
+    let mut custom_sources = Vec::new();
+    let mut configured_sources = Vec::new();
+    let mut recovered_nexus_browser = None;
+    let draft_sources = draft_section_items(draft, "sources");
+    let has_dedicated_nexus_browser = draft_sources.iter().any(|item| {
+        let source_type = source_type_from_item(item);
+        let mode = item_any_field_value(item, &["Browse Mode"]).unwrap_or_default().to_ascii_lowercase();
+        let start_url = item_any_field_value(item, &["Embedded Start URL", "Starting Page URL", "Start URL", "Base URL"]);
+        (matches!(source_type.as_str(), "nexus" | "nexus_mods")
+            && (mode.contains("embedded") || mode.contains("browser") || mode.contains("webview") || mode.contains("external")))
+            || (matches!(source_type.as_str(), "embedded" | "custom_browser")
+                && start_url.as_deref().and_then(parse_http_source_url).map(|url| source_host_matches(&url, "nexusmods.com")).unwrap_or(false))
+    });
+
+    for item in draft_sources {
+        if json_bool(item, "enabled") == Some(false) {
+            continue;
+        }
+
+        match source_type_from_item(item).as_str() {
+            "nexus" | "nexus_mods" => {
+                let source_id = item_any_field_value(item, &["Source Instance ID"])
+                    .or_else(|| json_string(item, "id"))
+                    .unwrap_or_else(|| format!("source-nexus-{}", configured_sources.len() + 1));
+                let display_name = item_any_field_value(item, &["Display Name"]).or_else(|| item_title(item));
+                let game_name = item_any_field_value(item, &["Human Game Name", "Selected Nexus Game", "Selected Game", "Game Name", "Search Nexus Games"]);
+                let browse_mode = item_any_field_value(item, &["Browse Mode"]);
+                let allowed_domains = split_source_list_value(item_any_field_value(item, &["Allowed Domains", "Allowed Domain"]));
+
+                insert_config_string(&mut config, "nexusDisplayName", display_name.clone());
+                insert_config_string(&mut config, "nexusGameName", game_name.clone());
+                insert_config_string(&mut config, "nexusBrowseMode", browse_mode.clone());
+                insert_config_string(&mut config, "nexusApiBaseUrl", item_any_field_value(item, &["Nexus API Base URL", "API Base URL"]));
+                insert_config_array(&mut config, "nexusAllowedDomains", allowed_domains.clone());
+
+                let mut domain = item_any_field_value(item, &["Nexus Domain", "Domain"])
+                    .and_then(|value| clean_source_slug(&value))
+                    .filter(|value| value != "games");
+                let game_id = item_any_field_value(item, &["Nexus Game ID", "Numeric Nexus Game ID", "Game ID"])
+                    .filter(|value| source_id_is_numeric(value));
+                let mut game_page_url = item_any_field_value(item, &["Nexus Game Page URL", "Game Page URL", "Page URL"]);
+                let mut category_url = item_any_field_value(item, &["Nexus Category URL", "Category URL", "Mods URL"]);
+                let mut start_url = item_any_field_value(item, &["Embedded Start URL", "Start URL", "Starting Page URL"]);
+
+                for candidate in [
+                    item_any_field_value(item, &["Nexus Domain", "Domain"]),
+                    item_any_field_value(item, &["Nexus Game ID", "Game ID"]),
+                    game_page_url.clone(),
+                    category_url.clone(),
+                    start_url.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some((parsed_domain, parsed_url, is_category_url)) = parse_nexus_game_url_fields(&candidate) {
+                        domain.get_or_insert(parsed_domain);
+                        if is_category_url {
+                            category_url.get_or_insert(parsed_url.clone());
+                        } else {
+                            game_page_url.get_or_insert(parsed_url.clone());
+                        }
+                        start_url.get_or_insert(parsed_url);
+                    } else if domain.is_none() && !source_id_is_numeric(&candidate) {
+                        domain = clean_source_slug(&candidate).filter(|value| value != "games");
+                    }
+                }
+
+                if let Some(domain_value) = domain.clone() {
+                    game_page_url.get_or_insert_with(|| format!("https://www.nexusmods.com/{}", domain_value));
+                    start_url.get_or_insert_with(|| category_url.clone().unwrap_or_else(|| format!("https://www.nexusmods.com/{}/mods", domain_value)));
+                }
+                configured_sources.push(serde_json::json!({
+                    "id": source_id.clone(),
+                    "displayName": display_name.unwrap_or_else(|| "Nexus Mods".to_string()),
+                    "provider": "nexus",
+                    "enabled": true,
+                    "browseMode": browse_mode.clone().unwrap_or_else(|| "Built-in/API".to_string()),
+                    "apiEnabled": item_any_field_value(item, &["API Enabled State"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                    "apiKeySource": item_any_field_value(item, &["API Key Source"]).unwrap_or_else(|| "Global Settings".to_string()),
+                    "gameName": game_name,
+                    "providerSlug": domain,
+                    "providerGameId": game_id,
+                    "gamePageUrl": game_page_url,
+                    "listingUrl": category_url,
+                    "startUrl": start_url,
+                    "allowedDomains": allowed_domains,
+                    "captureDownloads": item_any_field_value(item, &["Capture Downloads"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                }));
+                let saved = configured_sources.last().expect("configured Nexus source");
+                insert_config_string(&mut config, "nexusDomain", json_string(saved, "providerSlug"));
+                insert_config_string(&mut config, "nexusGameId", json_string(saved, "providerGameId"));
+                insert_config_string(&mut config, "nexusGamePageUrl", json_string(saved, "gamePageUrl"));
+                insert_config_string(&mut config, "nexusCategoryUrl", json_string(saved, "listingUrl"));
+                insert_config_string(&mut config, "nexusEmbeddedStartUrl", json_string(saved, "startUrl"));
+                if !has_dedicated_nexus_browser
+                    && browse_mode.as_deref().map(|mode| mode.to_ascii_lowercase()).map(|mode| !mode.contains("embedded") && !mode.contains("browser") && !mode.contains("webview") && !mode.contains("external")).unwrap_or(true)
+                {
+                    if let Some(browser_url) = item_any_field_value(item, &["Embedded Start URL"]).filter(|value| parse_nexus_game_url_fields(value).is_some()) {
+                        recovered_nexus_browser = Some(serde_json::json!({
+                            "id": format!("{}.browser", source_id),
+                            "displayName": "Nexus Browser",
+                            "provider": "nexus",
+                            "enabled": true,
+                            "browseMode": "webview_window",
+                            "apiEnabled": false,
+                            "apiKeySource": serde_json::Value::Null,
+                            "gameName": game_name,
+                            "providerSlug": domain,
+                            "providerGameId": game_id,
+                            "gamePageUrl": game_page_url,
+                            "listingUrl": category_url,
+                            "startUrl": browser_url,
+                            "allowedDomains": allowed_domains,
+                            "captureDownloads": item_any_field_value(item, &["Capture Downloads"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                        }));
+                    }
+                }
+            }
+            "modworkshop" => {
+                let source_id = item_any_field_value(item, &["Source Instance ID"])
+                    .or_else(|| json_string(item, "id"))
+                    .unwrap_or_else(|| format!("source-modworkshop-{}", configured_sources.len() + 1));
+                let display_name = item_any_field_value(item, &["Display Name"]).or_else(|| item_title(item));
+                let game_name = item_any_field_value(item, &["Human Game Name", "Selected ModWorkshop Game", "Selected Game", "Game Name", "Search ModWorkshop Games"]);
+                let browse_mode = item_any_field_value(item, &["Browse Mode"]);
+                let allowed_domains = split_source_list_value(item_any_field_value(item, &["Allowed Domains", "Allowed Domain"]));
+
+                insert_config_string(&mut config, "modworkshopDisplayName", display_name.clone());
+                insert_config_string(&mut config, "modworkshopGameName", game_name.clone());
+                insert_config_string(&mut config, "modworkshopBrowseMode", browse_mode.clone());
+                insert_config_array(&mut config, "modworkshopAllowedDomains", allowed_domains.clone());
+
+                let mut slug = item_any_field_value(item, &["ModWorkshop Slug", "Slug", "Game Slug"])
+                    .and_then(|value| clean_source_slug(&value))
+                    .and_then(|value| normalize_modworkshop_game_route(&value).ok());
+                let mut game_id = item_any_field_value(item, &["ModWorkshop Game ID", "Numeric ModWorkshop Game ID", "Game ID"]);
+                if let Some(raw_id) = game_id.clone() {
+                    if source_id_is_numeric(&raw_id) {
+                        game_id = Some(raw_id.trim().to_string());
+                    } else {
+                        if slug.is_none() {
+                            slug = clean_source_slug(&raw_id).and_then(|value| normalize_modworkshop_game_route(&value).ok());
+                        }
+                        game_id = None;
+                    }
+                }
+
+                let mut game_page_url = item_any_field_value(item, &["ModWorkshop Game Page URL", "Game Page URL", "Page URL"]);
+                let mut category_url = item_any_field_value(item, &["ModWorkshop Category URL", "Category URL", "Mods URL"]);
+                let mut start_url = item_any_field_value(item, &["Embedded Start URL", "Start URL", "Starting Page URL"]);
+
+                for candidate in [
+                    game_page_url.clone(),
+                    category_url.clone(),
+                    start_url.clone(),
+                    item_any_field_value(item, &["ModWorkshop Slug", "Slug", "Game Slug"]),
+                    item_any_field_value(item, &["ModWorkshop Game ID", "Game ID"]),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some((parsed_slug, parsed_game_id, parsed_url, is_category_url)) = parse_modworkshop_game_url_fields(&candidate) {
+                        if let Some(value) = parsed_slug {
+                            slug.get_or_insert(normalize_modworkshop_game_route(&value).unwrap_or(value));
+                        }
+                        if let Some(value) = parsed_game_id {
+                            game_id.get_or_insert(value);
+                        }
+                        if is_category_url {
+                            category_url.get_or_insert(parsed_url.clone());
+                        } else {
+                            game_page_url.get_or_insert(parsed_url.clone());
+                        }
+                        start_url.get_or_insert(parsed_url);
+                    }
+                }
+
+                game_page_url = game_page_url.and_then(|value| parse_modworkshop_game_url_fields(&value).map(|parsed| parsed.2));
+                category_url = category_url.and_then(|value| parse_modworkshop_game_url_fields(&value).map(|parsed| parsed.2));
+                start_url = start_url.and_then(|value| parse_modworkshop_game_url_fields(&value).map(|parsed| parsed.2));
+
+                if let Some(slug_value) = slug.clone() {
+                    game_page_url.get_or_insert_with(|| format!("https://modworkshop.net/g/{}/mods", slug_value));
+                    start_url.get_or_insert_with(|| category_url.clone().unwrap_or_else(|| format!("https://modworkshop.net/g/{}/mods", slug_value)));
+                }
+                configured_sources.push(serde_json::json!({
+                    "id": source_id,
+                    "displayName": display_name.unwrap_or_else(|| "ModWorkshop".to_string()),
+                    "provider": "modworkshop",
+                    "enabled": true,
+                    "browseMode": browse_mode.unwrap_or_else(|| "Built-in/API".to_string()),
+                    "apiEnabled": item_any_field_value(item, &["API Enabled State"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                    "apiKeySource": item_any_field_value(item, &["API Key Source"]).unwrap_or_else(|| "Global Settings".to_string()),
+                    "gameName": game_name,
+                    "providerSlug": slug,
+                    "providerGameId": game_id,
+                    "gamePageUrl": game_page_url,
+                    "listingUrl": category_url,
+                    "startUrl": start_url,
+                    "allowedDomains": allowed_domains,
+                    "captureDownloads": item_any_field_value(item, &["Capture Downloads"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                }));
+                let saved = configured_sources.last().expect("configured ModWorkshop source");
+                insert_config_string(&mut config, "modworkshopSlug", json_string(saved, "providerSlug"));
+                insert_config_string(&mut config, "modworkshopGameId", json_string(saved, "providerGameId"));
+                insert_config_string(&mut config, "modworkshopGamePageUrl", json_string(saved, "gamePageUrl"));
+                insert_config_string(&mut config, "modworkshopCategoryUrl", json_string(saved, "listingUrl"));
+                insert_config_string(&mut config, "modworkshopEmbeddedStartUrl", json_string(saved, "startUrl"));
+            }
+            "github" => {
+                let source_id = item_any_field_value(item, &["Source Instance ID"])
+                    .or_else(|| json_string(item, "id"))
+                    .unwrap_or_else(|| format!("source-github-{}", configured_sources.len() + 1));
+                let display_name = item_any_field_value(item, &["Display Name"])
+                    .or_else(|| item_title(item))
+                    .unwrap_or_else(|| "GitHub Releases".to_string());
+                let repository_url = item_any_field_value(item, &["Repository URL", "GitHub URL", "Page URL"]);
+                let parsed = repository_url.as_deref().and_then(parse_github_repository_url);
+                let owner = item_any_field_value(item, &["Repository Owner", "GitHub Owner"])
+                    .and_then(|value| github_repository_component(&value))
+                    .or_else(|| parsed.as_ref().map(|value| value.0.clone()));
+                let repository = item_any_field_value(item, &["Repository Name", "GitHub Repository"])
+                    .and_then(|value| github_repository_component(&value))
+                    .or_else(|| parsed.as_ref().map(|value| value.1.clone()));
+                let browse_mode = item_any_field_value(item, &["Browse Mode"]).unwrap_or_else(|| "Built-in/API".to_string());
+                let allowed_domains = split_source_list_value(item_any_field_value(item, &["Allowed Domains", "Allowed Domain"]));
+                let canonical_url = owner.as_ref().zip(repository.as_ref()).map(|(owner, repository)| format!("https://github.com/{}/{}", owner, repository));
+                let start_url = item_any_field_value(item, &["Embedded Start URL", "Start URL", "Starting Page URL"])
+                    .or_else(|| canonical_url.clone());
+
+                configured_sources.push(serde_json::json!({
+                    "id": source_id,
+                    "displayName": display_name,
+                    "provider": "github",
+                    "enabled": true,
+                    "browseMode": browse_mode,
+                    "apiEnabled": true,
+                    "apiKeySource": serde_json::Value::Null,
+                    "gameName": item_any_field_value(item, &["Human Game Name", "Game Name"]),
+                    "providerSlug": owner,
+                    "providerGameId": repository,
+                    "gamePageUrl": canonical_url,
+                    "listingUrl": serde_json::Value::Null,
+                    "startUrl": start_url,
+                    "allowedDomains": if allowed_domains.is_empty() { vec!["github.com".to_string(), "api.github.com".to_string(), "objects.githubusercontent.com".to_string()] } else { allowed_domains },
+                    "captureDownloads": item_any_field_value(item, &["Capture Downloads"]).map(|value| !matches!(value.to_ascii_lowercase().as_str(), "disabled" | "no" | "off")).unwrap_or(true),
+                }));
+            }
+            "embedded" | "custom_browser" => {
+                config.insert("customBrowser".to_string(), serde_json::Value::Bool(true));
+                let display_name = item_any_field_value(item, &["Display Name"])
+                    .or_else(|| item_title(item))
+                    .unwrap_or_else(|| "Custom Browser".to_string());
+                let mut start_url = item_any_field_value(item, &["Starting Page URL", "Start URL", "Base URL"]);
+                let allowed_domains = split_source_list_value(item_any_field_value(item, &["Allowed Domains", "Allowed Domain"]));
+                let current_game_patterns = split_source_list_value(item_any_field_value(item, &["Current-Game URL Patterns", "Game-Page Validation", "Game Page Validation"]));
+                let download_capture_rules = split_source_list_value(item_any_field_value(item, &["Download Capture", "Download Capture Rules"]));
+                let auth_requirement = item_any_field_value(item, &["Login Required", "Authentication Requirement"]);
+                let cross_game_protection = item_any_field_value(item, &["Cross-Game Protection"]);
+
+                let provider = start_url.as_deref().and_then(parse_http_source_url).and_then(|url| {
+                    if source_host_matches(&url, "nexusmods.com") { Some("nexus") }
+                    else if source_host_matches(&url, "modworkshop.net") { Some("modworkshop") }
+                    else if source_host_matches(&url, "github.com") { Some("github") }
+                    else { None }
+                }).unwrap_or("custom");
+                if provider == "modworkshop" {
+                    start_url = start_url.and_then(|value| parse_modworkshop_game_url_fields(&value).map(|parsed| parsed.2));
+                }
+
+                if config.get("customBrowserStartUrl").is_none() {
+                    if let Some(value) = start_url.clone() {
+                        config.insert("customBrowserStartUrl".to_string(), serde_json::Value::String(value));
+                    }
+                }
+                if config.get("customBrowserAllowedDomains").is_none() && !allowed_domains.is_empty() {
+                    config.insert("customBrowserAllowedDomains".to_string(), serde_json::json!(allowed_domains.clone()));
+                }
+
+                custom_sources.push(serde_json::json!({
+                    "id": item_any_field_value(item, &["Source Instance ID"]).unwrap_or_else(|| display_name.to_ascii_lowercase().replace(' ', "_")),
+                    "sourceType": source_type_from_item(item),
+                    "displayName": display_name.clone(),
+                    "startUrl": start_url.clone(),
+                    "allowedDomains": allowed_domains.clone(),
+                    "currentGameUrlPatterns": current_game_patterns,
+                    "downloadCaptureRules": download_capture_rules.clone(),
+                    "authenticationRequirement": auth_requirement,
+                    "crossGameProtection": cross_game_protection,
+                }));
+                configured_sources.push(serde_json::json!({
+                    "id": item_any_field_value(item, &["Source Instance ID"]).or_else(|| json_string(item, "id")).unwrap_or_else(|| format!("source-browser-{}", configured_sources.len() + 1)),
+                    "displayName": display_name,
+                    "provider": provider,
+                    "enabled": true,
+                    "browseMode": "webview_window",
+                    "gameName": item_any_field_value(item, &["Human Game Name", "Game Name"]),
+                    "providerSlug": serde_json::Value::Null,
+                    "providerGameId": serde_json::Value::Null,
+                    "gamePageUrl": start_url.clone(),
+                    "listingUrl": serde_json::Value::Null,
+                    "startUrl": start_url,
+                    "allowedDomains": allowed_domains,
+                    "captureDownloads": !download_capture_rules.is_empty(),
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(source) = recovered_nexus_browser {
+        configured_sources.push(source);
+    }
+
+    if !custom_sources.is_empty() {
+        config.insert("customBrowserSources".to_string(), serde_json::Value::Array(custom_sources));
+    }
+    if !configured_sources.is_empty() {
+        config.insert("sources".to_string(), serde_json::Value::Array(configured_sources));
+    }
+
+    serde_json::Value::Object(config)
+}
+fn merge_source_config(profile: &serde_json::Value, draft: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut config = profile
+        .get("sourceConfig")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(defaults) = json_string(profile, "profileId")
+        .as_deref()
+        .and_then(builtin_profile_source_config)
+        .and_then(|value| value.as_object().cloned())
+    {
+            let target = config.as_object_mut().expect("source config object");
+            for (key, value) in defaults {
+                if key == "sources" {
+                    target.insert(key, value);
+                } else {
+                    target.entry(key).or_insert(value);
+                }
+            }
+    }
+    if let Some(draft_config) = draft.map(source_config_from_draft).and_then(|value| value.as_object().cloned()) {
+        let target = config.as_object_mut().expect("source config object");
+        for (key, value) in draft_config {
+            target.entry(key).or_insert(value);
+        }
+    }
+    config
+}
+fn source_names_from_config(config: &serde_json::Value, draft: Option<&serde_json::Value>) -> Vec<String> {
+    if let Some(configured) = config.get("sources").and_then(|value| value.as_array()) {
+        let exact = configured
+            .iter()
+            .filter(|source| source.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true))
+            .filter_map(|source| json_string(source, "id"))
+            .collect::<Vec<_>>();
+        if !exact.is_empty() {
+            return exact;
+        }
+    }
+    let mut sources = Vec::new();
+    if config.get("modworkshopGameId").is_some()
+        || config.get("modworkshopSlug").is_some()
+        || config.get("modworkshopGamePageUrl").is_some()
+        || config.get("modworkshopEmbeddedStartUrl").is_some()
+    {
+        sources.push("modworkshop".to_string());
+    }
+    if config.get("nexusDomain").is_some()
+        || config.get("nexusGameId").is_some()
+        || config.get("nexusGamePageUrl").is_some()
+        || config.get("nexusEmbeddedStartUrl").is_some()
+    {
+        sources.push("nexus".to_string());
+    }
+    if config.get("customBrowser").and_then(|value| value.as_bool()).unwrap_or(false) || config.get("customBrowserStartUrl").is_some() || config.get("customBrowserSources").and_then(|value| value.as_array()).map(|items| !items.is_empty()).unwrap_or(false) { sources.push("custom_browser".to_string()); }
+    if let Some(draft) = draft { for item in draft_section_items(draft, "sources") { if json_bool(item, "enabled") == Some(false) { continue; } let source_type = source_type_from_item(item); if !sources.iter().any(|source| source == &source_type) { sources.push(source_type); } } }
+    sources
+}
+fn source_config_for_profile_id(profile_id: Option<&str>) -> serde_json::Value {
+    let mut config = source_config_for_profile_id_unversioned(profile_id);
+    apply_profile_game_version(&mut config, profile_id.unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID));
+    config
+}
+
+fn apply_profile_game_version(config: &mut serde_json::Value, profile_id: &str) {
+    let payday3_source = modworkshop_game_route_from_source_config(config)
+        .and_then(|route| normalize_modworkshop_game_route(&route).ok())
+        .map(|route| route == MODWORKSHOP_PAYDAY3_GAME_ID)
+        .unwrap_or(false);
+    if profile_id != BUILTIN_PAYDAY3_PROFILE_ID && !payday3_source { return; }
+    let version = modworkshop_profile_game_version(Some(profile_id), MODWORKSHOP_PAYDAY3_GAME_ID).unwrap_or_else(|| "UE5.5".to_string());
+    config["gameVersion"] = serde_json::json!(version);
+    if let Some(sources) = config.get_mut("sources").and_then(|value| value.as_array_mut()) {
+        for source in sources { source["gameVersion"] = serde_json::json!(version); }
+    }
+}
+
+fn source_config_for_profile_id_unversioned(profile_id: Option<&str>) -> serde_json::Value {
+    let Some(profile_id) = profile_id else {
+        return builtin_payday3_source_config();
+    };
+    let Ok(clean) = clean_profile_id(profile_id) else {
+        return serde_json::json!({});
+    };
+    if let Ok(draft) = read_game_profile_draft(&clean) {
+        let mut config = source_config_from_draft(&draft);
+        if let Some(defaults) = builtin_profile_source_config(&clean).and_then(|value| value.as_object().cloned()) {
+                let target = config.as_object_mut().expect("source config object");
+                for (key, value) in defaults {
+                    if key == "sources" {
+                        target.insert(key, value);
+                    } else {
+                        target.entry(key).or_insert(value);
+                    }
+                }
+        }
+        return config;
+    }
+    builtin_profile_source_config(&clean).unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn source_config_for_profile_source(profile_id: Option<&str>, source_id: Option<&str>) -> serde_json::Value {
+    let mut config = source_config_for_profile_id(profile_id);
+    let Some(source_id) = source_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return config;
+    };
+    let selected = config
+        .get("sources")
+        .and_then(|value| value.as_array())
+        .and_then(|sources| sources.iter().find(|source| json_string(source, "id").as_deref() == Some(source_id)))
+        .cloned();
+    let Some(selected) = selected else {
+        return config;
+    };
+    let provider = json_string(&selected, "provider").unwrap_or_default();
+    let target = config.as_object_mut().expect("source config object");
+    match provider.as_str() {
+        "nexus" => {
+            for (from, to) in [
+                ("displayName", "nexusDisplayName"),
+                ("gameName", "nexusGameName"),
+                ("providerSlug", "nexusDomain"),
+                ("providerGameId", "nexusGameId"),
+                ("gamePageUrl", "nexusGamePageUrl"),
+                ("listingUrl", "nexusCategoryUrl"),
+                ("startUrl", "nexusEmbeddedStartUrl"),
+                ("browseMode", "nexusBrowseMode"),
+            ] {
+                if let Some(value) = selected.get(from).cloned().filter(|value| !value.is_null()) {
+                    target.insert(to.to_string(), value);
+                }
+            }
+        }
+        "modworkshop" => {
+            for (from, to) in [
+                ("displayName", "modworkshopDisplayName"),
+                ("gameName", "modworkshopGameName"),
+                ("providerSlug", "modworkshopSlug"),
+                ("providerGameId", "modworkshopGameId"),
+                ("gamePageUrl", "modworkshopGamePageUrl"),
+                ("listingUrl", "modworkshopCategoryUrl"),
+                ("startUrl", "modworkshopEmbeddedStartUrl"),
+                ("browseMode", "modworkshopBrowseMode"),
+            ] {
+                if let Some(value) = selected.get(from).cloned().filter(|value| !value.is_null()) {
+                    target.insert(to.to_string(), value);
+                }
+            }
+        }
+        _ => {}
+    }
+    config
+}
+
+fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
+    json_string(config, key)
+}
+
+fn configured_provider_source<'a>(config: &'a serde_json::Value, provider: &str) -> Option<&'a serde_json::Value> {
+    config.get("sources")?.as_array()?.iter().find(|source| {
+        json_string(source, "provider").as_deref() == Some(provider)
+            && source.get("enabled").and_then(|value| value.as_bool()) != Some(false)
+    })
+}
+
+fn nexus_domain_from_source_config(config: &serde_json::Value) -> Option<String> {
+    configured_provider_source(config, "nexus")
+        .and_then(|source| json_string(source, "providerSlug"))
+        .and_then(|value| clean_source_slug(&value))
+        .or_else(|| config_string(config, "nexusDomain").and_then(|value| clean_source_slug(&value)))
+        .or_else(|| config_string(config, "nexusGamePageUrl").and_then(|value| parse_nexus_game_url_fields(&value).map(|parsed| parsed.0)))
+        .or_else(|| config_string(config, "nexusCategoryUrl").and_then(|value| parse_nexus_game_url_fields(&value).map(|parsed| parsed.0)))
+        .or_else(|| config_string(config, "nexusEmbeddedStartUrl").and_then(|value| parse_nexus_game_url_fields(&value).map(|parsed| parsed.0)))
+        .or_else(|| {
+            config_string(config, "nexusGameId")
+                .filter(|value| !source_id_is_numeric(value))
+                .and_then(|value| clean_source_slug(&value))
+        })
+}
+
+fn modworkshop_game_route_from_source_config(config: &serde_json::Value) -> Option<String> {
+    configured_provider_source(config, "modworkshop")
+        .and_then(|source| json_string(source, "providerSlug").or_else(|| json_string(source, "providerGameId")))
+        .or_else(|| config_string(config, "modworkshopSlug").and_then(|value| clean_source_slug(&value)))
+        .or_else(|| config_string(config, "modworkshopGamePageUrl").and_then(|value| parse_modworkshop_game_url_fields(&value).and_then(|parsed| parsed.0.or(parsed.1))))
+        .or_else(|| config_string(config, "modworkshopCategoryUrl").and_then(|value| parse_modworkshop_game_url_fields(&value).and_then(|parsed| parsed.0.or(parsed.1))))
+        .or_else(|| config_string(config, "modworkshopEmbeddedStartUrl").and_then(|value| parse_modworkshop_game_url_fields(&value).and_then(|parsed| parsed.0.or(parsed.1))))
+        .or_else(|| config_string(config, "modworkshopGameId").and_then(|value| {
+            if source_id_is_numeric(&value) {
+                Some(value.trim().to_string())
+            } else {
+                clean_source_slug(&value)
+            }
+        }))
+        .and_then(|value| normalize_modworkshop_game_route(&value).ok())
+}
+fn collect_section_titles(draft: Option<&serde_json::Value>, section: &str) -> Vec<String> { draft.map(|draft| draft_section_items(draft, section).into_iter().filter_map(item_title).collect()).unwrap_or_default() }
+fn draft_named_path_values(draft: Option<&serde_json::Value>) -> Vec<String> { let Some(draft) = draft else { return Vec::new(); }; let mut values = Vec::new(); for item in draft_section_items(draft, "pathsLaunch") { for label in ["Path", "Destination", "Root", "Game Root", "Working Directory", "Executable"] { if let Some(value) = item_field_value(item, label) { if !values.iter().any(|existing: &String| existing == &value) { values.push(value); } } } } values }
+fn draft_executable(draft: Option<&serde_json::Value>) -> Option<String> { let draft = draft?; draft_section_items(draft, "pathsLaunch").into_iter().find_map(|item| item_field_value(item, "Executable")).or_else(|| draft_section_items(draft, "detectionStores").into_iter().find_map(|item| item_field_value(item, "Expected executable"))) }
+fn draft_game_root(draft: Option<&serde_json::Value>) -> Option<String> { let draft = draft?; draft.get("customTest").and_then(|custom| json_string(custom, "sampleGameRoot")).or_else(|| draft_section_items(draft, "pathsLaunch").into_iter().find_map(|item| item_field_value(item, "Game Root").or_else(|| item_field_value(item, "Root Folder")))) }
+fn profile_executable_from_root(profile_id: &str, game_root: &Path) -> Option<PathBuf> {
+    profile_installs::builtin_profile_executable_markers(profile_id)
+        .iter()
+        .map(|marker| game_root.join(marker))
+        .find(|path| path.is_file())
+}
+
+fn resolve_profile_executable(profile_id: &str, game_root: Option<&str>, draft: Option<&serde_json::Value>, override_path: Option<String>) -> Option<String> {
+    if let Some(path) = override_path.map(PathBuf::from).filter(|path| path.is_file()) {
+        return Some(path.display().to_string());
+    }
+    if let Some(raw) = draft_executable(draft) {
+        let path = PathBuf::from(&raw);
+        let resolved = if path.is_absolute() { path } else if let Some(root) = game_root { PathBuf::from(root).join(path) } else { path };
+        if resolved.is_file() { return Some(resolved.display().to_string()); }
+    }
+    game_root
+        .map(PathBuf::from)
+        .and_then(|root| profile_executable_from_root(profile_id, &root))
+        .or_else(|| profile_installs::detected_builtin_launch_executable(profile_id))
+        .map(|path| path.display().to_string())
+}
+fn runtime_revision_for_profile(profile_id: &str) -> u64 { game_profile_draft_path(profile_id).ok().and_then(|path| fs::metadata(path).ok()).and_then(|metadata| metadata.modified().ok()).and_then(system_time_unix).unwrap_or_else(now_unix_seconds) }
+fn runtime_for_game_profile(profile_id: &str, profile: &serde_json::Value) -> Result<ActiveProfileRuntimeWire, String> {
+    let clean = clean_profile_id(profile_id)?;
+    let storage = ensure_profile_data_dirs(&clean)?;
+    let builtin_draft = profile_installs::builtin_install_definition(&clean, profile_installs::detected_builtin_game_root(&clean).as_deref());
+    let loaded_draft = read_game_profile_draft(&clean).ok();
+    let draft = builtin_draft.as_ref().or_else(|| profile.get("draft").filter(|value| value.is_object())).or(loaded_draft.as_ref());
+    let profile_settings = load_profile_settings_internal(&clean);
+    let display_name = json_string(profile, "displayName").or_else(|| draft.and_then(|draft| draft_overview_string(draft, "gameName"))).unwrap_or_else(|| if is_builtin_payday3_profile(Some(&clean)) { "PAYDAY 3".to_string() } else { clean.clone() });
+    let game_id = json_string(profile, "gameKey").or_else(|| draft.and_then(|draft| draft_overview_string(draft, "gameKey"))).unwrap_or_else(|| clean.clone());
+    let mut source_config = merge_source_config(profile, draft);
+    apply_profile_game_version(&mut source_config, &clean);
+    let payday_paths = if is_builtin_payday3_profile(Some(&clean)) { detect_payday3_paths_internal() } else { None };
+    let detected_root = profile_installs::detected_builtin_game_root(&clean);
+    let game_root = profile_settings.game_root_override.clone()
+        .or_else(|| payday_paths.as_ref().map(|paths| paths.game_root.display().to_string()))
+        .or_else(|| profile.get("installation").and_then(|value| json_string(value, "gameRoot")))
+        .or_else(|| detected_root.as_ref().map(|path| path.display().to_string()))
+        .or_else(|| draft_game_root(draft));
+    let executable = profile_settings.executable_override.clone()
+        .or_else(|| payday_paths.as_ref().and_then(|paths| payday_exe_candidates(paths).into_iter().find(|exe| exe.is_file())).map(|exe| exe.display().to_string()))
+        .or_else(|| resolve_profile_executable(&clean, game_root.as_deref(), draft, None));
+    let loaded_receipt_count = profile_installs::list_profile_receipts_internal(&clean).map(|receipts| receipts.len()).unwrap_or(0);
+    let loaded_installed_mod_count = if is_builtin_payday3_profile(Some(&clean)) {
+        list_installed_state_records_internal().map(|records| records.len()).unwrap_or(0)
+    } else {
+        profile_installs::sync_profile_installed_state(&clean).map(|records| records.len()).unwrap_or(0)
+    };
+    Ok(ActiveProfileRuntimeWire { profile_id: clean, definition_revision: runtime_revision_for_profile(profile_id), game_id, game_name: display_name, game_root, executable, named_paths: draft_named_path_values(draft), sources: source_names_from_config(&source_config, draft), source_config, mod_types: collect_section_titles(draft, "modTypes"), install_rules: collect_section_titles(draft, "installBehavior"), toggle_rules: collect_section_titles(draft, "enableDisable"), dependencies: collect_section_titles(draft, "dependencies"), conflict_rules: collect_section_titles(draft, "conflicts"), storage_path: storage.display().to_string(), installed_state_path: storage.join("installed-state").join("installed-state.json").display().to_string(), receipts_path: storage.join("receipts").display().to_string(), backups_path: storage.join("backups").display().to_string(), disabled_state_path: storage.join("disabled-state").join("disabled-state.json").display().to_string(), browse_cache_path: storage.join("cache").join("browse").display().to_string(), thumbnail_cache_path: storage.join("cache").join("thumbnails").display().to_string(), source_index_path: storage.join("source-index").join("source-index.json").display().to_string(), dependency_state_path: storage.join("dependencies").join("dependency-state.json").display().to_string(), setup_state_path: storage.join("setup").join("setup-state.json").display().to_string(), launch_configuration: serde_json::json!({ "arguments": profile_settings.launch_arguments, "workingDirectory": profile_settings.working_directory_override, "environment": profile_settings.launch_environment }), loaded_receipt_count, loaded_installed_mod_count, ready: true, error: None })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileLaunchMapping {
+    profile_id: String,
+    game_root: String,
+    executable: String,
+    working_directory: String,
+    arguments: Vec<String>,
+    vanilla_supported: bool,
+    vanilla_scope: String,
+}
+
+fn split_launch_arguments(value: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in value.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            value if value.is_whitespace() && !quoted => {
+                if !current.is_empty() { arguments.push(std::mem::take(&mut current)); }
+            }
+            value => current.push(value),
+        }
+    }
+    if !current.is_empty() { arguments.push(current); }
+    arguments
+}
+
+fn profile_launch_mapping_internal(profile_id: &str) -> Result<ProfileLaunchMapping, String> {
+    let profile_id = clean_profile_id(profile_id)?;
+    if is_builtin_payday3_profile(Some(&profile_id)) {
+        let paths = detect_payday3_paths_internal().ok_or_else(|| "PAYDAY 3 is not installed in a detected library.".to_string())?;
+        let executable = payday_exe_candidates(&paths).into_iter().find(|exe| exe.is_file())
+            .ok_or_else(|| "No PAYDAY 3 shipping executable was found in the selected game folder.".to_string())?;
+        return Ok(ProfileLaunchMapping { profile_id, game_root: paths.game_root.display().to_string(), working_directory: paths.win64.display().to_string(), executable: executable.display().to_string(), arguments: Vec::new(), vanilla_supported: true, vanilla_scope: "Temporarily disables PAYDAY 3 mod folders and restores them after exit.".to_string() });
+    }
+
+    let settings = load_profile_settings_internal(&profile_id);
+    let draft = read_game_profile_draft(&profile_id).ok();
+    let game_root = settings.game_root_override.clone().map(PathBuf::from).filter(|path| path.is_dir())
+        .or_else(|| profile_installs::detected_builtin_game_root(&profile_id))
+        .or_else(|| draft_game_root(draft.as_ref()).map(PathBuf::from).filter(|path| path.is_dir()))
+        .ok_or_else(|| format!("{} is not installed in a detected Steam library. Choose its game folder in Profile Settings.", profile_id))?;
+    let executable = resolve_profile_executable(&profile_id, game_root.to_str(), draft.as_ref(), settings.executable_override.clone())
+        .map(PathBuf::from).filter(|path| path.is_file())
+        .ok_or_else(|| format!("No mapped launch executable was found for {} in {}.", profile_id, game_root.display()))?;
+    let working_directory = settings.working_directory_override.clone().map(PathBuf::from).filter(|path| path.is_dir())
+        .or_else(|| executable.parent().map(PathBuf::from)).unwrap_or_else(|| game_root.clone());
+    Ok(ProfileLaunchMapping { profile_id, game_root: game_root.display().to_string(), executable: executable.display().to_string(), working_directory: working_directory.display().to_string(), arguments: split_launch_arguments(&settings.launch_arguments), vanilla_supported: true, vanilla_scope: "Temporarily disables Tsuki receipt-owned files only and restores their prior state after exit.".to_string() })
+}
+
+#[tauri::command]
+fn get_profile_launch_mapping(profile_id: String) -> Result<ProfileLaunchMapping, String> { profile_launch_mapping_internal(&profile_id) }
+
+fn launch_mapped_profile(profile_id: String, vanilla: bool) -> Result<String, String> {
+    if is_builtin_payday3_profile(Some(&profile_id)) { return launch_payday3_with_mode(!vanilla); }
+    let mapping = profile_launch_mapping_internal(&profile_id)?;
+    if profile_id == managed_loaders::PROFILE {
+        managed_loaders::prepare_launch(Path::new(&mapping.game_root), vanilla)?;
+    }
+    let previously_enabled = if vanilla {
+        let enabled = profile_installs::enabled_profile_receipt_ids(&mapping.profile_id)?;
+        profile_installs::apply_profile_receipt_selection(&mapping.profile_id, &[])?;
+        enabled
+    } else { Vec::new() };
+    let settings = load_profile_settings_internal(&mapping.profile_id);
+    let mut command = Command::new(&mapping.executable);
+    command.current_dir(&mapping.working_directory).args(&mapping.arguments);
+    for entry in settings.launch_environment {
+        if let Some((key, value)) = entry.split_once('=') {
+            let key = key.trim();
+            if !key.is_empty() { command.env(key, value.trim()); }
+        }
+    }
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if vanilla { let _ = profile_installs::apply_profile_receipt_selection(&mapping.profile_id, &previously_enabled); }
+            return Err(format!("Failed to launch {}: {}", mapping.executable, error));
+        }
+    };
+    if vanilla {
+        let restore_profile_id = mapping.profile_id.clone();
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+            let _ = profile_installs::apply_profile_receipt_selection(&restore_profile_id, &previously_enabled);
+        });
+    }
+    Ok(if vanilla { format!("Launched {} in vanilla mode. Tsuki-owned mod files will be restored after the game exits.", mapping.executable) } else { format!("Launched {} with the profile's current mod state.", mapping.executable) })
+}
+
+#[tauri::command]
+async fn launch_active_profile_vanilla(profile_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || launch_mapped_profile(profile_id, true)).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn launch_active_profile_modded(profile_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || launch_mapped_profile(profile_id, false)).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn activate_game_profile_runtime(profile_id: String, profile: serde_json::Value) -> Result<ActiveProfileRuntimeWire, String> { let clean = clean_profile_id(&profile_id)?; let runtime = runtime_for_game_profile(&clean, &profile)?; let mut settings = load_settings_internal(); settings.current_game_profile_id = Some(clean.clone()); settings.active_game_profile_id = Some(clean); save_settings_internal(&settings)?; Ok(runtime) }
+
+fn open_game_profile_draft_runtime_internal(profile_id: String, draft: serde_json::Value, preview_setup: bool) -> Result<ProfileRuntimeOpenResult, String> {
+    let clean = clean_profile_id(&profile_id)?;
+    let saved = save_game_profile_draft_value(&clean, draft)?;
+    let runtime = runtime_for_game_profile(&clean, &serde_json::json!({ "profileId": clean, "draft": saved }))?;
+    let storage = PathBuf::from(&runtime.storage_path);
+    let draft_path = game_profile_draft_path(&runtime.profile_id)?;
+    Ok(ProfileRuntimeOpenResult { profile_id: runtime.profile_id.clone(), storage_path: runtime.storage_path, profile_path: storage.join("profile.json").display().to_string(), draft_path: draft_path.display().to_string(), setup_state_path: runtime.setup_state_path, index_path: runtime.source_index_path, test_workspace_path: storage.join("test-workspace").display().to_string(), blocking: Vec::new(), warnings: Vec::new(), revision: runtime.definition_revision, opened_at_unix: now_unix_seconds(), preview_setup })
+}
+
+#[tauri::command]
+fn open_game_profile_draft_runtime(profile_id: String, draft: serde_json::Value) -> Result<ProfileRuntimeOpenResult, String> { open_game_profile_draft_runtime_internal(profile_id, draft, false) }
+#[tauri::command]
+fn preview_game_profile_setup(profile_id: String, draft: serde_json::Value) -> Result<ProfileRuntimeOpenResult, String> { open_game_profile_draft_runtime_internal(profile_id, draft, true) }
+
+#[tauri::command]
+fn run_profile_creator_test_action(profile_id: String, draft: serde_json::Value, section: Option<String>, label: String) -> Result<ProfileCreatorRuntimeTestResult, String> {
+    let sample = draft.get("customTest").and_then(|value| json_string(value, "sampleArchive"));
+    let saved = save_game_profile_draft_value(&profile_id, draft)?;
+    let runtime = runtime_for_game_profile(&profile_id, &serde_json::json!({ "profileId": profile_id, "draft": saved }))?;
+    let mut warnings = Vec::new();
+
+    let mut errors = Vec::new();
+    let mut actions = vec!["Saved draft snapshot".to_string(), "Built isolated profile runtime".to_string()];
+    let mut technical_details = vec![format!("Profile runtime revision {}", runtime.definition_revision)];
+    let lower_label = label.to_ascii_lowercase();
+    let analysis_supported = (lower_label.contains("install") || lower_label.contains("archive") || lower_label.contains("file") || lower_label.contains("folder") || lower_label.contains("recognition"))
+        && !["enable", "disable", "rollback", "uninstall", "update"].iter().any(|action| lower_label.contains(action));
+    if analysis_supported {
+        if let Some(sample) = sample.filter(|value| !value.trim().is_empty()) {
+            match profile_installs::analyze_drag_drop_install(vec![sample], profile_id.clone()) {
+                Ok(analysis) => {
+                    let value = serde_json::to_value(analysis).map_err(|error| error.to_string())?;
+                    technical_details.push(serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?);
+                    if let Some(items) = value.get("items").and_then(|value| value.as_array()) {
+                        for item in items {
+                            if item.get("blocked").and_then(|value| value.as_bool()).unwrap_or(true) {
+                                errors.push("Sample install analysis is blocked. Review the destination and dependency diagnostics.".to_string());
+                            }
+                            if let Some(items) = item.get("warnings").and_then(|value| value.as_array()) {
+                                warnings.extend(items.iter().filter_map(|value| value.as_str().map(str::to_string)));
+                            }
+                        }
+                    }
+                    actions.push("Analyzed sample files, destination safety, dependencies, and conflicts without installing".to_string());
+                }
+                Err(error) => errors.push(error),
+            }
+        } else {
+            warnings.push("Select a sample file or archive before running this check.".to_string());
+        }
+    } else {
+        warnings.push(format!("{} was not executed. Runtime validation alone does not verify this behavior.", label));
+    }
+    if runtime.game_root.is_none() { errors.push("No game root is configured yet.".to_string()); }
+    Ok(ProfileCreatorRuntimeTestResult {
+        status: if !errors.is_empty() { "Failed" } else if !warnings.is_empty() { "Warning" } else { "Passed" }.to_string(),
+        what_was_tested: label.clone(),
+        input_used: vec![section.unwrap_or_else(|| "profile".to_string()), label],
+        resolved_paths: vec![runtime.storage_path, runtime.setup_state_path, runtime.source_index_path],
+        actions, warnings, errors, technical_details,
+        profile_revision: runtime.definition_revision, outdated: false,
+    })
+}
+fn managed_artwork_dir(profile_id: &str) -> Result<PathBuf, String> { let dir = profile_data_dir_for(profile_id)?.join("artwork"); fs::create_dir_all(&dir).map_err(|err| format!("Failed to create profile artwork folder {}: {}", dir.display(), err))?; Ok(dir) }
+fn profile_image_reference(kind: &str, value: String) -> ProfileImageReferenceWire { ProfileImageReferenceWire { kind: kind.to_string(), value, updated_at: current_timestamp() } }
+fn artwork_extension_from_mime(mime: &str) -> Option<&'static str> {
+    let lower = mime.to_ascii_lowercase();
+    if lower.contains("png") {
+        Some("png")
+    } else if lower.contains("webp") {
+        Some("webp")
+    } else if lower.contains("jpeg") || lower.contains("jpg") {
+        Some("jpg")
+    } else {
+        None
+    }
+}
+
+fn validate_profile_artwork_path(path: &Path) -> Result<&'static str, String> {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpg"),
+        "webp" => Ok("webp"),
+        _ => Err("Profile artwork must be a PNG, JPG, JPEG, or WEBP image.".to_string()),
     }
 }
 
 #[tauri::command]
-fn list_mod_profiles() -> Result<Vec<ModProfile>, String> {
-    let folder = mod_profiles_dir()?;
-    fs::create_dir_all(&folder)
-        .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
+fn save_profile_artwork_data_url(profile_id: String, data_url: String) -> Result<ProfileArtworkImportResult, String> {
+    let clean = clean_profile_id(&profile_id)?;
+    let Some((header, payload)) = data_url.split_once(',') else {
+        return Err("Image data URL is invalid.".to_string());
+    };
+    if !header.starts_with("data:image/") {
+        return Err("Only image data URLs can be saved as profile artwork.".to_string());
+    }
+    let ext = artwork_extension_from_mime(header)
+        .ok_or_else(|| "Profile artwork must be a PNG, JPG, JPEG, or WEBP image.".to_string())?;
+    let bytes = general_purpose::STANDARD
+        .decode(payload.as_bytes())
+        .map_err(|err| format!("Failed to decode image data URL: {}", err))?;
+    let managed = managed_artwork_dir(&clean)?.join(format!("artwork-{}.{}", current_timestamp(), ext));
+    fs::write(&managed, bytes)
+        .map_err(|err| format!("Failed to save profile artwork {}: {}", managed.display(), err))?;
+    let managed_path = managed.display().to_string();
+    Ok(ProfileArtworkImportResult { image_reference: profile_image_reference("managed_local", managed_path.clone()), source_path: "clipboard/data-url".to_string(), source_exists: true, managed_path: managed_path.clone(), managed_exists: managed.exists() })
+}
 
-    let mut profiles = Vec::new();
+#[tauri::command]
+fn import_profile_artwork_image(profile_id: String, source_path: String) -> Result<ProfileArtworkImportResult, String> {
+    let clean = clean_profile_id(&profile_id)?;
+    let source = PathBuf::from(source_path.trim());
+    let source_exists = source.exists();
+    if !source_exists || !source.is_file() {
+        return Err(format!("Profile artwork file was not found: {}", source.display()));
+    }
+    validate_profile_artwork_path(&source)?;
+    File::open(&source)
+        .map_err(|err| format!("Profile artwork file could not be read {}: {}", source.display(), err))?;
+    let file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artwork.png");
+    let managed = managed_artwork_dir(&clean)?.join(format!("{}-{}", current_timestamp(), sanitize_file_component(file_name)));
+    fs::copy(&source, &managed)
+        .map_err(|err| format!("Failed to import profile artwork {}: {}", source.display(), err))?;
+    let managed_path = managed.display().to_string();
+    Ok(ProfileArtworkImportResult { image_reference: profile_image_reference("managed_local", managed_path.clone()), source_path: source.display().to_string(), source_exists, managed_path: managed_path.clone(), managed_exists: managed.exists() })
+}
 
-    for entry in fs::read_dir(&folder)
-        .map_err(|err| format!("Failed to read profiles folder: {}", err))?
-    {
-        let entry = entry.map_err(|err| format!("Failed to read profile entry: {}", err))?;
-        let path = entry.path();
+#[tauri::command]
+fn resolve_profile_artwork_image_src(profile_id: String, path: String) -> Result<ProfileArtworkResolveResult, String> {
+    let clean = clean_profile_id(&profile_id)?;
+    let managed_root = managed_artwork_dir(&clean)?;
+    let managed_root = fs::canonicalize(&managed_root)
+        .map_err(|err| format!("Failed to resolve managed artwork folder {}: {}", managed_root.display(), err))?;
+    let source = PathBuf::from(path.trim());
+    let source_exists = source.is_file();
+    if !source_exists {
+        return Err(format!("Managed profile artwork was not found: {}", source.display()));
+    }
+    let source = fs::canonicalize(&source)
+        .map_err(|err| format!("Failed to resolve managed profile artwork {}: {}", source.display(), err))?;
+    if !source.starts_with(&managed_root) {
+        return Err(format!("Profile artwork is outside the managed profile directory: {}", source.display()));
+    }
+    let bytes = fs::read(&source)
+        .map_err(|err| format!("Failed to read managed profile artwork {}: {}", source.display(), err))?;
+    if bytes.len() > 12 * 1024 * 1024 {
+        return Err("Profile artwork must be 12 MB or smaller.".to_string());
+    }
+    let mime = match source.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ if bytes.starts_with(&[0x89, b'P', b'N', b'G']) => "image/png",
+        _ if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) => "image/jpeg",
+        _ if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => "image/webp",
+        _ => return Err("Managed profile artwork is not a supported PNG, JPG, JPEG, or WEBP image.".to_string()),
+    };
+    let byte_length = bytes.len();
+    Ok(ProfileArtworkResolveResult {
+        final_src: format!("data:{};base64,{}", mime, general_purpose::STANDARD.encode(bytes)),
+        source_path: source.display().to_string(),
+        source_exists,
+        managed_root: managed_root.display().to_string(),
+        resolver: "managed_data_url".to_string(),
+        byte_length,
+    })
+}
 
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
+#[tauri::command]
+fn cache_profile_artwork_remote_url(profile_id: String, url: String) -> Result<ProfileArtworkImportResult, String> { let clean = clean_profile_id(&profile_id)?; let trimmed = url.trim(); if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) { return Err("Artwork URL must start with http:// or https://.".to_string()); } let managed = managed_artwork_dir(&clean)?.join(format!("remote-artwork-{}.img", current_timestamp())); match download_url_to_file_with_diagnostic(trimmed, &managed) { Ok(_) => { let managed_path = managed.display().to_string(); Ok(ProfileArtworkImportResult { image_reference: profile_image_reference("cached_remote", managed_path.clone()), source_path: trimmed.to_string(), source_exists: true, managed_path: managed_path.clone(), managed_exists: managed.exists() }) }, Err(_) => Ok(ProfileArtworkImportResult { image_reference: profile_image_reference("remote_url", trimmed.to_string()), source_path: trimmed.to_string(), source_exists: false, managed_path: String::new(), managed_exists: false }) } }
+
+fn relative_path_for(root: &Path, path: &Path) -> String { path.strip_prefix(root).unwrap_or(path).display().to_string() }
+fn scan_game_folder_walk(root: &Path, current: &Path, depth: usize, visited: &mut usize, executables: &mut Vec<GameFolderScanExecutable>, folders: &mut Vec<GameFolderScanFolder>, frameworks: &mut Vec<String>, steam_app_ids: &mut Vec<String>) { if depth > 4 || *visited > 3500 { return; } let Ok(entries) = fs::read_dir(current) else { return; }; for entry in entries.flatten() { if *visited > 3500 { break; } *visited += 1; let path = entry.path(); let name = entry.file_name().to_string_lossy().to_string(); let lower = name.to_ascii_lowercase(); if path.is_dir() { if folders.len() < 180 { folders.push(GameFolderScanFolder { name: name.clone(), path: path.display().to_string(), relative_path: relative_path_for(root, &path) }); } if matches!(lower.as_str(), "bepinex" | "mods" | "plugins" | "red4ext" | "reframework" | "ue4ss") && !frameworks.iter().any(|item| item.eq_ignore_ascii_case(&name)) { frameworks.push(name.clone()); } scan_game_folder_walk(root, &path, depth + 1, visited, executables, folders, frameworks, steam_app_ids); } else { if lower.ends_with(".exe") && executables.len() < 80 { let metadata = fs::metadata(&path).ok(); let score = if lower.contains("shipping") || lower.contains("client") { 90 } else if depth <= 1 { 75 } else { 45 }; executables.push(GameFolderScanExecutable { file_name: name.clone(), path: path.display().to_string(), relative_path: relative_path_for(root, &path), size_bytes: metadata.map(|meta| meta.len()), score: Some(score) }); } if lower == "steam_appid.txt" { if let Ok(contents) = fs::read_to_string(&path) { for id in contents.split_whitespace().filter(|part| part.chars().all(|ch| ch.is_ascii_digit())) { if !steam_app_ids.iter().any(|existing| existing == id) { steam_app_ids.push(id.to_string()); } } } } } } }
+
+#[tauri::command]
+fn scan_game_folder_basic(game_folder: String) -> Result<GameFolderScanResult, String> { let root = PathBuf::from(game_folder.trim()); if !root.exists() || !root.is_dir() { return Err(format!("Game folder was not found: {}", root.display())); } let mut visited = 0usize; let mut executables = Vec::new(); let mut folders = Vec::new(); let mut frameworks = Vec::new(); let mut steam_app_ids = Vec::new(); scan_game_folder_walk(&root, &root, 0, &mut visited, &mut executables, &mut folders, &mut frameworks, &mut steam_app_ids); executables.sort_by(|a, b| b.score.unwrap_or(0).cmp(&a.score.unwrap_or(0)).then_with(|| a.file_name.cmp(&b.file_name))); let suggested_executable = executables.first().cloned(); let architecture_hints = executables.iter().filter_map(|exe| { let lower = exe.relative_path.to_ascii_lowercase(); if lower.contains("win64") || lower.contains("x64") { Some("64-bit Windows".to_string()) } else if lower.contains("win32") || lower.contains("x86") { Some("32-bit Windows".to_string()) } else { None } }).collect::<std::collections::BTreeSet<_>>().into_iter().collect(); Ok(GameFolderScanResult { suggested_game_name: root.file_name().and_then(|value| value.to_str()).unwrap_or("Selected Game").replace('_', " "), game_folder: root.display().to_string(), executables, suggested_executable, folders, frameworks, steam_app_ids, architecture_hints, visited_entries: Some(visited) }) }
+#[tauri::command]
+fn read_profile_creator_import_file(path: String) -> Result<String, String> { fs::read_to_string(path.trim()).map_err(|err| format!("Failed to read profile creator import file: {}", err)) }
+
+#[tauri::command]
+fn write_profile_creator_text_file(path: String, contents: String, extension: String) -> Result<String, String> { let mut target = PathBuf::from(path.trim()); if target.as_os_str().is_empty() { return Err("Output path is required.".to_string()); } if target.extension().is_none() && !extension.trim().is_empty() { target.set_extension(extension.trim().trim_start_matches('.')); } if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|err| format!("Failed to create output folder {}: {}", parent.display(), err))?; } fs::write(&target, contents).map_err(|err| format!("Failed to write {}: {}", target.display(), err))?; Ok(format!("Wrote {}", target.display())) }
+
+#[tauri::command]
+fn test_profile_source_config(source: serde_json::Value) -> Result<SourceTestConfigResult, String> {
+    let source_type = source_type_from_item(&source);
+    let mut mapping_valid = true;
+    let mut messages = Vec::new();
+    let mut details = Vec::new();
+    let mut final_url = None;
+
+    match source_type.as_str() {
+        "nexus" | "nexus_mods" => {
+            let domain = item_any_field_value(&source, &["Nexus Domain", "Domain"])
+                .and_then(|value| clean_source_slug(&value))
+                .or_else(|| item_any_field_value(&source, &["Nexus Game Page URL", "Nexus Category URL", "Embedded Start URL", "Game Page URL", "Page URL"])
+                    .and_then(|value| parse_nexus_game_url_fields(&value).map(|parsed| parsed.0)));
+            let numeric_id = item_any_field_value(&source, &["Nexus Game ID", "Numeric Nexus Game ID", "Game ID"]);
+            if numeric_id.as_deref().map(|value| !source_id_is_numeric(value)).unwrap_or(false) {
+                mapping_valid = false;
+                messages.push("Nexus game ID must be numeric. Put game titles in Human Game Name and slugs in Nexus Domain.".to_string());
+            }
+            for label in ["Nexus Game Page URL", "Nexus Category URL", "Embedded Start URL"] {
+                if let Some(value) = item_field_value(&source, label) {
+                    if parse_nexus_game_url_fields(&value).is_none() {
+                        mapping_valid = false;
+                        messages.push(format!("{} must be a nexusmods.com URL.", label));
+                    }
+                }
+            }
+            if domain.is_none() && numeric_id.as_deref().filter(|value| source_id_is_numeric(value)).is_none() {
+                mapping_valid = false;
+                messages.push("Nexus needs a domain, a full game page URL, or a numeric game ID.".to_string());
+            }
+            final_url = item_any_field_value(&source, &["Embedded Start URL", "Nexus Category URL", "Nexus Game Page URL"])
+                .or_else(|| domain.clone().map(|domain| format!("https://www.nexusmods.com/{}/mods", domain)));
+            details.push(format!("Nexus domain: {}", domain.unwrap_or_else(|| "not set".to_string())));
+            details.push(format!("Nexus numeric game ID: {}", numeric_id.unwrap_or_else(|| "not set".to_string())));
         }
-
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-
-        if let Ok(profile) = serde_json::from_str::<ModProfile>(&contents) {
-            profiles.push(profile);
+        "modworkshop" => {
+            let slug = item_any_field_value(&source, &["ModWorkshop Slug", "Slug", "Game Slug"])
+                .and_then(|value| clean_source_slug(&value))
+                .or_else(|| item_any_field_value(&source, &["ModWorkshop Game Page URL", "ModWorkshop Category URL", "Embedded Start URL", "Game Page URL", "Page URL"])
+                    .and_then(|value| parse_modworkshop_game_url_fields(&value).and_then(|parsed| parsed.0)))
+                .and_then(|value| normalize_modworkshop_game_route(&value).ok());
+            let numeric_id = item_any_field_value(&source, &["ModWorkshop Game ID", "Numeric ModWorkshop Game ID", "Game ID"]);
+            if numeric_id.as_deref().map(|value| !source_id_is_numeric(value)).unwrap_or(false) {
+                mapping_valid = false;
+                messages.push("ModWorkshop game ID must be numeric. Put game titles in Human Game Name and slugs in ModWorkshop Slug.".to_string());
+            }
+            for label in ["ModWorkshop Game Page URL", "ModWorkshop Category URL", "Embedded Start URL"] {
+                if let Some(value) = item_field_value(&source, label) {
+                    if parse_modworkshop_game_url_fields(&value).is_none() {
+                        mapping_valid = false;
+                        messages.push(format!("{} must be a modworkshop.net game URL.", label));
+                    }
+                }
+            }
+            if slug.is_none() && numeric_id.as_deref().filter(|value| source_id_is_numeric(value)).is_none() {
+                mapping_valid = false;
+                messages.push("ModWorkshop needs a slug, full game page URL, or numeric game ID.".to_string());
+            }
+            final_url = item_any_field_value(&source, &["Embedded Start URL", "ModWorkshop Category URL", "ModWorkshop Game Page URL"])
+                .and_then(|value| parse_modworkshop_game_url_fields(&value).map(|parsed| parsed.2))
+                .or_else(|| slug.clone().map(|slug| format!("https://modworkshop.net/g/{}/mods", slug)));
+            details.push(format!("ModWorkshop slug: {}", slug.unwrap_or_else(|| "not set".to_string())));
+            details.push(format!("ModWorkshop numeric game ID: {}", numeric_id.unwrap_or_else(|| "not set".to_string())));
         }
+        "embedded" | "custom_browser" => {
+            final_url = item_field_value(&source, "Starting Page URL").or_else(|| item_field_value(&source, "Start URL"));
+            if final_url.is_none() {
+                mapping_valid = false;
+                messages.push("Starting page URL is required.".to_string());
+            }
+        }
+        "github" => {
+            let repository_url = item_any_field_value(&source, &["Repository URL", "GitHub URL", "Page URL"]);
+            let parsed = repository_url.as_deref().and_then(parse_github_repository_url);
+            let owner = item_field_value(&source, "Repository Owner").or_else(|| parsed.as_ref().map(|value| value.0.clone()));
+            let repo = item_field_value(&source, "Repository Name").or_else(|| parsed.as_ref().map(|value| value.1.clone()));
+            if owner.is_none() || repo.is_none() {
+                mapping_valid = false;
+                messages.push("GitHub owner and repository are required.".to_string());
+            }
+            if let (Some(owner), Some(repo)) = (owner, repo) {
+                final_url = Some(format!("https://github.com/{}/{}", owner, repo));
+            }
+        }
+        "local" => final_url = Some("local-files".to_string()),
+        "direct_catalog" => {
+            final_url = item_field_value(&source, "Catalog URL");
+            if final_url.is_none() {
+                mapping_valid = false;
+                messages.push("Catalog URL is required.".to_string());
+            }
+        }
+        _ => {}
     }
 
+    Ok(SourceTestConfigResult {
+        status: if mapping_valid { "Valid".to_string() } else { "Failed".to_string() },
+        message: if mapping_valid { "Source mapping is valid locally. Provider reachability is tested separately.".to_string() } else { messages.join(" ") },
+        user_message: None,
+        technical_details: Some(if details.is_empty() { "Local validation only; no network probe was required.".to_string() } else { details.join("\n") }),
+        source_type: Some(source_type),
+        reachable: mapping_valid,
+        authenticated: true,
+        mapping_valid,
+        final_url,
+        http_status: None,
+    })
+}
+fn mod_profiles_dir_for_game_profile(game_profile_id: &str) -> Result<PathBuf, String> { Ok(ensure_profile_data_dirs(game_profile_id)?.join("mod-profiles")) }
+fn legacy_mod_profile_sources() -> Vec<(PathBuf, Option<String>)> { let mut sources = Vec::new(); if let Ok(path) = legacy_mod_profiles_dir() { sources.push((path, None)); } if let Some(paths) = detect_payday3_paths_internal() { sources.push((paths.pak_mods.join("Tsuki_Profiles"), Some(BUILTIN_PAYDAY3_PROFILE_ID.to_string()))); } sources }
+fn normalize_mod_profile(mut profile: ModProfile, fallback_game_profile_id: Option<&str>) -> ModProfile { if profile.id.trim().is_empty() { profile.id = format!("profile-{}", current_timestamp()); } profile.id = sanitize_file_component(&profile.id); if profile.name.trim().is_empty() { profile.name = profile.id.clone(); } let missing_owner = profile.game_profile_id.trim().is_empty(); let owner = if missing_owner { fallback_game_profile_id.unwrap_or(UNASSIGNED_GAME_PROFILE_ID).to_string() } else { profile.game_profile_id.clone() }; profile.game_profile_id = clean_profile_id(&owner).unwrap_or_else(|_| UNASSIGNED_GAME_PROFILE_ID.to_string()); if missing_owner && fallback_game_profile_id.is_none() { profile.migration_state = Some("unassignedOwnership".to_string()); } profile }
+fn mod_profile_file_path(folder: &Path, profile: &ModProfile) -> PathBuf { let base = sanitize_file_component(if profile.id.trim().is_empty() { &profile.name } else { &profile.id }); folder.join(format!("{}.json", base)) }
+fn write_mod_profile_file(folder: &Path, profile: &ModProfile, allow_overwrite: bool) -> Result<PathBuf, String> { fs::create_dir_all(folder).map_err(|err| format!("Failed to create mod profiles folder {}: {}", folder.display(), err))?; let mut path = mod_profile_file_path(folder, profile); if !allow_overwrite && path.exists() { let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("profile").to_string(); path = folder.join(format!("{}-{}.json", stem, current_timestamp())); } let contents = serde_json::to_string_pretty(profile).map_err(|err| format!("Failed to serialize mod profile: {}", err))?; fs::write(&path, contents).map_err(|err| format!("Failed to write mod profile {}: {}", path.display(), err))?; Ok(path) }
+fn migrate_legacy_mod_profiles_for_game_profile(game_profile_id: &str) -> Result<(), String> { let current_game_profile_id = clean_profile_id(game_profile_id)?; for (folder, inferred_owner) in legacy_mod_profile_sources() { if !folder.exists() { continue; } let Ok(entries) = fs::read_dir(&folder) else { continue; }; for entry in entries.flatten() { let path = entry.path(); if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; } let Ok(contents) = fs::read_to_string(&path) else { continue; }; let Ok(profile) = serde_json::from_str::<ModProfile>(&contents) else { continue; }; let profile = normalize_mod_profile(profile, inferred_owner.as_deref()); let owner_folder = mod_profiles_dir_for_game_profile(&profile.game_profile_id)?; let target = mod_profile_file_path(&owner_folder, &profile); if !target.exists() { let _ = write_mod_profile_file(&owner_folder, &profile, false); } } } let _ = mod_profiles_dir_for_game_profile(UNASSIGNED_GAME_PROFILE_ID)?; let _ = mod_profiles_dir_for_game_profile(&current_game_profile_id)?; Ok(()) }
+fn set_active_mod_profile_for_game(game_profile_id: &str, mod_profile_id: Option<String>) -> Result<(), String> { let game_profile_id = clean_profile_id(game_profile_id)?; let mut settings = load_settings_internal(); if let Some(mod_profile_id) = mod_profile_id.and_then(|value| clean_optional_string(Some(value))) { settings.active_mod_profile_by_game_profile_id.insert(game_profile_id, mod_profile_id); } else { settings.active_mod_profile_by_game_profile_id.remove(&game_profile_id); } save_settings_internal(&settings) }
+fn legacy_mod_profiles_dir() -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join("profiles"))
+}
+
+#[tauri::command]
+fn list_mod_profiles(game_profile_id: String) -> Result<Vec<ModProfile>, String> {
+    let game_profile_id = clean_profile_id(&game_profile_id)?;
+    migrate_legacy_mod_profiles_for_game_profile(&game_profile_id)?;
+    let folder = mod_profiles_dir_for_game_profile(&game_profile_id)?;
+    fs::create_dir_all(&folder).map_err(|err| format!("Failed to create profiles folder: {}", err))?;
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&folder).map_err(|err| format!("Failed to read profiles folder: {}", err))? {
+        let entry = entry.map_err(|err| format!("Failed to read profile entry: {}", err))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+        let Ok(contents) = fs::read_to_string(&path) else { continue; };
+        if let Ok(profile) = serde_json::from_str::<ModProfile>(&contents) {
+            let profile = normalize_mod_profile(profile, Some(&game_profile_id));
+            if profile.game_profile_id == game_profile_id { profiles.push(profile); }
+        }
+    }
     profiles.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
     Ok(profiles)
 }
 
 #[tauri::command]
-fn save_current_mod_profile(name: String) -> Result<ModProfile, String> {
-    let profile_name = if name.trim().is_empty() {
-        format!("Profile {}", current_timestamp())
+fn save_current_mod_profile(name: String, game_profile_id: String) -> Result<ModProfile, String> {
+    let game_profile_id = clean_profile_id(&game_profile_id)?;
+    let profile_name = if name.trim().is_empty() { format!("Profile {}", current_timestamp()) } else { name.trim().to_string() };
+    let enabled_pak_files = if is_builtin_payday3_profile(Some(&game_profile_id)) {
+        let scan = scan_pak_mods_internal()?;
+        scan.pak_mods.into_iter().filter(|file| file.enabled).map(|file| enabled_name_from_disabled(&file.file_name)).collect::<Vec<_>>()
     } else {
-        name.trim().to_string()
+        Vec::new()
     };
-
-    let scan = scan_pak_mods_internal()?;
-    let enabled_pak_files = scan
-        .pak_mods
+    let enabled_receipt_ids = profile_installs::list_profile_receipts_internal(&game_profile_id)?
         .into_iter()
-        .filter(|file| file.enabled)
-        .map(|file| enabled_name_from_disabled(&file.file_name))
-        .collect::<Vec<_>>();
-
-    let paths = detect_payday3_paths_internal()
-        .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
-
-    let enabled_receipt_ids = list_install_receipts_internal()?
-        .into_iter()
-        .filter(|receipt| receipt_enabled_internal(&paths, receipt))
+        .filter(|receipt| receipt.enabled.unwrap_or(false))
         .map(|receipt| receipt.id)
         .collect::<Vec<_>>();
-
-    let profile = ModProfile {
-        id: sanitize_file_component(&profile_name),
-        name: profile_name.clone(),
-        created_unix: now_unix_seconds(),
-        enabled_pak_files,
-        enabled_receipt_ids,
-    };
-
-    let folder = mod_profiles_dir()?;
-    fs::create_dir_all(&folder)
-        .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
-
-    let path = folder.join(profile_file_name(&profile_name));
-    let contents = serde_json::to_string_pretty(&profile)
-        .map_err(|err| format!("Failed to serialize profile: {}", err))?;
-
-    fs::write(&path, contents)
-        .map_err(|err| format!("Failed to write profile: {}", err))?;
-
+    let profile = ModProfile { id: sanitize_file_component(&format!("{}-{}", profile_name, current_timestamp())), game_profile_id: game_profile_id.clone(), name: profile_name.clone(), created_unix: now_unix_seconds(), enabled_pak_files, enabled_receipt_ids, migration_state: None };
+    let folder = mod_profiles_dir_for_game_profile(&game_profile_id)?;
+    write_mod_profile_file(&folder, &profile, false)?;
+    set_active_mod_profile_for_game(&game_profile_id, Some(profile.id.clone()))?;
     Ok(profile)
 }
 
 #[tauri::command]
-fn apply_mod_profile(profile_id: String) -> Result<String, String> {
-    let profiles = list_mod_profiles()?;
-    let profile = profiles
-        .into_iter()
-        .find(|profile| profile.id == profile_id || profile.name == profile_id)
-        .ok_or_else(|| format!("Profile not found: {}", profile_id))?;
-
+fn apply_mod_profile(profile_id: String, game_profile_id: String) -> Result<String, String> {
+    let game_profile_id = clean_profile_id(&game_profile_id)?;
+    let profile = list_mod_profiles(game_profile_id.clone())?.into_iter().find(|profile| profile.id == profile_id || profile.name == profile_id).ok_or_else(|| format!("Profile not found for {}: {}", game_profile_id, profile_id))?;
+    if !is_builtin_payday3_profile(Some(&game_profile_id)) {
+        let receipt_changes = profile_installs::apply_profile_receipt_selection(&game_profile_id, &profile.enabled_receipt_ids)?;
+        set_active_mod_profile_for_game(&game_profile_id, Some(profile.id.clone()))?;
+        return Ok(format!("Applied profile '{}' for {}. Managed installs changed: {}.", profile.name, game_profile_id, receipt_changes));
+    }
     let scan = scan_pak_mods_internal()?;
     let mut enabled_paks = Vec::new();
     let mut disabled_paks = Vec::new();
-
     for file in scan.pak_mods {
         let enabled_name = enabled_name_from_disabled(&file.file_name);
-
-        if profile.enabled_pak_files.iter().any(|wanted| wanted.eq_ignore_ascii_case(&enabled_name)) {
-            enabled_paks.push(file.file_name);
-        } else {
-            disabled_paks.push(file.file_name);
-        }
+        if profile.enabled_pak_files.iter().any(|wanted| wanted.eq_ignore_ascii_case(&enabled_name)) { enabled_paks.push(file.file_name); } else { disabled_paks.push(file.file_name); }
     }
-
-    if !enabled_paks.is_empty() {
-        let _ = set_pak_mod_files_enabled(enabled_paks, true)?;
-    }
-
-    if !disabled_paks.is_empty() {
-        let _ = set_pak_mod_files_enabled(disabled_paks, false)?;
-    }
-
-    let receipts = list_install_receipts_internal()?;
+    if !enabled_paks.is_empty() { let _ = set_pak_mod_files_enabled(enabled_paks, true, Some(game_profile_id.clone()))?; }
+    if !disabled_paks.is_empty() { let _ = set_pak_mod_files_enabled(disabled_paks, false, Some(game_profile_id.clone()))?; }
     let mut receipt_changes = 0usize;
-
-    for receipt in receipts {
-        if receipt.files.iter().all(|file| receipt_is_pak_file_path(&file.relative_path)) {
-            continue;
-        }
-
+    for receipt in list_install_receipts_internal()? {
+        if receipt.files.iter().all(|file| receipt_is_pak_file_path(&file.relative_path)) { continue; }
         let should_enable = profile.enabled_receipt_ids.iter().any(|id| id == &receipt.id);
         set_receipt_mod_enabled_internal(&receipt.id, should_enable)?;
         receipt_changes += 1;
     }
-
-    Ok(format!(
-        "Applied profile '{}'. PAK enabled targets: {}. Managed installs touched: {}.",
-        profile.name,
-        profile.enabled_pak_files.len(),
-        receipt_changes
-    ))
+    set_active_mod_profile_for_game(&game_profile_id, Some(profile.id.clone()))?;
+    Ok(format!("Applied profile '{}'. PAK enabled targets: {}. Managed installs touched: {}.", profile.name, profile.enabled_pak_files.len(), receipt_changes))
 }
-
-
 
 #[tauri::command]
-fn delete_mod_profile(profile_id: String) -> Result<String, String> {
+fn delete_mod_profile(profile_id: String, game_profile_id: String) -> Result<String, String> {
+    let game_profile_id = clean_profile_id(&game_profile_id)?;
     let target = profile_id.trim();
-    if target.is_empty() {
-        return Err("Profile id is required.".to_string());
-    }
-
-    let folder = mod_profiles_dir()?;
-    fs::create_dir_all(&folder)
-        .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
-
+    if target.is_empty() { return Err("Profile id is required.".to_string()); }
+    let folder = mod_profiles_dir_for_game_profile(&game_profile_id)?;
+    fs::create_dir_all(&folder).map_err(|err| format!("Failed to create profiles folder: {}", err))?;
     let mut removed = 0usize;
     let mut matched_name = None::<String>;
-
-    for entry in fs::read_dir(&folder)
-        .map_err(|err| format!("Failed to read profiles folder: {}", err))?
-    {
+    let mut removed_active = false;
+    for entry in fs::read_dir(&folder).map_err(|err| format!("Failed to read profiles folder: {}", err))? {
         let entry = entry.map_err(|err| format!("Failed to read profile entry: {}", err))?;
         let path = entry.path();
-
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-
-        let file_stem_matches = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .map(|stem| stem.eq_ignore_ascii_case(target) || stem.eq_ignore_ascii_case(&sanitize_file_component(target)))
-            .unwrap_or(false);
-
-        let profile_matches = fs::read_to_string(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_str::<ModProfile>(&contents).ok())
-            .map(|profile| {
-                let matches = profile.id.eq_ignore_ascii_case(target)
-                    || profile.name.eq_ignore_ascii_case(target)
-                    || sanitize_file_component(&profile.name).eq_ignore_ascii_case(target);
-
-                if matches {
-                    matched_name = Some(profile.name);
-                }
-
-                matches
-            })
-            .unwrap_or(false);
-
-        if file_stem_matches || profile_matches {
-            fs::remove_file(&path)
-                .map_err(|err| format!("Failed to delete profile {}: {}", path.display(), err))?;
-            removed += 1;
-        }
+        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+        let profile_matches = fs::read_to_string(&path).ok().and_then(|contents| serde_json::from_str::<ModProfile>(&contents).ok()).map(|profile| {
+            let profile = normalize_mod_profile(profile, Some(&game_profile_id));
+            let matches = profile.game_profile_id == game_profile_id && (profile.id.eq_ignore_ascii_case(target) || profile.name.eq_ignore_ascii_case(target) || sanitize_file_component(&profile.name).eq_ignore_ascii_case(target));
+            if matches { matched_name = Some(profile.name); removed_active = load_settings_internal().active_mod_profile_by_game_profile_id.get(&game_profile_id).map(|id| id.eq_ignore_ascii_case(&profile.id)).unwrap_or(false); }
+            matches
+        }).unwrap_or(false);
+        if profile_matches { fs::remove_file(&path).map_err(|err| format!("Failed to delete profile {}: {}", path.display(), err))?; removed += 1; }
     }
-
-    if removed == 0 {
-        return Err(format!("Profile not found: {}", target));
-    }
-
-    Ok(format!(
-        "Deleted profile '{}' ({} file{} removed).",
-        matched_name.unwrap_or_else(|| target.to_string()),
-        removed,
-        if removed == 1 { "" } else { "s" }
-    ))
+    if removed == 0 { return Err(format!("Profile not found for {}: {}", game_profile_id, target)); }
+    if removed_active { set_active_mod_profile_for_game(&game_profile_id, None)?; }
+    Ok(format!("Deleted profile '{}' ({} file{} removed).", matched_name.unwrap_or_else(|| target.to_string()), removed, if removed == 1 { "" } else { "s" }))
 }
-
 fn list_install_receipts_internal() -> Result<Vec<InstallReceipt>, String> {
     let receipt_root = receipts_dir()?;
     fs::create_dir_all(&receipt_root)
@@ -4634,8 +7175,9 @@ fn list_install_receipts_internal() -> Result<Vec<InstallReceipt>, String> {
 }
 
 #[tauri::command]
-fn list_install_receipts() -> Result<Vec<InstallReceipt>, String> {
-    list_install_receipts_internal()
+fn list_install_receipts(profile_id: Option<String>) -> Result<Vec<InstallReceipt>, String> {
+    let profile_id = profile_id.unwrap_or_else(|| BUILTIN_PAYDAY3_PROFILE_ID.to_string());
+    profile_installs::list_profile_receipts_internal(&profile_id)
 }
 
 
@@ -4661,6 +7203,10 @@ fn launch_steam_payday3_modded() -> Result<String, String> {
 }
 
 fn launch_payday3_vanilla_direct(paths: &PaydayPaths) -> Result<String, String> {
+    launch_payday3_direct(paths, "vanilla")
+}
+
+fn launch_payday3_direct(paths: &PaydayPaths, mode: &str) -> Result<String, String> {
     let candidates = payday_exe_candidates(paths);
     let mut checked = Vec::new();
 
@@ -4682,8 +7228,8 @@ fn launch_payday3_vanilla_direct(paths: &PaydayPaths) -> Result<String, String> 
             .map_err(|err| format!("Failed to launch PAYDAY 3 vanilla executable {}: {}", exe.display(), err))?;
 
         return Ok(format!(
-            "Launched PAYDAY 3 directly from {} for vanilla mode. This avoids Steam Launch Options like -fileopenlog.",
-            exe.display()
+            "Launched PAYDAY 3 directly from {} for {} mode without -fileopenlog.",
+            exe.display(), mode
         ));
     }
 
@@ -4715,6 +7261,7 @@ fn payday_process_running() -> bool {
     let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
     let running = [
         "payday3client-win64-shipping.exe",
+        "payday3-wingdk-shipping.exe",
         "payday3-win64-shipping.exe",
         "payday3_win64_shipping.exe",
         "payday3client.exe",
@@ -4777,6 +7324,7 @@ fn start_vanilla_restore_watcher() {
 
 fn payday_exe_candidates(paths: &PaydayPaths) -> Vec<PathBuf> {
     vec![
+        paths.win64.join("PAYDAY3-WinGDK-Shipping.exe"),
         paths.win64.join("PAYDAY3Client-Win64-Shipping.exe"),
         paths.win64.join("PAYDAY3-Win64-Shipping.exe"),
         paths.win64.join("PAYDAY3Client.exe"),
@@ -4796,6 +7344,9 @@ fn launch_payday3_with_mode(modded: bool) -> Result<String, String> {
         } else {
             "No pending vanilla temp session needed restoring.".to_string()
         };
+        if payday_uses_ue5_layout(&paths) {
+            return Ok(format!("{} {}", restore_message, launch_payday3_direct(&paths, "UE5 modded")?));
+        }
         let options_message = ensure_steam_payday3_fileopenlog_launch_option(&paths)?;
         let launch_message = launch_steam_payday3_modded()?;
 
@@ -5324,7 +7875,149 @@ fn launch_payday3_modded() -> Result<String, String> {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<String, String> {
+    if load_settings_internal().external_link_behavior == "block" {
+        return Err("External links are blocked by Settings.".to_string());
+    }
+
     open_http_url(&url)
+}
+
+fn browser_window_label(value: &str) -> String {
+    let mut label = String::from("tsuki-browser");
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            label.push(ch);
+        } else if ch == '.' || ch.is_whitespace() {
+            label.push('_');
+        }
+        if label.len() >= 96 {
+            break;
+        }
+    }
+    label
+}
+
+#[tauri::command]
+async fn open_embedded_browser_window(
+    app: tauri::AppHandle,
+    label: String,
+    url: String,
+    title: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|err| format!("Embedded browser URL is invalid: {}", err))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Embedded browser only supports http:// and https:// URLs.".to_string());
+    }
+
+    let clean_label = browser_window_label(&label);
+    let display_url = parsed.to_string();
+    let requested_width = width.unwrap_or(960.0);
+    let requested_height = height.unwrap_or(620.0);
+    if requested_width < 320.0 || requested_height < 240.0 {
+        return Err("Restore or enlarge the Tsuki window before opening the embedded browser.".to_string());
+    }
+    let position = tauri::LogicalPosition::new(x.unwrap_or(0.0), y.unwrap_or(0.0));
+    let size = tauri::LogicalSize::new(requested_width, requested_height);
+
+    if let Some(webview) = app.get_webview(&clean_label) {
+        webview
+            .navigate(parsed)
+            .map_err(|err| format!("Failed to navigate embedded browser: {}", err))?;
+        webview
+            .set_position(position)
+            .map_err(|err| format!("Failed to position embedded browser: {}", err))?;
+        webview
+            .set_size(size)
+            .map_err(|err| format!("Failed to resize embedded browser: {}", err))?;
+        webview
+            .show()
+            .map_err(|err| format!("Failed to show embedded browser: {}", err))?;
+        webview
+            .set_focus()
+            .map_err(|err| format!("Failed to focus embedded browser: {}", err))?;
+        return Ok(format!("Embedded browser focused; navigation started for {}.", display_url));
+    }
+
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| "The main Tsuki window is unavailable.".to_string())?;
+    let _ = title;
+    let webview = main_window
+        .add_child(
+            tauri::webview::WebviewBuilder::new(clean_label, tauri::WebviewUrl::External(parsed)),
+            position,
+            size,
+        )
+        .map_err(|err| format!("Failed to create embedded browser: {}", err))?;
+    webview
+        .set_focus()
+        .map_err(|err| format!("Failed to focus embedded browser: {}", err))?;
+
+    Ok(format!("Embedded browser opened; navigation started for {}.", display_url))
+}
+
+#[tauri::command]
+fn is_embedded_browser_window_open(app: tauri::AppHandle, label: String) -> bool {
+    app.get_webview(&browser_window_label(&label)).is_some()
+}
+
+#[tauri::command]
+fn get_embedded_browser_status(app: tauri::AppHandle, label: String) -> EmbeddedBrowserStatus {
+    let Some(webview) = app.get_webview(&browser_window_label(&label)) else {
+        return EmbeddedBrowserStatus { open: false, url: None };
+    };
+    EmbeddedBrowserStatus {
+        open: true,
+        url: webview.url().ok().map(|url| url.to_string()),
+    }
+}
+
+#[tauri::command]
+fn set_embedded_browser_bounds(
+    app: tauri::AppHandle,
+    label: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    visible: bool,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(&browser_window_label(&label))
+        .ok_or_else(|| "This source's embedded browser is not open.".to_string())?;
+    webview
+        .set_position(tauri::LogicalPosition::new(x, y))
+        .map_err(|err| format!("Failed to position embedded browser: {}", err))?;
+    webview
+        .set_size(tauri::LogicalSize::new(width.max(320.0), height.max(240.0)))
+        .map_err(|err| format!("Failed to resize embedded browser: {}", err))?;
+    if visible {
+        webview.show().map_err(|err| format!("Failed to show embedded browser: {}", err))?;
+    } else {
+        webview.hide().map_err(|err| format!("Failed to hide embedded browser: {}", err))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn control_embedded_browser_window(app: tauri::AppHandle, label: String, action: String) -> Result<String, String> {
+    let clean_label = browser_window_label(&label);
+    let webview = app
+        .get_webview(&clean_label)
+        .ok_or_else(|| "This source's embedded browser is not open.".to_string())?;
+    match action.trim().to_ascii_lowercase().as_str() {
+        "back" => webview.eval("history.back()").map_err(|err| format!("Browser Back failed: {}", err))?,
+        "forward" => webview.eval("history.forward()").map_err(|err| format!("Browser Forward failed: {}", err))?,
+        "refresh" => webview.eval("location.reload()").map_err(|err| format!("Browser Refresh failed: {}", err))?,
+        "close" => webview.close().map_err(|err| format!("Browser Close failed: {}", err))?,
+        _ => return Err(format!("Unknown browser action: {}", action)),
+    }
+    Ok(format!("Browser {} completed.", action.trim().to_ascii_lowercase()))
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
@@ -5542,6 +8235,192 @@ fn get_app_settings() -> Result<AppSettings, String> {
     ensure_app_data_dirs()?;
     Ok(load_settings_internal())
 }
+#[tauri::command]
+fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    let normalized = normalize_app_settings(settings);
+    save_settings_internal(&normalized)?;
+    Ok(load_settings_internal())
+}
+
+#[tauri::command]
+fn get_profile_settings(profile_id: String) -> Result<ProfileSettings, String> {
+    profile_settings_file_path(&profile_id)?;
+    Ok(load_profile_settings_internal(&profile_id))
+}
+
+#[tauri::command]
+fn save_profile_settings(profile_id: String, settings: ProfileSettings) -> Result<ProfileSettings, String> {
+    save_profile_settings_internal(&profile_id, &settings)
+}
+
+#[tauri::command]
+fn reset_profile_settings(profile_id: String, scope: String) -> Result<ProfileSettings, String> {
+    profile_settings_file_path(&profile_id)?;
+    let mut settings = load_profile_settings_internal(&profile_id);
+    let defaults = normalize_profile_settings(ProfileSettings::default(), &profile_id);
+    reset_profile_settings_scope(&mut settings, &defaults, &scope)?;
+    save_profile_settings_internal(&profile_id, &settings)
+}
+
+#[tauri::command]
+fn open_profile_settings_folder() -> Result<String, String> {
+    open_folder_in_explorer(&profile_settings_dir()?, "profile settings")
+}
+
+#[tauri::command]
+fn open_game_profile_data_folder(profile_id: String) -> Result<String, String> {
+    open_folder_in_explorer(&ensure_profile_data_dirs(&clean_profile_id(&profile_id)?)?, "game profile")
+}
+
+#[tauri::command]
+fn export_app_settings_to_path(path: String) -> Result<String, String> {
+    let target = PathBuf::from(path.trim());
+    if target.as_os_str().is_empty() {
+        return Err("Choose a settings export path first.".to_string());
+    }
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Failed to create settings export folder: {}", err))?;
+        }
+    }
+
+    let settings = load_settings_internal();
+    let contents = serde_json::to_string_pretty(&settings)
+        .map_err(|err| format!("Failed to serialize settings export: {}", err))?;
+    fs::write(&target, contents).map_err(|err| format!("Failed to export settings: {}", err))?;
+    Ok(format!("Exported settings to {}", target.display()))
+}
+
+#[tauri::command]
+fn import_app_settings_from_path(path: String) -> Result<AppSettings, String> {
+    let source = PathBuf::from(path.trim());
+    let contents = fs::read_to_string(&source)
+        .map_err(|err| format!("Failed to read settings import {}: {}", source.display(), err))?;
+    let settings = serde_json::from_str::<AppSettings>(&contents)
+        .map(normalize_app_settings)
+        .map_err(|err| format!("Failed to parse settings import: {}", err))?;
+    save_settings_internal(&settings)?;
+    Ok(load_settings_internal())
+}
+
+fn reset_general_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.startup_destination = defaults.startup_destination.clone();
+    settings.notifications_enabled = defaults.notifications_enabled;
+    settings.language = defaults.language.clone();
+    settings.default_launch_action = defaults.default_launch_action.clone();
+    settings.confirm_destructive_actions = defaults.confirm_destructive_actions;
+    settings.auto_update_checks = defaults.auto_update_checks;
+    settings.remember_window_state = defaults.remember_window_state;
+    settings.window_state = defaults.window_state.clone();
+}
+
+fn reset_appearance_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.theme_id = defaults.theme_id.clone();
+    settings.appearance_mode = defaults.appearance_mode.clone();
+    settings.accent_color = defaults.accent_color.clone();
+    settings.interface_density = defaults.interface_density.clone();
+    settings.animations_enabled = defaults.animations_enabled;
+    settings.transparency_enabled = defaults.transparency_enabled;
+    settings.font_scale = defaults.font_scale;
+    settings.thumbnail_size = defaults.thumbnail_size;
+    settings.sidebar_density = defaults.sidebar_density.clone();
+}
+
+fn reset_download_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.download_folder = defaults.download_folder.clone();
+    settings.simultaneous_downloads = defaults.simultaneous_downloads;
+    settings.download_retry_count = defaults.download_retry_count;
+    settings.download_bandwidth_limit_mb_s = defaults.download_bandwidth_limit_mb_s;
+    settings.verify_hashes = defaults.verify_hashes;
+    settings.keep_downloaded_archives = defaults.keep_downloaded_archives;
+}
+
+fn reset_browser_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.browser_mode = defaults.browser_mode.clone();
+    settings.external_link_behavior = defaults.external_link_behavior.clone();
+    settings.remember_website_logins = defaults.remember_website_logins;
+    settings.intercept_supported_downloads = defaults.intercept_supported_downloads;
+    settings.keep_embedded_browsing_in_sites = defaults.keep_embedded_browsing_in_sites;
+    settings.protect_wrong_game_downloads = defaults.protect_wrong_game_downloads;
+    settings.remember_last_website_per_profile = defaults.remember_last_website_per_profile;
+}
+
+fn reset_profile_default_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.profile_default_sources = defaults.profile_default_sources.clone();
+    settings.profile_default_dependency_setup = defaults.profile_default_dependency_setup.clone();
+    settings.profile_default_backup_behavior = defaults.profile_default_backup_behavior.clone();
+    settings.profile_default_installation_flow = defaults.profile_default_installation_flow.clone();
+    settings.profile_default_browser_mode = defaults.profile_default_browser_mode.clone();
+    settings.profile_default_index_behavior = defaults.profile_default_index_behavior.clone();
+}
+
+fn reset_update_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.app_update_manifest_url = defaults.app_update_manifest_url.clone();
+    settings.update_channel = defaults.update_channel.clone();
+    settings.profile_update_checks = defaults.profile_update_checks;
+    settings.dependency_update_checks = defaults.dependency_update_checks;
+    settings.index_update_checks = defaults.index_update_checks;
+    settings.ignored_versions = defaults.ignored_versions.clone();
+}
+
+fn reset_mod_index_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.source_index_v2_remote_enabled = defaults.source_index_v2_remote_enabled;
+    settings.source_index_v2_remote_url = defaults.source_index_v2_remote_url.clone();
+    settings.index_overnight = defaults.index_overnight;
+    settings.index_pause_while_game_running = defaults.index_pause_while_game_running;
+    settings.index_pause_on_battery = defaults.index_pause_on_battery;
+    settings.index_build_mode = defaults.index_build_mode.clone();
+    settings.index_bandwidth_limit_mb_s = defaults.index_bandwidth_limit_mb_s;
+    settings.index_temp_storage_limit_gb = defaults.index_temp_storage_limit_gb;
+    settings.index_remote_behavior = defaults.index_remote_behavior.clone();
+}
+
+fn reset_advanced_settings(settings: &mut AppSettings, defaults: &AppSettings) {
+    settings.developer_mode = defaults.developer_mode;
+    settings.verbose_logging = defaults.verbose_logging;
+    settings.experimental_features = defaults.experimental_features;
+}
+
+#[tauri::command]
+fn reset_app_settings(scope: String) -> Result<AppSettings, String> {
+    let mut settings = load_settings_internal();
+    let defaults = AppSettings::default();
+
+    match scope.trim() {
+        "general" => reset_general_settings(&mut settings, &defaults),
+        "appearance" => reset_appearance_settings(&mut settings, &defaults),
+        "accounts" => {
+            settings.modworkshop_api_key = defaults.modworkshop_api_key.clone();
+            settings.nexus_api_key = defaults.nexus_api_key.clone();
+            settings.show_age_restricted_nexus = defaults.show_age_restricted_nexus;
+        }
+        "downloads" => reset_download_settings(&mut settings, &defaults),
+        "browser" => reset_browser_settings(&mut settings, &defaults),
+        "profiles" => reset_profile_default_settings(&mut settings, &defaults),
+        "storage" => settings.keep_uninstalled_mods = defaults.keep_uninstalled_mods,
+        "updates" => reset_update_settings(&mut settings, &defaults),
+        "modIndex" | "mod-index" => reset_mod_index_settings(&mut settings, &defaults),
+        "advanced" => reset_advanced_settings(&mut settings, &defaults),
+        "all" => {
+            let game_path = settings.game_path.clone();
+            let current_game_profile_id = settings.current_game_profile_id.clone();
+            let active_game_profile_id = settings.active_game_profile_id.clone();
+            let active_mod_profile_by_game_profile_id = settings.active_mod_profile_by_game_profile_id.clone();
+            settings = defaults;
+            settings.game_path = game_path;
+            settings.current_game_profile_id = current_game_profile_id;
+            settings.active_game_profile_id = active_game_profile_id;
+            settings.active_mod_profile_by_game_profile_id = active_mod_profile_by_game_profile_id;
+        }
+        other => return Err(format!("Unknown settings reset scope: {}", other)),
+    }
+
+    let normalized = normalize_app_settings(settings);
+    save_settings_internal(&normalized)?;
+    Ok(load_settings_internal())
+}
 
 #[tauri::command]
 fn save_game_path(game_path: String) -> Result<String, String> {
@@ -5575,33 +8454,18 @@ fn clear_game_path() -> Result<String, String> {
 
 #[tauri::command]
 fn save_theme(theme_id: String) -> Result<String, String> {
-    let allowed = [
-        "moonveil",
-        "neon-rift",
-        "aqua-ghost",
-        "basic-dark",
-        "basic-light",
-        "midnight",
-        "crimson-noir",
-        "solar-byte",
-        "deep-space",
-        "sakura-night",
-        "void-rose",
-        "solar-dusk",
-        "mono-eclipse",
-    ];
-
-    if !allowed.contains(&theme_id.as_str()) {
+    let trimmed = theme_id.trim();
+    let normalized = normalize_theme_id(trimmed);
+    if normalized == DEFAULT_THEME_ID && trimmed != DEFAULT_THEME_ID && trimmed != "basic-light" {
         return Err(format!("Unknown theme: {}", theme_id));
     }
 
     let mut settings = load_settings_internal();
-    settings.theme_id = theme_id.clone();
+    settings.theme_id = normalized.clone();
     save_settings_internal(&settings)?;
 
-    Ok(format!("Saved theme: {}", theme_id))
+    Ok(format!("Saved theme: {}", normalized))
 }
-
 
 #[tauri::command]
 fn save_source_api_keys(
@@ -5652,7 +8516,28 @@ fn detect_payday3_path() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn scan_pak_mods() -> Result<PakScanResult, String> {
+fn detect_active_profile_path(profile_id: Option<String>) -> Result<String, String> {
+    if is_builtin_payday3_profile(profile_id.as_deref()) { return detect_payday3_path(); }
+    let profile_id = clean_profile_id(profile_id.as_deref().unwrap_or_default())?;
+    let settings = load_profile_settings_internal(&profile_id);
+    let root = settings.game_root_override.as_deref().map(PathBuf::from).filter(|path| path.is_dir())
+        .or_else(|| profile_installs::detected_builtin_game_root(&profile_id));
+    let Some(root) = root else {
+        return Ok(format!("{} is not installed in a detected Steam library. Choose its game folder in Profile Settings if it is installed elsewhere.", profile_id));
+    };
+    let executable = resolve_profile_executable(&profile_id, root.to_str(), None, settings.executable_override);
+    match executable {
+        Some(executable) => Ok(format!("Detected {} with launch executable {}.", root.display(), executable)),
+        None => Ok(format!("Detected {}, but none of this profile's mapped launch executables exist there.", root.display())),
+    }
+}
+
+#[tauri::command]
+async fn scan_pak_mods(profile_id: Option<String>) -> Result<PakScanResult, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok(empty_profile_pak_scan_result());
+    }
+
     tauri::async_runtime::spawn_blocking(scan_pak_mods_internal)
         .await
         .map_err(|err| format!("PAK scan task failed: {}", err))?
@@ -5721,7 +8606,11 @@ fn resolve_installed_file_path(paths: &PaydayPaths, file_name: &str) -> Option<P
 }
 
 #[tauri::command]
-fn uninstall_pak_mod_files(file_names: Vec<String>) -> Result<String, String> {
+fn uninstall_pak_mod_files(file_names: Vec<String>, profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Err(profile_not_payday3_message(profile_id.as_deref()));
+    }
+
     if let Some(message) = runtime_mutation_locked_message() {
         return Err(message);
     }
@@ -5812,7 +8701,11 @@ fn uninstall_pak_mod_files(file_names: Vec<String>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_pak_mods_folder() -> Result<String, String> {
+fn open_pak_mods_folder(profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Err("This profile does not have a PAYDAY 3 ~mods folder. Configure a profile-specific install path before opening it.".to_string());
+    }
+
     let paths = detect_payday3_paths_internal()
         .ok_or_else(|| "Payday 3 not detected. Set a manual path in Settings.".to_string())?;
 
@@ -5844,8 +8737,9 @@ fn open_backups_folder() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_mod_profiles_folder() -> Result<String, String> {
-    let profile_root = mod_profiles_dir()?;
+fn open_mod_profiles_folder(game_profile_id: String) -> Result<String, String> {
+    let game_profile_id = clean_profile_id(&game_profile_id)?;
+    let profile_root = mod_profiles_dir_for_game_profile(&game_profile_id)?;
     fs::create_dir_all(&profile_root)
         .map_err(|err| format!("Failed to create profiles folder: {}", err))?;
 
@@ -5857,6 +8751,50 @@ fn open_mod_profiles_folder() -> Result<String, String> {
     Ok(format!("Opened {}", profile_root.display()))
 }
 
+fn open_folder_in_explorer(path: &Path, label: &str) -> Result<String, String> {
+    fs::create_dir_all(path)
+        .map_err(|err| format!("Failed to create {} folder {}: {}", label, path.display(), err))?;
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map_err(|err| format!("Failed to open {} folder: {}", label, err))?;
+    Ok(format!("Opened {}", path.display()))
+}
+
+#[tauri::command]
+fn open_downloads_folder() -> Result<String, String> {
+    open_folder_in_explorer(&downloads_cache_dir()?, "downloads")
+}
+
+#[tauri::command]
+fn open_extraction_cache_folder() -> Result<String, String> {
+    open_folder_in_explorer(&extraction_cache_dir()?, "extraction cache")
+}
+
+#[tauri::command]
+fn open_receipts_folder() -> Result<String, String> {
+    open_folder_in_explorer(&receipts_dir()?, "receipts")
+}
+
+#[tauri::command]
+fn open_indexes_folder() -> Result<String, String> {
+    open_folder_in_explorer(&cache_dir()?, "indexes")
+}
+
+#[tauri::command]
+fn open_uninstalled_folder() -> Result<String, String> {
+    open_folder_in_explorer(&uninstalled_dir()?, "recovery storage")
+}
+
+#[tauri::command]
+fn open_logs_folder() -> Result<String, String> {
+    open_folder_in_explorer(&app_data_dir()?.join("logs"), "logs")
+}
+
+#[tauri::command]
+fn open_thumbnails_folder() -> Result<String, String> {
+    open_folder_in_explorer(&cache_dir()?.join("thumbnails"), "thumbnails")
+}
 fn directory_size_and_file_count(path: &Path) -> (u64, usize) {
     fn visit(path: &Path, size: &mut u64, count: &mut usize) {
         let Ok(entries) = fs::read_dir(path) else {
@@ -5909,12 +8847,25 @@ fn cache_stats_internal() -> Result<CacheStats, String> {
     let downloads_root = downloads_cache_dir()?;
     let extraction_root = extraction_cache_dir()?;
     let uninstalled_root = uninstalled_dir()?;
-    fs::create_dir_all(&downloads_root)
-        .map_err(|err| format!("Failed to create downloads cache folder: {}", err))?;
-    fs::create_dir_all(&extraction_root)
-        .map_err(|err| format!("Failed to create extraction cache folder: {}", err))?;
-    fs::create_dir_all(&uninstalled_root)
-        .map_err(|err| format!("Failed to create uninstalled storage folder: {}", err))?;
+    let receipts_root = receipts_dir()?;
+    let backups_root = backups_dir()?;
+    let logs_root = app_root.join("logs");
+    let thumbnails_root = cache_root.join("thumbnails");
+    let indexes_root = cache_root.clone();
+
+    for folder in [
+        &cache_root,
+        &downloads_root,
+        &extraction_root,
+        &uninstalled_root,
+        &receipts_root,
+        &backups_root,
+        &logs_root,
+        &thumbnails_root,
+    ] {
+        fs::create_dir_all(folder)
+            .map_err(|err| format!("Failed to create storage folder {}: {}", folder.display(), err))?;
+    }
 
     let mut download_size = 0u64;
     let mut download_count = 0usize;
@@ -5926,6 +8877,21 @@ fn cache_stats_internal() -> Result<CacheStats, String> {
 
     let (extraction_size, _) = directory_size_and_file_count(&extraction_root);
     let (uninstalled_size, _) = directory_size_and_file_count(&uninstalled_root);
+    let (receipts_size, receipt_count) = directory_size_and_file_count(&receipts_root);
+    let (backups_size, backup_count) = directory_size_and_file_count(&backups_root);
+    let (logs_size, log_count) = directory_size_and_file_count(&logs_root);
+    let (thumbnails_size, thumbnail_count) = directory_size_and_file_count(&thumbnails_root);
+
+    let mut indexes_size = 0u64;
+    let mut index_file_count = 0usize;
+    for file in [source_index_file_path()?, hash_cache_file_path()?] {
+        if let Ok(metadata) = fs::metadata(&file) {
+            if metadata.is_file() {
+                indexes_size = indexes_size.saturating_add(metadata.len());
+                index_file_count += 1;
+            }
+        }
+    }
 
     Ok(CacheStats {
         app_data_path: app_root.display().to_string(),
@@ -5933,16 +8899,33 @@ fn cache_stats_internal() -> Result<CacheStats, String> {
         download_cache_path: downloads_root.display().to_string(),
         extraction_cache_path: extraction_root.display().to_string(),
         uninstalled_path: uninstalled_root.display().to_string(),
+        receipts_path: receipts_root.display().to_string(),
+        indexes_path: indexes_root.display().to_string(),
+        backups_path: backups_root.display().to_string(),
+        logs_path: logs_root.display().to_string(),
+        thumbnails_path: thumbnails_root.display().to_string(),
         download_cache_size_bytes: download_size,
         extraction_cache_size_bytes: extraction_size,
-        total_cache_size_bytes: download_size.saturating_add(extraction_size),
+        total_cache_size_bytes: download_size
+            .saturating_add(extraction_size)
+            .saturating_add(indexes_size)
+            .saturating_add(thumbnails_size),
         cached_download_count: download_count,
         temporary_extraction_folder_count: direct_child_directory_count(&extraction_root),
         uninstalled_storage_size_bytes: uninstalled_size,
         uninstalled_entry_count: direct_child_entry_count(&uninstalled_root),
+        receipts_size_bytes: receipts_size,
+        receipt_count,
+        indexes_size_bytes: indexes_size,
+        index_file_count,
+        backups_size_bytes: backups_size,
+        backup_count,
+        logs_size_bytes: logs_size,
+        log_count,
+        thumbnails_size_bytes: thumbnails_size,
+        thumbnail_count,
     })
 }
-
 #[tauri::command]
 fn get_cache_stats() -> Result<CacheStats, String> {
     cache_stats_internal()
@@ -6552,7 +9535,7 @@ fn run_health_check() -> Result<String, String> {
         None => lines.push("ⓘ Manual path not set. Auto-detection is being used.".to_string()),
     }
 
-    for folder in ["logs", "backups", "cache", "receipts", "profiles", "uninstalled", "diagnostics"] {
+    for folder in ["logs", "backups", "cache", "receipts", "profiles", "profile-settings", "profile-data", "game-profile-drafts", "uninstalled", "diagnostics"] {
         let path = app_root.join(folder);
         if path.exists() {
             lines.push(format!("✓ {} folder exists", folder));
@@ -6636,7 +9619,7 @@ struct InstallPreview {
     blocked: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ArchiveInspectEntry {
     archive_path: String,
@@ -6744,6 +9727,10 @@ struct SourceModSummary {
     game_id: Option<String>,
     name: String,
     author: Option<String>,
+    author_username: Option<String>,
+    author_user_id: Option<String>,
+    author_profile_url: Option<String>,
+    author_avatar_url: Option<String>,
     version: Option<String>,
     thumbnail_url: Option<String>,
     banner_url: Option<String>,
@@ -6753,6 +9740,13 @@ struct SourceModSummary {
     likes: Option<u64>,
     short_description: Option<String>,
     tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceCategory {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -6796,6 +9790,10 @@ struct SourceModDetail {
     game_id: Option<String>,
     name: String,
     author: Option<String>,
+    author_username: Option<String>,
+    author_user_id: Option<String>,
+    author_profile_url: Option<String>,
+    author_avatar_url: Option<String>,
     version: Option<String>,
     thumbnail_url: Option<String>,
     banner_url: Option<String>,
@@ -6809,21 +9807,66 @@ struct SourceModDetail {
     changelog: Option<String>,
     files: Vec<SourceFileItem>,
     images: Vec<SourceImageItem>,
+    dependencies: Vec<SourceDependencyItem>,
     comments: Vec<String>,
     bugs: Vec<String>,
     logs: Vec<String>,
     stats: Vec<SourceStatItem>,
 }
 
-fn json_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(text) = value.get(*key).and_then(|v| v.as_str()) {
-            if !text.trim().is_empty() {
-                return Some(text.to_string());
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceDependencyItem {
+    id: String,
+    name: String,
+    required: bool,
+    optional: bool,
+    source_kind: Option<String>,
+    game_domain: Option<String>,
+    numeric_game_id: Option<String>,
+    mod_id: Option<String>,
+    url: Option<String>,
+    notes: Option<String>,
+    version_constraint: Option<String>,
+}
+
+trait JsonStringKeys {
+    fn find_string(self, value: &serde_json::Value) -> Option<String>;
+}
+
+impl JsonStringKeys for &str {
+    fn find_string(self, value: &serde_json::Value) -> Option<String> {
+        value
+            .get(self)
+            .and_then(|entry| entry.as_str())
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToString::to_string)
+    }
+}
+
+impl JsonStringKeys for &[&str] {
+    fn find_string(self, value: &serde_json::Value) -> Option<String> {
+        for key in self {
+            if let Some(text) = value.get(*key).and_then(|entry| entry.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
+        None
     }
-    None
+}
+
+impl<const N: usize> JsonStringKeys for &[&str; N] {
+    fn find_string(self, value: &serde_json::Value) -> Option<String> {
+        self.as_slice().find_string(value)
+    }
+}
+
+fn json_string<K: JsonStringKeys>(value: &serde_json::Value, keys: K) -> Option<String> {
+    keys.find_string(value)
 }
 
 fn json_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
@@ -6941,7 +9984,7 @@ fn modworkshop_game_id_from_value(value: &serde_json::Value) -> Option<String> {
         .or_else(|| {
             value.get("category")
                 .and_then(|category| {
-                    json_modworkshop_id_string(category, &["game_id", "gameId", "game", "slug", "name"])
+                    json_modworkshop_id_string(category, &["game_id", "gameId", "game"])
                 })
         })
 }
@@ -7113,6 +10156,254 @@ fn first_media_url(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+fn dependency_id_fragment(value: &str) -> String {
+    let clean = value
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() { character.to_ascii_lowercase() } else { '-' })
+        .collect::<String>();
+    clean.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-")
+}
+
+fn dependency_identity_from_url(url: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let lower = url.to_lowercase();
+    if let Some(start) = lower.find("nexusmods.com/") {
+        let path = &url[start + "nexusmods.com/".len()..];
+        let parts = path.split(&['/', '?', '#'][..]).filter(|part| !part.is_empty()).collect::<Vec<_>>();
+        if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("mods") {
+            return (Some("nexus".to_string()), Some(parts[0].to_string()), Some(parts[2].to_string()));
+        }
+    }
+    if let Some(start) = lower.find("modworkshop.net/mod/") {
+        let rest = &url[start + "modworkshop.net/mod/".len()..];
+        let mod_id = rest.split(&['/', '?', '#'][..]).next().unwrap_or_default().trim();
+        if !mod_id.is_empty() {
+            return (Some("modworkshop".to_string()), None, Some(mod_id.to_string()));
+        }
+    }
+    if lower.contains("github.com/") {
+        return (Some("github".to_string()), None, None);
+    }
+    (Some("external".to_string()), None, None)
+}
+
+fn source_dependency_from_value(
+    value: &serde_json::Value,
+    index: usize,
+    fallback_source: Option<&str>,
+    fallback_game_domain: Option<&str>,
+    fallback_numeric_game_id: Option<&str>,
+) -> Option<SourceDependencyItem> {
+    let raw_text = value.as_str().map(str::trim).filter(|text| !text.is_empty());
+    let url = raw_text
+        .filter(|text| text.starts_with("http://") || text.starts_with("https://"))
+        .map(ToString::to_string)
+        .or_else(|| json_string(value, &["url", "link", "href", "page_url", "pageUrl", "external_url", "externalUrl", "download_url", "downloadUrl"]));
+    let name = json_string(value, &["name", "title", "dependency_name", "dependencyName", "mod_name", "modName", "label"])
+        .or_else(|| raw_text.filter(|text| !text.starts_with("http://") && !text.starts_with("https://")).map(ToString::to_string))
+        .or_else(|| url.as_ref().map(|_| "External dependency".to_string()))?;
+    let declared_source = json_string(value, &["source", "provider", "source_kind", "sourceKind"])
+        .map(|source| source.to_lowercase());
+    let (url_source, url_domain, url_mod_id) = url.as_deref().map(dependency_identity_from_url).unwrap_or((None, None, None));
+    let source_kind = url_source.or(declared_source).or_else(|| fallback_source.map(ToString::to_string));
+    let mod_id = json_id_string(value, &["mod_id", "modId", "dependency_mod_id", "dependencyModId", "id"])
+        .or(url_mod_id);
+    let game_domain = json_string(value, &["game_domain", "gameDomain", "domain"])
+        .or(url_domain)
+        .or_else(|| fallback_game_domain.map(ToString::to_string));
+    let numeric_game_id = json_id_string(value, &["game_id", "gameId", "numeric_game_id", "numericGameId"])
+        .or_else(|| fallback_numeric_game_id.map(ToString::to_string));
+    let optional = value.get("optional").and_then(|entry| entry.as_bool()).unwrap_or_else(|| {
+        json_string(value, &["type", "requirement_type", "requirementType", "status"])
+            .is_some_and(|kind| kind.to_lowercase().contains("optional"))
+    });
+    let required = value.get("required").and_then(|entry| entry.as_bool()).unwrap_or(!optional);
+    let notes = json_string(value, &["notes", "note", "description", "instructions"]);
+    let version_constraint = json_string(value, &["version_constraint", "versionConstraint", "minimum_version", "minimumVersion", "version"]);
+    let identity = mod_id.as_deref().or(url.as_deref()).unwrap_or(&name);
+    Some(SourceDependencyItem {
+        id: format!("source-dependency-{}-{}", dependency_id_fragment(identity), index),
+        name,
+        required,
+        optional,
+        source_kind,
+        game_domain,
+        numeric_game_id,
+        mod_id,
+        url,
+        notes,
+        version_constraint,
+    })
+}
+
+fn collect_source_dependencies_recursive(
+    value: &serde_json::Value,
+    output: &mut Vec<SourceDependencyItem>,
+    fallback_source: Option<&str>,
+    fallback_game_domain: Option<&str>,
+    fallback_numeric_game_id: Option<&str>,
+    depth: usize,
+) {
+    if depth > 8 { return; }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let normalized = key.to_lowercase().replace(['_', '-'], "");
+                let dependency_container = matches!(normalized.as_str(), "dependencies" | "dependency" | "requirements" | "requirement" | "requiredmods" | "requiredmod" | "offsite dependencies" | "offsitedependencies");
+                if dependency_container {
+                    match child {
+                        serde_json::Value::Array(items) => {
+                            for item in items {
+                                if let Some(dependency) = source_dependency_from_value(item, output.len(), fallback_source, fallback_game_domain, fallback_numeric_game_id) {
+                                    output.push(dependency);
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(dependency) = source_dependency_from_value(child, output.len(), fallback_source, fallback_game_domain, fallback_numeric_game_id) {
+                                output.push(dependency);
+                            }
+                        }
+                    }
+                } else if depth < 4 {
+                    collect_source_dependencies_recursive(child, output, fallback_source, fallback_game_domain, fallback_numeric_game_id, depth + 1);
+                }
+            }
+        }
+        serde_json::Value::Array(items) if depth < 4 => {
+            for item in items {
+                collect_source_dependencies_recursive(item, output, fallback_source, fallback_game_domain, fallback_numeric_game_id, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn source_dependencies_from_value(
+    value: &serde_json::Value,
+    fallback_source: Option<&str>,
+    fallback_game_domain: Option<&str>,
+    fallback_numeric_game_id: Option<&str>,
+) -> Vec<SourceDependencyItem> {
+    let mut dependencies = Vec::new();
+    collect_source_dependencies_recursive(value, &mut dependencies, fallback_source, fallback_game_domain, fallback_numeric_game_id, 0);
+    let mut seen = std::collections::BTreeSet::new();
+    dependencies.retain(|dependency| {
+        let identity = format!("{}|{}|{}", dependency.name.to_lowercase(), dependency.mod_id.as_deref().unwrap_or_default(), dependency.url.as_deref().unwrap_or_default());
+        seen.insert(identity)
+    });
+    dependencies
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceAuthorFields {
+    display_name: Option<String>,
+    username: Option<String>,
+    user_id: Option<String>,
+    profile_url: Option<String>,
+    avatar_url: Option<String>,
+}
+
+fn clean_author_value(value: Option<String>) -> Option<String> {
+    let text = value?.trim().to_string();
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("unknown")
+        || text.eq_ignore_ascii_case("unknown author")
+        || text.eq_ignore_ascii_case("null")
+        || text.eq_ignore_ascii_case("undefined")
+        || text.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(text)
+}
+
+fn nested_object<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+    for key in keys {
+        if let Some(child) = value.get(*key).filter(|child| child.is_object()) {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn modworkshop_user_profile_url(user_id: Option<&str>, username: Option<&str>) -> Option<String> {
+    user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("https://modworkshop.net/user/{}", value))
+        .or_else(|| {
+            username
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("https://modworkshop.net/user/{}", value))
+        })
+}
+
+fn modworkshop_user_avatar_url(user: &serde_json::Value) -> Option<String> {
+    let avatar = json_string(user, &["avatar", "avatar_url", "avatarUrl", "image", "image_url", "imageUrl"])?;
+    let avatar = avatar.trim();
+    if avatar.is_empty() {
+        return None;
+    }
+
+    if avatar.starts_with("http://") || avatar.starts_with("https://") {
+        return Some(avatar.to_string());
+    }
+
+    let prefix = if user
+        .get("avatar_has_thumb")
+        .or_else(|| user.get("avatarHasThumb"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        && !avatar.starts_with("thumbnail_")
+    {
+        "thumbnail_"
+    } else {
+        ""
+    };
+
+    Some(format!("https://storage.modworkshop.net/users/images/{}{}", prefix, avatar))
+}
+
+fn modworkshop_author_fields_from_value(value: &serde_json::Value) -> SourceAuthorFields {
+    let user = nested_object(value, &["author", "user", "submitter", "owner", "member", "last_user", "lastUser"]);
+    let display_name = clean_author_value(json_string(value, &[
+        "author",
+        "author_name",
+        "authorName",
+        "created_by",
+        "createdBy",
+        "submitter",
+        "owner",
+        "member",
+        "username",
+        "user_name",
+        "userName",
+    ]))
+    .or_else(|| user.and_then(|item| clean_author_value(json_string(item, &["display_name", "displayName", "name", "username", "unique_name", "uniqueName"]))));
+
+    let username = clean_author_value(
+        user.and_then(|item| json_string(item, &["unique_name", "uniqueName", "username", "name"]))
+            .or_else(|| json_string(value, &["author_username", "authorUsername", "username", "user_name", "userName"])),
+    );
+    let user_id = user
+        .and_then(|item| json_id_string(item, &["id", "user_id", "userId"]))
+        .or_else(|| json_id_string(value, &["user_id", "userId", "author_id", "authorId", "submitter_id", "submitterId"]));
+    let profile_url = user
+        .and_then(|item| json_string(item, &["profile_url", "profileUrl", "url"]))
+        .and_then(|url| absolutize_source_url("modworkshop", Some(url)))
+        .or_else(|| modworkshop_user_profile_url(user_id.as_deref(), username.as_deref()));
+    let avatar_url = user.and_then(modworkshop_user_avatar_url);
+
+    SourceAuthorFields {
+        display_name,
+        username,
+        user_id,
+        profile_url,
+        avatar_url,
+    }
+}
 
 fn strip_bbcode_tag_once(input: &str, tag_start: &str, tag_end: &str) -> String {
     input.replace(tag_start, "").replace(tag_end, "")
@@ -7261,7 +10552,7 @@ fn html_to_text(input: &str) -> String {
 
     prepared = prepared
         .replace("<p>", "")
-        .replace("<li>", "\n• ");
+        .replace("<li>", "\n- ");
 
     let mut output = String::new();
     let mut in_tag = false;
@@ -7401,6 +10692,7 @@ fn json_deep_find_string(value: &serde_json::Value, wanted_keys: &[&str], depth:
 
 fn extract_modworkshop_api_description(data: &serde_json::Value) -> Option<String> {
     json_string(data, &[
+        "desc",
         "description",
         "body",
         "content",
@@ -7413,7 +10705,7 @@ fn extract_modworkshop_api_description(data: &serde_json::Value) -> Option<Strin
     .or_else(|| {
         json_deep_find_string(
             data,
-            &["description", "body", "content", "details", "text", "summary"],
+            &["desc", "description", "body", "content", "details", "text", "summary"],
             5,
         )
     })
@@ -7447,6 +10739,95 @@ fn http_get_json(url: &str, api_key: Option<&str>) -> Result<serde_json::Value, 
 
     serde_json::from_str(&text)
         .map_err(|err| format!("Failed to parse JSON from {}: {}", url, err))
+}
+
+fn test_github_public_repository_sync(owner: Option<String>, repository: Option<String>) -> SourceTestConfigResult {
+    let requested_repository = owner.is_some() || repository.is_some();
+    let parsed = match (owner.as_deref(), repository.as_deref()) {
+        (Some(owner), Some(repository)) => github_repository_component(owner)
+            .zip(github_repository_component(repository)),
+        (None, None) => None,
+        _ => {
+            return SourceTestConfigResult {
+                status: "Failed".to_string(),
+                message: "GitHub owner and repository must be provided together.".to_string(),
+                user_message: None,
+                technical_details: None,
+                source_type: Some("github".to_string()),
+                reachable: false,
+                authenticated: false,
+                mapping_valid: false,
+                final_url: None,
+                http_status: None,
+            };
+        }
+    };
+
+    if requested_repository && parsed.is_none() {
+        return SourceTestConfigResult {
+            status: "Failed".to_string(),
+            message: "GitHub owner or repository contains unsupported characters.".to_string(),
+            user_message: None,
+            technical_details: None,
+            source_type: Some("github".to_string()),
+            reachable: false,
+            authenticated: false,
+            mapping_valid: false,
+            final_url: None,
+            http_status: None,
+        };
+    }
+
+    let (api_url, final_url, expected_full_name) = if let Some((owner, repository)) = parsed {
+        (
+            format!("https://api.github.com/repos/{}/{}", owner, repository),
+            Some(format!("https://github.com/{}/{}", owner, repository)),
+            Some(format!("{}/{}", owner, repository)),
+        )
+    } else {
+        ("https://api.github.com/rate_limit".to_string(), Some("https://api.github.com".to_string()), None)
+    };
+
+    match http_get_json_fast(&api_url, 15) {
+        Ok(value) => {
+            let resolved_name = json_string(&value, "full_name");
+            let detail = expected_full_name
+                .as_ref()
+                .map(|expected| format!("Public repository API resolved {} as {}.", expected, resolved_name.unwrap_or_else(|| expected.clone())))
+                .unwrap_or_else(|| "GitHub public API rate-limit endpoint responded successfully.".to_string());
+            SourceTestConfigResult {
+                status: "Connected".to_string(),
+                message: if expected_full_name.is_some() { "GitHub repository is reachable through the public API.".to_string() } else { "GitHub public API is reachable.".to_string() },
+                user_message: None,
+                technical_details: Some(format!("{} Endpoint: {}", detail, api_url)),
+                source_type: Some("github".to_string()),
+                reachable: true,
+                authenticated: false,
+                mapping_valid: true,
+                final_url,
+                http_status: Some(200),
+            }
+        }
+        Err(error) => SourceTestConfigResult {
+            status: "Failed".to_string(),
+            message: "GitHub public API probe failed.".to_string(),
+            user_message: Some(if expected_full_name.is_some() { "GitHub could not find or reach this public repository.".to_string() } else { "GitHub's public API could not be reached.".to_string() }),
+            technical_details: Some(error),
+            source_type: Some("github".to_string()),
+            reachable: false,
+            authenticated: false,
+            mapping_valid: true,
+            final_url,
+            http_status: None,
+        },
+    }
+}
+
+#[tauri::command]
+async fn test_github_public_repository(owner: Option<String>, repository: Option<String>) -> Result<SourceTestConfigResult, String> {
+    tauri::async_runtime::spawn_blocking(move || test_github_public_repository_sync(owner, repository))
+        .await
+        .map_err(|err| format!("GitHub public API task failed: {:?}", err))
 }
 
 
@@ -7824,7 +11205,7 @@ fn http_get_text(url: &str) -> Result<String, String> {
         .map_err(|err| format!("Failed to read response body: {}", err))?;
 
     if !status.is_success() {
-        return Err(format!("{} returned HTTP {}", url, status));
+        return Err(format!("{} returned HTTP {}: {}", url, status, text.chars().take(700).collect::<String>()));
     }
 
     Ok(text)
@@ -8188,6 +11569,10 @@ fn scrape_modworkshop_summary_from_listing(html: &str, id: &str) -> SourceModSum
         game_id: Some("payday-3".to_string()),
         name,
         author: None,
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: None,
         thumbnail_url: thumbnail.clone(),
         banner_url: thumbnail,
@@ -8229,6 +11614,49 @@ fn extract_modworkshop_html_description(html: &str) -> Option<String> {
     }
 
     None
+}
+
+fn modworkshop_dependencies_from_html(html: &str) -> Vec<SourceDependencyItem> {
+    let lower = html.to_lowercase();
+    let mut dependencies = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative) = lower[search_from..].find("<a") {
+        let start = search_from + relative;
+        let Some(tag_relative_end) = html[start..].find('>') else { break; };
+        let tag_end = start + tag_relative_end;
+        let Some(close_relative) = lower[tag_end + 1..].find("</a>") else { search_from = tag_end + 1; continue; };
+        let close = tag_end + 1 + close_relative;
+        let context_start = start.saturating_sub(500);
+        let context = &lower[context_start..start];
+        if context.contains("dependenc") || context.contains("requirement") || context.contains("requires") {
+            let tag = &html[start..=tag_end];
+            if let Some(raw_url) = html_attr(tag, "href") {
+                if let Some(url) = absolutize_source_url("modworkshop", Some(raw_url)) {
+                    let name = clean_html_text(&html[tag_end + 1..close]);
+                    if !name.is_empty() && name.len() <= 160 {
+                        let (source_kind, game_domain, mod_id) = dependency_identity_from_url(&url);
+                        dependencies.push(SourceDependencyItem {
+                            id: format!("source-dependency-{}-{}", dependency_id_fragment(mod_id.as_deref().unwrap_or(&name)), dependencies.len()),
+                            name,
+                            required: true,
+                            optional: false,
+                            source_kind,
+                            game_domain,
+                            numeric_game_id: None,
+                            mod_id,
+                            url: Some(url),
+                            notes: None,
+                            version_constraint: None,
+                        });
+                    }
+                }
+            }
+        }
+        search_from = close + 4;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    dependencies.retain(|dependency| seen.insert(format!("{}|{}", dependency.name.to_lowercase(), dependency.url.as_deref().unwrap_or_default())));
+    dependencies
 }
 
 fn scrape_modworkshop_detail_from_html(id: &str, html: &str) -> SourceModDetail {
@@ -8279,6 +11707,10 @@ fn scrape_modworkshop_detail_from_html(id: &str, html: &str) -> SourceModDetail 
         game_id: None,
         name,
         author: None,
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: None,
         thumbnail_url: thumbnail.clone(),
         banner_url: thumbnail,
@@ -8291,8 +11723,7 @@ fn scrape_modworkshop_detail_from_html(id: &str, html: &str) -> SourceModDetail 
     };
 
     let mut detail = source_detail_from_summary(summary, description, files, images);
-    detail.comments = vec!["Comments are not available from the current public parsed payload yet.".to_string()];
-    detail.bugs = vec!["ModWorkshop does not expose a Nexus-style bugs tab here.".to_string()];
+    detail.dependencies = modworkshop_dependencies_from_html(html);
     detail
 }
 
@@ -8374,6 +11805,10 @@ fn nexus_summary_from_graphql_node(node: &serde_json::Value) -> Option<SourceMod
         game_id: json_id_string(node, &["gameId", "game_id"]),
         name,
         author,
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: json_string(node, &["version", "latestVersion", "latest_file_version"]),
         thumbnail_url: thumbnail.clone(),
         banner_url: absolutize_source_url(
@@ -8432,31 +11867,46 @@ fn nexus_graphql_nodes_to_summaries(value: &serde_json::Value) -> Vec<SourceModS
     summaries
 }
 
+fn canonical_nexus_sort(sort: &str) -> &'static str {
+    match sort.trim().to_ascii_lowercase().as_str() {
+        "published_at" | "added" | "newest" => "added",
+        "bumped_at" | "updated" | "recent" => "updated",
+        "popular" | "downloads" => "downloads",
+        "liked" | "likes" => "liked",
+        "name" => "name",
+        _ => "updated",
+    }
+}
+
 fn nexus_graphql_sort_value(sort: &str) -> serde_json::Value {
     let direction = serde_json::json!({ "direction": "DESC" });
 
-    match sort {
+    match canonical_nexus_sort(sort) {
         "added" => serde_json::json!({ "createdAt": direction }),
-        "popular" | "downloads" => serde_json::json!({ "downloads": direction }),
+        "downloads" => serde_json::json!({ "downloads": direction }),
         "liked" => serde_json::json!({ "endorsements": direction }),
         "name" => serde_json::json!({ "name": { "direction": "ASC" } }),
         _ => serde_json::json!({ "updatedAt": direction }),
     }
 }
 
-fn nexus_graphql_payday3_filter() -> serde_json::Value {
+fn nexus_graphql_game_filter(game_domain: &str) -> serde_json::Value {
     // Nexus GraphQL docs: Query.mods accepts filter: ModsFilter, and
     // ModsFilter has gameDomainName: [BaseFilterValue!].
     serde_json::json!({
         "gameDomainName": [
-            { "value": "payday3", "op": "EQUALS" }
+            { "value": game_domain, "op": "EQUALS" }
         ]
     })
 }
 
-fn nexus_graphql_query_variants_for_page(sort: &str, page: u32, count: usize) -> Vec<(&'static str, serde_json::Value)> {
+fn nexus_graphql_payday3_filter() -> serde_json::Value {
+    nexus_graphql_game_filter("payday3")
+}
+
+fn nexus_graphql_query_variants_for_page_for_domain(game_domain: &str, sort: &str, page: u32, count: usize) -> Vec<(&'static str, serde_json::Value)> {
     let sort_value = nexus_graphql_sort_value(sort);
-    let filter_value = nexus_graphql_payday3_filter();
+    let filter_value = nexus_graphql_game_filter(game_domain);
     let safe_count = count.clamp(1, 60) as u32;
     let offset = page.saturating_sub(1).saturating_mul(safe_count);
 
@@ -8529,6 +11979,10 @@ fn nexus_graphql_query_variants_for_page(sort: &str, page: u32, count: usize) ->
     ]
 }
 
+fn nexus_graphql_query_variants_for_page(sort: &str, page: u32, count: usize) -> Vec<(&'static str, serde_json::Value)> {
+    nexus_graphql_query_variants_for_page_for_domain("payday3", sort, page, count)
+}
+
 fn url_encode_light(input: &str) -> String {
     let mut output = String::new();
 
@@ -8543,7 +11997,7 @@ fn url_encode_light(input: &str) -> String {
     output
 }
 
-fn fetch_nexus_graphql_search_mods(query_text: &str, api_key: &str) -> Result<Vec<SourceModSummary>, String> {
+fn fetch_nexus_graphql_search_mods_for_domain(query_text: &str, api_key: &str, game_domain: &str) -> Result<Vec<SourceModSummary>, String> {
     let query_text = query_text.trim();
     if query_text.len() < 2 {
         return Ok(Vec::new());
@@ -8554,7 +12008,7 @@ fn fetch_nexus_graphql_search_mods(query_text: &str, api_key: &str) -> Result<Ve
         "filter": [
             {
                 "gameDomainName": [
-                    { "value": "payday3", "op": "EQUALS" }
+                    { "value": game_domain, "op": "EQUALS" }
                 ]
             },
             {
@@ -8605,21 +12059,32 @@ fn fetch_nexus_graphql_search_mods(query_text: &str, api_key: &str) -> Result<Ve
     });
 
     let value = http_post_graphql(query, variables, Some(api_key))?;
-    Ok(nexus_sort_browser_summaries(nexus_graphql_nodes_to_summaries(&value), "updated"))
+    Ok(nexus_sort_browser_summaries(
+        nexus_graphql_nodes_to_summaries(&value)
+            .into_iter()
+            .map(|summary| force_nexus_game_summary(summary, game_domain))
+            .collect(),
+        "updated",
+    ))
 }
 
-fn fetch_nexus_website_search_mods(query: &str, sort: &str, allow_adult: bool) -> Result<Vec<SourceModSummary>, String> {
+fn fetch_nexus_graphql_search_mods(query_text: &str, api_key: &str) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_graphql_search_mods_for_domain(query_text, api_key, "payday3")
+}
+
+fn fetch_nexus_website_search_mods_for_domain(query: &str, sort: &str, allow_adult: bool, game_domain: &str) -> Result<Vec<SourceModSummary>, String> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let encoded = url_encode_light(query);
     let urls = vec![
-        format!("https://www.nexusmods.com/payday3/search/?gsearch={}&BH={}", encoded, if allow_adult { 1 } else { 0 }),
-        format!("https://www.nexusmods.com/payday3/search/?BH={}&gsearch={}", if allow_adult { 1 } else { 0 }, encoded),
+        format!("https://www.nexusmods.com/{}/search/?gsearch={}&BH={}", domain, encoded, if allow_adult { 1 } else { 0 }),
+        format!("https://www.nexusmods.com/{}/search/?BH={}&gsearch={}", domain, if allow_adult { 1 } else { 0 }, encoded),
     ];
 
     let mut ids = Vec::new();
 
     for url in urls {
         if let Ok(html) = http_get_text(&url) {
-            ids.extend(extract_nexus_ids_from_html(&html));
+            ids.extend(extract_nexus_ids_from_html_for_domain(&html, &domain));
         }
     }
 
@@ -8634,8 +12099,8 @@ fn fetch_nexus_website_search_mods(query: &str, sort: &str, allow_adult: bool) -
     let mut mods = Vec::new();
 
     for id in ids.into_iter().take(80) {
-        if let Ok(value) = http_get_json(&format!("https://api.nexusmods.com/v1/games/payday3/mods/{}.json", id), Some(api_key.as_str())) {
-            let summary = nexus_enrich_summary(nexus_summary_from_value(&value), api_key.as_str());
+        if let Ok(value) = http_get_json(&format!("https://api.nexusmods.com/v1/games/{}/mods/{}.json", domain, id), Some(api_key.as_str())) {
+            let summary = nexus_enrich_summary_for_domain(nexus_summary_from_value(&value), api_key.as_str(), &domain);
             if is_clean_nexus_summary_for_browser(&summary) {
                 mods.push(summary);
             }
@@ -8645,11 +12110,16 @@ fn fetch_nexus_website_search_mods(query: &str, sort: &str, allow_adult: bool) -
     Ok(nexus_sort_browser_summaries(mods, sort))
 }
 
-fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummary>, String> {
+fn fetch_nexus_website_search_mods(query: &str, sort: &str, allow_adult: bool) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_website_search_mods_for_domain(query, sort, allow_adult, "payday3")
+}
+
+fn search_nexus_mods_for_query_sync_for_domain(query: String, game_domain: String) -> Result<Vec<SourceModSummary>, String> {
     let query = query.trim().to_string();
     if query.len() < 2 {
         return Ok(Vec::new());
     }
+    let game_domain = clean_source_slug(&game_domain).ok_or_else(|| format!("Invalid Nexus game domain: {}", game_domain))?;
 
     let settings = load_settings_internal();
     let api_key = settings
@@ -8660,8 +12130,8 @@ fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummar
     let mut combined = Vec::<SourceModSummary>::new();
 
     // Search the Nexus PAYDAY 3 web route for IDs, then hydrate with REST details.
-    if let Ok(website) = fetch_nexus_website_search_mods(&query, "updated", settings.show_age_restricted_nexus) {
-        combined.extend(website.into_iter().map(|summary| nexus_enrich_summary(summary, api_key)));
+    if let Ok(website) = fetch_nexus_website_search_mods_for_domain(&query, "updated", settings.show_age_restricted_nexus, &game_domain) {
+        combined.extend(website.into_iter().map(|summary| nexus_enrich_summary_for_domain(summary, api_key, &game_domain)));
     }
 
     let compact_query = compact(&query);
@@ -8670,7 +12140,7 @@ fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummar
         .into_iter()
         .filter(|(_, record)| record.source.eq_ignore_ascii_case("nexus"))
         .map(|(_, record)| record.summary)
-        .filter(source_summary_is_payday3_safe)
+        .filter(|summary| source_summary_matches_nexus_domain(summary, &game_domain))
         .filter(|summary| {
             compact(&summary.name).contains(&compact_query)
                 || summary
@@ -8686,12 +12156,16 @@ fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummar
 
     // Optional GraphQL search is a helper only. If schema/auth changes, search still works.
     if combined.len() < 6 {
-        if let Ok(graphql) = fetch_nexus_graphql_search_mods(&query, api_key) {
+        if let Ok(graphql) = fetch_nexus_graphql_search_mods_for_domain(&query, api_key, &game_domain) {
             combined.extend(graphql);
         }
     }
 
-    combined.retain(source_summary_is_payday3_safe);
+    combined = combined
+        .into_iter()
+        .map(|summary| force_nexus_game_summary(summary, &game_domain))
+        .filter(|summary| source_summary_matches_nexus_domain(summary, &game_domain))
+        .collect();
     let mut results = nexus_sort_browser_summaries(nexus_dedupe_summaries(combined), "updated");
     results.sort_by(|a, b| score_search_result_for_query(b, &query).cmp(&score_search_result_for_query(a, &query)));
 
@@ -8699,9 +12173,17 @@ fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummar
     Ok(results.into_iter().take(80).collect())
 }
 
+fn search_nexus_mods_for_query_sync(query: String) -> Result<Vec<SourceModSummary>, String> {
+    search_nexus_mods_for_query_sync_for_domain(query, "payday3".to_string())
+}
+
 #[tauri::command]
-async fn search_nexus_mods_for_query(query: String) -> Result<Vec<SourceModSummary>, String> {
-    tauri::async_runtime::spawn_blocking(move || search_nexus_mods_for_query_sync(query))
+async fn search_nexus_mods_for_query(query: String, profile_id: Option<String>, source_id: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+    let source_config = source_config_for_profile_source(profile_id.as_deref(), source_id.as_deref());
+    let game_domain = nexus_domain_from_source_config(&source_config)
+        .ok_or_else(|| format!("Nexus search needs a Nexus domain or game page URL. Profile ID: {}.", profile_id.as_deref().unwrap_or("unknown")))?;
+
+    tauri::async_runtime::spawn_blocking(move || search_nexus_mods_for_query_sync_for_domain(query, game_domain))
         .await
         .map_err(|err| format!("Nexus search task failed: {:?}", err))?
 }
@@ -8711,20 +12193,23 @@ fn fetch_nexus_graphql_mods_page(sort: &str, api_key: &str) -> Result<Vec<Source
     fetch_nexus_graphql_mods_page_paged(sort, api_key, 1, 24)
 }
 
-fn fetch_nexus_graphql_mods_page_paged(
+fn fetch_nexus_graphql_mods_page_paged_for_domain(
+    game_domain: &str,
     sort: &str,
     api_key: &str,
     page: u32,
     count: usize,
 ) -> Result<Vec<SourceModSummary>, String> {
     let mut errors = Vec::new();
+    let game_domain = clean_source_slug(game_domain).ok_or_else(|| format!("Invalid Nexus game domain: {}", game_domain))?;
 
-    for (query, variables) in nexus_graphql_query_variants_for_page(sort, page.max(1), count) {
+    for (query, variables) in nexus_graphql_query_variants_for_page_for_domain(&game_domain, sort, page.max(1), count) {
         match http_post_graphql(query, variables, Some(api_key)) {
             Ok(value) => {
                 let summaries = nexus_graphql_nodes_to_summaries(&value)
                     .into_iter()
-                    .filter(source_summary_is_payday3_safe)
+                    .map(|summary| force_nexus_game_summary(summary, &game_domain))
+                    .filter(|summary| source_summary_matches_nexus_domain(summary, &game_domain))
                     .filter(is_clean_nexus_summary_for_browser)
                     .collect::<Vec<_>>();
 
@@ -8744,6 +12229,15 @@ fn fetch_nexus_graphql_mods_page_paged(
         "Nexus GraphQL browse failed. {}",
         errors.into_iter().take(2).collect::<Vec<_>>().join(" | ")
     ))
+}
+
+fn fetch_nexus_graphql_mods_page_paged(
+    sort: &str,
+    api_key: &str,
+    page: u32,
+    count: usize,
+) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_graphql_mods_page_paged_for_domain("payday3", sort, api_key, page, count)
 }
 
 fn nexus_graphql_detail_queries(game_id: &str, mod_id: &str) -> Vec<(&'static str, serde_json::Value)> {
@@ -8809,7 +12303,7 @@ fn fetch_nexus_graphql_mod_detail(game_id: &str, mod_id: &str, api_key: &str) ->
                     .map(|object| serde_json::Value::Object(object.clone()))
                     .unwrap_or_else(|| data.clone());
 
-                let summary = nexus_summary_from_graphql_node(&mod_object)
+                let summary = force_nexus_game_summary(nexus_summary_from_graphql_node(&mod_object)
                     .unwrap_or_else(|| SourceModSummary {
                         source: "nexus".to_string(),
                         source_id: mod_id.to_string(),
@@ -8817,6 +12311,10 @@ fn fetch_nexus_graphql_mod_detail(game_id: &str, mod_id: &str, api_key: &str) ->
                         game_id: Some(game_id.to_string()),
                         name: format!("Nexus Mod {}", mod_id),
                         author: None,
+                        author_username: None,
+                        author_user_id: None,
+                        author_profile_url: None,
+                        author_avatar_url: None,
                         version: None,
                         thumbnail_url: None,
                         banner_url: None,
@@ -8826,7 +12324,7 @@ fn fetch_nexus_graphql_mod_detail(game_id: &str, mod_id: &str, api_key: &str) ->
                         likes: None,
                         short_description: None,
                         tags: vec!["Nexus".to_string(), "Payday 3".to_string()],
-                    });
+                    }), game_id);
 
                 let description = json_string(&mod_object, &["description", "summary", "shortDescription"])
                     .map(|text| html_to_text(&text))
@@ -8854,7 +12352,13 @@ fn fetch_nexus_graphql_mod_detail(game_id: &str, mod_id: &str, api_key: &str) ->
                     .unwrap_or_default();
 
                 if !summary.name.starts_with("Nexus Mod ") {
-                    let detail = source_detail_from_summary(summary, description, Vec::new(), images);
+                    let mut detail = source_detail_from_summary(summary, description, Vec::new(), images);
+                    detail.dependencies = source_dependencies_from_value(
+                        &mod_object,
+                        Some("nexus"),
+                        detail.game_id.as_deref(),
+                        detail.game_id.as_deref(),
+                    );
                     return Ok(detail);
                 }
 
@@ -8884,6 +12388,10 @@ fn nexus_summary_from_value(item: &serde_json::Value) -> SourceModSummary {
         game_id: json_id_string(item, &["gameId", "game_id"]),
         name: raw_name.unwrap_or(fallback_name),
         author: json_string(item, &["author", "uploaded_by", "uploadedBy", "user", "username"]),
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: json_string(item, &["version", "latest_file_version", "latestFileVersion"]),
         thumbnail_url: absolutize_source_url("nexus", json_string(item, &[
             "picture_url",
@@ -8904,8 +12412,26 @@ fn nexus_summary_from_value(item: &serde_json::Value) -> SourceModSummary {
     }
 }
 
-fn nexus_detail_from_website(summary: &SourceModSummary) -> Option<SourceModSummary> {
-    let html = http_get_text(&format!("https://www.nexusmods.com/payday3/mods/{}", summary.source_id)).ok()?;
+fn force_nexus_game_summary(mut summary: SourceModSummary, game_domain: &str) -> SourceModSummary {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    if summary.source_id != "unknown" {
+        summary.page_url = Some(format!("https://www.nexusmods.com/{}/mods/{}", domain, summary.source_id));
+    }
+    if summary.game_id.as_deref().map(|value| value.trim().is_empty()).unwrap_or(true) {
+        summary.game_id = Some(domain.clone());
+    }
+    if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case("Nexus")) {
+        summary.tags.insert(0, "Nexus".to_string());
+    }
+    if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&domain)) {
+        summary.tags.push(domain);
+    }
+    summary
+}
+
+fn nexus_detail_from_website_for_domain(summary: &SourceModSummary, game_domain: &str) -> Option<SourceModSummary> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    let html = http_get_text(&format!("https://www.nexusmods.com/{}/mods/{}", domain, summary.source_id)).ok()?;
     let title = extract_meta_content(&html, "og:title")
         .or_else(|| extract_title_from_html(&html))
         .map(|text| clean_mod_name(&text));
@@ -8917,7 +12443,7 @@ fn nexus_detail_from_website(summary: &SourceModSummary) -> Option<SourceModSumm
         .or_else(|| extract_meta_content(&html, "description"))
         .map(|text| clean_mod_name(&clean_html_text(&text)));
 
-    Some(SourceModSummary {
+    Some(force_nexus_game_summary(SourceModSummary {
         source: summary.source.clone(),
         source_id: summary.source_id.clone(),
         uid: None,
@@ -8926,6 +12452,10 @@ fn nexus_detail_from_website(summary: &SourceModSummary) -> Option<SourceModSumm
             .filter(|name| !name.is_empty() && !name.starts_with("Nexus Mod "))
             .unwrap_or_else(|| summary.name.clone()),
         author: summary.author.clone(),
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: summary.version.clone(),
         thumbnail_url: thumbnail.clone().or_else(|| summary.thumbnail_url.clone()),
         banner_url: thumbnail.or_else(|| summary.banner_url.clone()),
@@ -8935,14 +12465,22 @@ fn nexus_detail_from_website(summary: &SourceModSummary) -> Option<SourceModSumm
         likes: summary.likes,
         short_description: description.or_else(|| summary.short_description.clone()),
         tags: summary.tags.clone(),
-    })
+    }, &domain))
 }
 
-fn extract_nexus_ids_from_html(html: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    let needles = ["/payday3/mods/", "nexusmods.com/payday3/mods/"];
+fn nexus_detail_from_website(summary: &SourceModSummary) -> Option<SourceModSummary> {
+    nexus_detail_from_website_for_domain(summary, "payday3")
+}
 
-    for needle in needles {
+fn extract_nexus_ids_from_html_for_domain(html: &str, game_domain: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    let needles = [
+        format!("/{}/mods/", domain),
+        format!("nexusmods.com/{}/mods/", domain),
+    ];
+
+    for needle in needles.iter() {
         let mut search_start = 0;
 
         while let Some(pos) = html[search_start..].find(needle) {
@@ -8968,6 +12506,10 @@ fn extract_nexus_ids_from_html(html: &str) -> Vec<String> {
     }
 
     ids
+}
+
+fn extract_nexus_ids_from_html(html: &str) -> Vec<String> {
+    extract_nexus_ids_from_html_for_domain(html, "payday3")
 }
 
 fn extract_anchor_text_near(html: &str, center: usize) -> Option<String> {
@@ -9012,8 +12554,9 @@ fn extract_anchor_text_near(html: &str, center: usize) -> Option<String> {
     None
 }
 
-fn scrape_nexus_summary_from_listing(html: &str, id: &str) -> SourceModSummary {
-    let marker = format!("/payday3/mods/{}", id);
+fn scrape_nexus_summary_from_listing_for_domain(html: &str, id: &str, game_domain: &str) -> SourceModSummary {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    let marker = format!("/{}/mods/{}", domain, id);
     let center = html.find(&marker).unwrap_or_else(|| html.find(id).unwrap_or(0));
 
     let name = extract_anchor_text_near(html, center)
@@ -9021,26 +12564,35 @@ fn scrape_nexus_summary_from_listing(html: &str, id: &str) -> SourceModSummary {
 
     let thumbnail = extract_first_img_near_for_source(html, center, "nexus");
 
-    SourceModSummary {
+    force_nexus_game_summary(SourceModSummary {
         source: "nexus".to_string(),
         source_id: id.to_string(),
         uid: None,
         game_id: None,
         name,
         author: None,
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: None,
         thumbnail_url: thumbnail.clone(),
         banner_url: thumbnail,
-        page_url: Some(format!("https://www.nexusmods.com/payday3/mods/{}", id)),
+        page_url: Some(format!("https://www.nexusmods.com/{}/mods/{}", domain, id)),
         updated_at: None,
         downloads: None,
         likes: None,
-        short_description: Some("Loaded from Nexus Mods PAYDAY 3 browse pages.".to_string()),
-        tags: vec!["Nexus".to_string(), "PAYDAY 3".to_string()],
-    }
+        short_description: Some(format!("Loaded from Nexus Mods {} browse pages.", domain)),
+        tags: vec!["Nexus".to_string(), domain.clone()],
+    }, &domain)
 }
 
-fn nexus_browse_urls(page: u32, sort: &str, include_age_restricted: bool) -> Vec<String> {
+fn scrape_nexus_summary_from_listing(html: &str, id: &str) -> SourceModSummary {
+    scrape_nexus_summary_from_listing_for_domain(html, id, "payday3")
+}
+
+fn nexus_browse_urls_for_domain(game_domain: &str, page: u32, sort: &str, include_age_restricted: bool) -> Vec<String> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let page = page.max(1);
     let sort_fragment = match sort {
         "added" => "created_time",
@@ -9054,26 +12606,31 @@ fn nexus_browse_urls(page: u32, sort: &str, include_age_restricted: bool) -> Vec
     let adult_fragment = if include_age_restricted { "&adult=1&include_adult=1" } else { "" };
 
     vec![
-        format!("https://www.nexusmods.com/payday3/mods/?BH=0&page={}&sort={}{adult_fragment}", page, sort_fragment),
-        format!("https://www.nexusmods.com/payday3/mods/?BH=0&page={}&tab={}{adult_fragment}", page, sort_fragment),
-        format!("https://www.nexusmods.com/payday3/mods/?BH=0&page={}{adult_fragment}", page),
+        format!("https://www.nexusmods.com/{}/mods/?BH=0&page={}&sort={}{adult_fragment}", domain, page, sort_fragment),
+        format!("https://www.nexusmods.com/{}/mods/?BH=0&page={}&tab={}{adult_fragment}", domain, page, sort_fragment),
+        format!("https://www.nexusmods.com/{}/mods/?BH=0&page={}{adult_fragment}", domain, page),
     ]
 }
 
-fn fetch_nexus_website_mods_page(page: u32, sort: &str, include_age_restricted: bool) -> Result<Vec<SourceModSummary>, String> {
+fn nexus_browse_urls(page: u32, sort: &str, include_age_restricted: bool) -> Vec<String> {
+    nexus_browse_urls_for_domain("payday3", page, sort, include_age_restricted)
+}
+
+fn fetch_nexus_website_mods_page_for_domain(page: u32, sort: &str, include_age_restricted: bool, game_domain: &str) -> Result<Vec<SourceModSummary>, String> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let mut errors = Vec::new();
 
-    for url in nexus_browse_urls(page, sort, include_age_restricted) {
+    for url in nexus_browse_urls_for_domain(&domain, page, sort, include_age_restricted) {
         match http_get_text(&url) {
             Ok(html) => {
-                let ids = extract_nexus_ids_from_html(&html);
+                let ids = extract_nexus_ids_from_html_for_domain(&html, &domain);
                 let mut mods = Vec::new();
 
                 for id in ids.into_iter().take(40) {
-                    let mut summary = scrape_nexus_summary_from_listing(&html, &id);
+                    let mut summary = scrape_nexus_summary_from_listing_for_domain(&html, &id, &domain);
 
                     if summary.name.starts_with("Nexus Mod ") || summary.thumbnail_url.is_none() {
-                        if let Some(enriched) = nexus_detail_from_website(&summary) {
+                        if let Some(enriched) = nexus_detail_from_website_for_domain(&summary, &domain) {
                             summary = enriched;
                         }
                     }
@@ -9099,8 +12656,12 @@ fn fetch_nexus_website_mods_page(page: u32, sort: &str, include_age_restricted: 
     ))
 }
 
+fn fetch_nexus_website_mods_page(page: u32, sort: &str, include_age_restricted: bool) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_website_mods_page_for_domain(page, sort, include_age_restricted, "payday3")
+}
 
-fn nexus_enrich_summary(summary: SourceModSummary, api_key: &str) -> SourceModSummary {
+fn nexus_enrich_summary_for_domain(summary: SourceModSummary, api_key: &str, game_domain: &str) -> SourceModSummary {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let name_is_placeholder = summary.name == format!("Nexus Mod {}", summary.source_id)
         || summary.name.trim().is_empty();
 
@@ -9116,7 +12677,7 @@ fn nexus_enrich_summary(summary: SourceModSummary, api_key: &str) -> SourceModSu
     let mut best = summary.clone();
 
     if let Ok(value) = http_get_json(
-        &format!("https://api.nexusmods.com/v1/games/payday3/mods/{}.json", best.source_id),
+        &format!("https://api.nexusmods.com/v1/games/{}/mods/{}.json", domain, best.source_id),
         Some(api_key),
     ) {
         let enriched = nexus_summary_from_value(&value);
@@ -9124,10 +12685,14 @@ fn nexus_enrich_summary(summary: SourceModSummary, api_key: &str) -> SourceModSu
         best = SourceModSummary {
             source: best.source,
             source_id: best.source_id,
-        uid: None,
-        game_id: None,
+            uid: best.uid.or(enriched.uid),
+            game_id: best.game_id.or(enriched.game_id),
             name: if enriched.name.starts_with("Nexus Mod ") { best.name } else { enriched.name },
             author: enriched.author.or(best.author),
+            author_username: enriched.author_username.or(best.author_username),
+            author_user_id: enriched.author_user_id.or(best.author_user_id),
+            author_profile_url: enriched.author_profile_url.or(best.author_profile_url),
+            author_avatar_url: enriched.author_avatar_url.or(best.author_avatar_url),
             version: enriched.version.or(best.version),
             thumbnail_url: enriched.thumbnail_url.or(best.thumbnail_url),
             banner_url: enriched.banner_url.or(best.banner_url),
@@ -9141,12 +12706,16 @@ fn nexus_enrich_summary(summary: SourceModSummary, api_key: &str) -> SourceModSu
     }
 
     if best.name.starts_with("Nexus Mod ") || best.thumbnail_url.is_none() || best.short_description.is_none() {
-        if let Some(web) = nexus_detail_from_website(&best) {
+        if let Some(web) = nexus_detail_from_website_for_domain(&best, &domain) {
             return web;
         }
     }
 
-    best
+    force_nexus_game_summary(best, &domain)
+}
+
+fn nexus_enrich_summary(summary: SourceModSummary, api_key: &str) -> SourceModSummary {
+    nexus_enrich_summary_for_domain(summary, api_key, "payday3")
 }
 
 
@@ -9489,6 +13058,8 @@ fn open_source_file_download(
     file_id: String,
     download_url: Option<String>,
     page_url: Option<String>,
+    game_domain: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<String, String> {
     let source_lower = source.to_lowercase();
 
@@ -9498,9 +13069,16 @@ fn open_source_file_download(
             .nexus_api_key
             .as_deref()
             .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
+        let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
+            .or_else(|| {
+                let source_config = source_config_for_profile_id(profile_id.as_deref());
+                nexus_domain_from_source_config(&source_config)
+            })
+            .unwrap_or_else(|| "payday3".to_string());
 
         let url = format!(
-            "https://api.nexusmods.com/v1/games/payday3/mods/{}/files/{}/download_link.json",
+            "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
+            nexus_domain,
             mod_id.trim(),
             file_id.trim()
         );
@@ -9545,19 +13123,24 @@ fn source_detail_from_summary(summary: SourceModSummary, description: String, fi
             SourceStatItem { label: "Likes/Endorsements".to_string(), value: summary.likes.map(|v| v.to_string()).unwrap_or_else(|| "Unknown".to_string()) },
             SourceStatItem { label: "Updated".to_string(), value: summary.updated_at.clone().unwrap_or_else(|| "Unknown".to_string()) },
         ],
-        comments: vec!["Comments tab is ready. Nexus V1 and current ModWorkshop GET responses may not expose comments through the same mod metadata endpoint.".to_string()],
-        bugs: vec!["Bugs tab is ready. Nexus V1 does not expose the full website Bugs tab through the basic mod metadata endpoint.".to_string()],
-        logs: vec!["No source logs loaded yet.".to_string()],
+        comments: Vec::new(),
+        bugs: Vec::new(),
+        logs: Vec::new(),
         changelog: None,
         description,
         files,
         images,
+        dependencies: Vec::new(),
         source: summary.source,
         source_id: summary.source_id,
-        uid: None,
-        game_id: None,
+        uid: summary.uid,
+        game_id: summary.game_id,
         name: summary.name,
         author: summary.author,
+        author_username: summary.author_username,
+        author_user_id: summary.author_user_id,
+        author_profile_url: summary.author_profile_url,
+        author_avatar_url: summary.author_avatar_url,
         version: summary.version,
         thumbnail_url: summary.thumbnail_url,
         banner_url: summary.banner_url,
@@ -9696,31 +13279,40 @@ fn nexus_graphql_v2_status() -> Result<String, String> {
 
 
 #[tauri::command]
-fn fetch_nexus_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
+fn fetch_nexus_mod_detail(mod_id: String, profile_id: Option<String>, game_domain: Option<String>) -> Result<SourceModDetail, String> {
     let settings = load_settings_internal();
     let api_key = settings
         .nexus_api_key
         .as_deref()
         .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
 
+    let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
+        .or_else(|| {
+            let source_config = source_config_for_profile_id(profile_id.as_deref());
+            nexus_domain_from_source_config(&source_config)
+        })
+        .ok_or_else(|| "This profile has no Nexus game mapping. Paste a full Nexus mod page URL or configure a Nexus source for this profile.".to_string())?;
+
     // GraphQL detail is metadata-only for now. The live schema path works, but
     // files are still more reliable through Nexus REST V1, so never return a
     // GraphQL-only detail page with 0 downloads.
-    let graphql_detail = lookup_nexus_game_id_for_mod_id(&mod_id)
-        .and_then(|game_id| fetch_nexus_graphql_mod_detail(&game_id, &mod_id, api_key).ok());
+    // File selection needs authoritative REST data first, not a blocking GraphQL enrichment request.
+    let graphql_detail: Option<SourceModDetail> = None;
 
     let mod_value = http_get_json(
-        &format!("https://api.nexusmods.com/v1/games/payday3/mods/{}.json", mod_id),
+        &format!("https://api.nexusmods.com/v1/games/{}/mods/{}.json", nexus_domain, mod_id),
         Some(api_key),
     )?;
 
-    let summary = nexus_summary_from_value(&mod_value);
+    let mut summary = nexus_summary_from_value(&mod_value);
+    summary.game_id = summary.game_id.or_else(|| Some(nexus_domain.clone()));
+    summary.page_url = Some(format!("https://www.nexusmods.com/{}/mods/{}", nexus_domain, mod_id));
     let description = json_string(&mod_value, &["description", "summary"])
         .map(|text| html_to_text(&text))
         .unwrap_or_else(|| "No description exposed by this API response.".to_string());
 
     let files_value = http_get_json(
-        &format!("https://api.nexusmods.com/v1/games/payday3/mods/{}/files.json", mod_id),
+        &format!("https://api.nexusmods.com/v1/games/{}/mods/{}/files.json", nexus_domain, mod_id),
         Some(api_key),
     )
     .unwrap_or(serde_json::Value::Null);
@@ -9748,12 +13340,13 @@ fn fetch_nexus_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
                 ]),
                 download_url: json_string(file, &["download_url", "downloadUrl"]).or_else(|| {
                     Some(format!(
-                        "https://www.nexusmods.com/payday3/mods/{}?tab=files&file_id={}",
+                        "https://www.nexusmods.com/{}/mods/{}?tab=files&file_id={}",
+                        nexus_domain,
                         mod_id,
                         id
                     ))
                 }),
-                file_type: None,
+                file_type: json_string(file, &["category_name"]),
                 download_count: None,
             }
         })
@@ -9764,7 +13357,7 @@ fn fetch_nexus_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
     file_items = filter_source_download_files(file_items);
 
     let images_value = http_get_json(
-        &format!("https://api.nexusmods.com/v1/games/payday3/mods/{}/images.json", mod_id),
+        &format!("https://api.nexusmods.com/v1/games/{}/mods/{}/images.json", nexus_domain, mod_id),
         Some(api_key),
     )
     .unwrap_or(serde_json::Value::Null);
@@ -9784,6 +13377,16 @@ fn fetch_nexus_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
         .collect::<Vec<_>>();
 
     let mut detail = source_detail_from_summary(summary, description, file_items, image_items);
+    detail.dependencies = source_dependencies_from_value(&mod_value, Some("nexus"), Some(&nexus_domain), None);
+    for dependency in source_dependencies_from_value(&files_value, Some("nexus"), Some(&nexus_domain), None) {
+        if !detail.dependencies.iter().any(|existing| existing.name.eq_ignore_ascii_case(&dependency.name) && existing.mod_id == dependency.mod_id) {
+            detail.dependencies.push(dependency);
+        }
+    }
+    detail.game_id = detail.game_id.or_else(|| Some(nexus_domain.clone()));
+    detail.page_url = detail
+        .page_url
+        .or_else(|| Some(format!("https://www.nexusmods.com/{}/mods/{}", nexus_domain, mod_id)));
 
     if let Some(graphql) = graphql_detail {
         detail.uid = graphql.uid.or(detail.uid);
@@ -10251,10 +13854,26 @@ fn modworkshop_file_items_from_api(mod_id: &str, data: &serde_json::Value) -> Ve
 }
 
 #[tauri::command]
-fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, String> {
+fn fetch_modworkshop_mod_detail(mod_id: String, profile_id: Option<String>) -> Result<SourceModDetail, String> {
+    let _profile_context = profile_id.as_deref().unwrap_or("unknown");
+
     let id = mod_id.trim().to_string();
     let page_url = format!("https://modworkshop.net/mod/{}", id);
-    let modworkshop_api_key = load_settings_internal().modworkshop_api_key;
+    // Public metadata and file lists must not depend on a saved authentication key.
+    let modworkshop_api_key: Option<String> = None;
+    if let Ok(value) = http_get_json_fast(&format!("https://api.modworkshop.net/mods/{}", id), 14) {
+        let data = unwrap_data(value);
+        if let Some(summary) = modworkshop_summary_from_api_value_for_game(&data, None) {
+            let files_value = http_get_json_fast(&format!("https://api.modworkshop.net/mods/{}/files", id), 14)?;
+            let mut files = modworkshop_file_items_from_api(&id, &unwrap_data(files_value));
+            sort_source_files_newest_first(&mut files);
+            let description = extract_modworkshop_api_description(&data).unwrap_or_default();
+            let mut detail = source_detail_from_summary(summary, description, files, Vec::new());
+            detail.dependencies = source_dependencies_from_value(&data, Some("modworkshop"), None, detail.game_id.as_deref());
+            upsert_source_index_detail(&detail);
+            return Ok(detail);
+        }
+    }
 
     if let Ok(html) = http_get_text(&page_url) {
         let mut detail = scrape_modworkshop_detail_from_html(&id, &html);
@@ -10270,11 +13889,39 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
             modworkshop_api_key.as_deref(),
         ) {
             let data = unwrap_data(value);
+            if let Some(api_summary) = modworkshop_summary_from_api_value_for_game(&data, None) {
+                detail.uid = api_summary.uid.or(detail.uid);
+                detail.game_id = api_summary.game_id.or(detail.game_id);
+                detail.name = if detail.name.starts_with("ModWorkshop Mod ") { api_summary.name } else { detail.name };
+                detail.author = api_summary.author.or(detail.author);
+                detail.author_username = api_summary.author_username.or(detail.author_username);
+                detail.author_user_id = api_summary.author_user_id.or(detail.author_user_id);
+                detail.author_profile_url = api_summary.author_profile_url.or(detail.author_profile_url);
+                detail.author_avatar_url = api_summary.author_avatar_url.or(detail.author_avatar_url);
+                detail.version = api_summary.version.or(detail.version);
+                detail.thumbnail_url = api_summary.thumbnail_url.or(detail.thumbnail_url);
+                detail.banner_url = detail.banner_url.or_else(|| detail.thumbnail_url.clone());
+                detail.page_url = api_summary.page_url.or(detail.page_url);
+                detail.updated_at = api_summary.updated_at.or(detail.updated_at);
+                detail.downloads = api_summary.downloads.or(detail.downloads);
+                detail.likes = api_summary.likes.or(detail.likes);
+                detail.short_description = api_summary.short_description.or(detail.short_description);
+                for tag in api_summary.tags {
+                    if !detail.tags.iter().any(|existing| existing.eq_ignore_ascii_case(&tag)) {
+                        detail.tags.push(tag);
+                    }
+                }
+            }
 
             detail.description = choose_better_description(
                 detail.description,
                 extract_modworkshop_api_description(&data),
             );
+            for dependency in source_dependencies_from_value(&data, Some("modworkshop"), None, detail.game_id.as_deref()) {
+                if !detail.dependencies.iter().any(|existing| existing.name.eq_ignore_ascii_case(&dependency.name) && existing.mod_id == dependency.mod_id && existing.url == dependency.url) {
+                    detail.dependencies.push(dependency);
+                }
+            }
 
             if detail.short_description.is_none()
                 || detail
@@ -10397,13 +14044,24 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
             }),
     );
 
+    let author = modworkshop_author_fields_from_value(&data);
+    let summary_game_id = modworkshop_game_id_from_value(&data);
+    let game_label = summary_game_id
+        .as_deref()
+        .map(modworkshop_game_display_label)
+        .unwrap_or_else(|| "ModWorkshop".to_string());
+
     let summary = SourceModSummary {
         source: "modworkshop".to_string(),
         source_id: id.clone(),
         uid: None,
-        game_id: None,
+        game_id: summary_game_id,
         name,
-        author: json_string(&data, &["author", "created_by", "createdBy", "user_name", "userName"]),
+        author: author.display_name,
+        author_username: author.username,
+        author_user_id: author.user_id,
+        author_profile_url: author.profile_url,
+        author_avatar_url: author.avatar_url,
         version: json_string(&data, &["version"]),
         thumbnail_url: thumbnail.clone(),
         banner_url: thumbnail,
@@ -10412,12 +14070,17 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
         downloads: json_u64(&data, &["downloads", "download_count", "downloadCount"]),
         likes: json_u64(&data, &["likes", "like_count", "likeCount"]),
         short_description: safe_short_description(json_string(&data, &["short_description", "shortDescription", "summary", "description"])),
-        tags: vec!["ModWorkshop".to_string(), "PAYDAY 3".to_string()],
+        tags: if game_label == "ModWorkshop" {
+            vec!["ModWorkshop".to_string()]
+        } else {
+            vec!["ModWorkshop".to_string(), game_label]
+        },
     };
 
     let files = modworkshop_file_items_from_api(&id, &data);
 
-    let detail = source_detail_from_summary(summary, description, files, Vec::new());
+    let mut detail = source_detail_from_summary(summary, description, files, Vec::new());
+    detail.dependencies = source_dependencies_from_value(&data, Some("modworkshop"), None, detail.game_id.as_deref());
     upsert_source_index_detail(&detail);
     Ok(detail)
 }
@@ -10425,7 +14088,7 @@ fn fetch_modworkshop_mod_detail(mod_id: String) -> Result<SourceModDetail, Strin
 
 
 fn payday_content_root(paths: &PaydayPaths) -> PathBuf {
-    paths.game_root.join("PAYDAY3").join("Content")
+    paths.pak_mods.parent().and_then(Path::parent).unwrap().to_path_buf()
 }
 
 fn payday_movies_path(paths: &PaydayPaths) -> PathBuf {
@@ -10734,7 +14397,18 @@ fn extract_builtin_7z_archive(archive_path: &Path, label: &str) -> Result<PathBu
     fs::create_dir_all(&output_dir)
         .map_err(|err| format!("Failed to create built-in 7z extraction folder: {}", err))?;
 
-    sevenz_rust::decompress_file(archive_path, &output_dir)
+    let mut expanded_bytes = 0u64;
+    sevenz_rust::decompress_file_with_extract_fn(archive_path, &output_dir, |entry, reader, destination| {
+        let name = entry.name().replace('\\', "/");
+        if Path::new(&name).is_absolute() || name.split('/').any(|part| part == ".." || part.contains(':')) || !destination.starts_with(&output_dir) {
+            return Err(sevenz_rust::Error::other("Unsafe archive member path"));
+        }
+        expanded_bytes = expanded_bytes.checked_add(entry.size()).ok_or_else(|| sevenz_rust::Error::other("Archive size overflow"))?;
+        if entry.size() > 512 * 1024 * 1024 || expanded_bytes > 2 * 1024 * 1024 * 1024 {
+            return Err(sevenz_rust::Error::other("Archive exceeds extraction safety limits"));
+        }
+        sevenz_rust::default_entry_extract_fn(entry, reader, destination)
+    })
         .map_err(|err| format!("Built-in 7z extractor failed: {:?}", err))?;
 
     Ok(output_dir)
@@ -10796,7 +14470,8 @@ fn common_archive_root(paths: &[String]) -> Option<String> {
 
         // Do not strip meaningful game folders.
         let lower = root.to_lowercase();
-        if matches!(lower.as_str(), "payday3" | "content" | "binaries" | "win64" | "mods" | "scripts") {
+        let mod_folder = paths.iter().any(|path| path.to_lowercase().starts_with(&format!("{}/scripts/", lower)));
+        if mod_folder || matches!(lower.as_str(), "payday3" | "content" | "binaries" | "win64" | "wingdk" | "ue4ss" | "mods" | "scripts") {
             None
         } else {
             Some(root)
@@ -11298,7 +14973,8 @@ fn should_ignore_archive_entry_as_junk_or_manager(path: &str, file_name: &str, e
         return Some("External mod-manager metadata/artifact, not a PAYDAY 3 runtime mod file.".to_string());
     }
 
-    if matches!(extension, "txt" | "md" | "rtf" | "pdf" | "url" | "lnk" | "xml" | "yaml" | "yml" | "log") {
+    if matches!(extension, "txt" | "md" | "rtf" | "pdf" | "url" | "lnk" | "xml" | "yaml" | "yml" | "log" | "pdb")
+        && name != "mods.txt" && name != "enabled.txt" {
         return Some("Readme/documentation/metadata file skipped. Tsuki only installs runtime mod files.".to_string());
     }
 
@@ -11309,6 +14985,37 @@ fn should_ignore_archive_entry_as_junk_or_manager(path: &str, file_name: &str, e
     None
 }
 
+
+fn payday_ue4ss_relative_path(paths: &PaydayPaths, path: &str) -> String {
+    let authored = strip_after_any_marker_case_insensitive(path, &["Binaries/Win64/", "Binaries/WinGDK/"])
+        .unwrap_or_else(|| path.to_string());
+    let lower = authored.to_lowercase();
+    let file_name = authored.rsplit('/').next().unwrap_or(&authored);
+    let runtime_prefix = if payday_uses_ue5_layout(paths) { "UE4SS/" } else { "" };
+    if lower.starts_with("ue4ss/") {
+        return if payday_uses_ue5_layout(paths) { authored } else { authored[6..].to_string() };
+    }
+    if lower.starts_with("mods/") || lower.contains("/mods/") {
+        let tail = relative_after_path_markers(&authored, &["Mods/"], &authored);
+        return format!("{}Mods/{}", runtime_prefix, tail);
+    }
+    if lower == "ue4ss.dll" || lower == "ue4ss-settings.ini" {
+        return format!("{}{}", runtime_prefix, file_name);
+    }
+    if lower.contains("/scripts/") || lower.contains("/dlls/") || lower.ends_with("/enabled.txt") {
+        return format!("{}Mods/{}", runtime_prefix, authored);
+    }
+    if lower.starts_with("scripts/") {
+        return format!("{}Mods/LooseLua/{}", runtime_prefix, authored);
+    }
+    if lower.ends_with(".lua") {
+        let stem = Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("LooseLua");
+        return format!("{}Mods/{}/Scripts/main.lua", runtime_prefix, sanitize_file_component(stem));
+    }
+    if lower == "mods.txt" { return format!("{}Mods/mods.txt", runtime_prefix); }
+    if authored.contains('/') { return format!("{}Mods/{}", runtime_prefix, authored); }
+    authored
+}
 
 fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, description: &str) -> ArchiveInspectEntry {
     let normalized = normalize_archive_path(archive_path);
@@ -11376,6 +15083,9 @@ fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, desc
     }
     // UE4SS root files and UE4SS Mods folder go to Binaries/Win64.
     else if lower.contains("binaries/win64/")
+        || lower.contains("binaries/wingdk/")
+        || lower.starts_with("ue4ss/")
+        || lower.contains("/dlls/")
         || lower.contains("/binaries/win64/")
         || lower.starts_with("mods/")
         || lower.contains("/mods/")
@@ -11388,38 +15098,12 @@ fn infer_archive_entry_destination(paths: &PaydayPaths, archive_path: &str, desc
         || desc_lower.contains("scripts/main.lua")
         || desc_lower.contains("mods folder")
     {
-        let relative = if let Some(found) = strip_after_any_marker_case_insensitive(
-            &normalized,
-            &["PAYDAY3/Binaries/Win64/", "Binaries/Win64/"],
-        ) {
-            found
-        } else if lower.starts_with("mods/") || lower.contains("/mods/") {
-            {
-                let tail = relative_after_path_markers(&normalized, &["Mods/"], &normalized);
-                format!("Mods/{}", tail.trim_start_matches("Mods/").trim_start_matches('/'))
-            }
-        } else if lower.starts_with("scripts/") || lower.contains("/scripts/") {
-            if lower.starts_with("scripts/") {
-                normalized.clone()
-            } else {
-                format!("Mods/{}", normalized)
-            }
-        } else if matches!(extension.as_str(), "lua" | "ini" | "json" | "toml")
-            && (lower.contains("/scripts/") || lower.contains("/enabled") || lower.contains("/config"))
-        {
-            format!("Mods/{}", normalized)
-        } else if matches!(extension.as_str(), "lua" | "json" | "toml")
-            || (extension == "ini" && !file_name.to_lowercase().contains("ue4ss"))
-        {
-            format!("Mods/{}", file_name)
-        } else {
-            file_name.clone()
-        };
+        let relative = payday_ue4ss_relative_path(paths, &normalized);
 
         route_kind = "win64".to_string();
         destination = safe_join_under(&paths.win64, &relative);
         confidence = "high".to_string();
-        reason = "UE4SS/Mods folder/.ini/.dll/Lua/native route detected; routed under PAYDAY3/Binaries/Win64.".to_string();
+        reason = format!("UE4SS archive tree preserved for {} under {}.", if payday_uses_ue5_layout(paths) { "UE5.5 (UE4SS/Mods)" } else { "UE4.27 (Mods)" }, paths.win64.display());
         blocked = false;
     }
     // Movies, intro skips, and video replacers go to Content/Movies.
@@ -11539,18 +15223,13 @@ fn find_external_archive_tool() -> Option<PathBuf> {
 }
 
 fn external_archive_extract_dir(archive_path: &Path, label: &str) -> Result<PathBuf, String> {
-    let stem = archive_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("archive");
-
+    let _ = archive_path;
     Ok(downloads_cache_dir()?
         .join("external_extract")
         .join(format!(
-            "{}_{}_{}",
-            sanitize_file_component(label),
-            sanitize_file_component(stem),
-            current_timestamp()
+            "{}_{}",
+            sanitize_file_component(label).chars().take(20).collect::<String>(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_nanos()).unwrap_or_default()
         )))
 }
 
@@ -11850,16 +15529,25 @@ fn inspect_staged_file(paths: &PaydayPaths, staged_file: &Path, description: &st
     Ok((archive_kind, vec![entry], warnings))
 }
 
-fn resolve_source_file_download_url(source: &str, mod_id: &str, file_id: &str, download_url: Option<String>) -> Result<String, String> {
+fn resolve_source_file_download_url(
+    source: &str,
+    mod_id: &str,
+    file_id: &str,
+    download_url: Option<String>,
+    nexus_game_domain: Option<&str>,
+) -> Result<String, String> {
     if source.eq_ignore_ascii_case("nexus") {
         let settings = load_settings_internal();
         let api_key = settings
             .nexus_api_key
             .as_deref()
             .ok_or_else(|| "Nexus API key is not saved. Paste it in Settings first.".to_string())?;
+        let nexus_domain = safe_nexus_game_domain(nexus_game_domain)
+            .unwrap_or_else(|| "payday3".to_string());
 
         let url = format!(
-            "https://api.nexusmods.com/v1/games/payday3/mods/{}/files/{}/download_link.json",
+            "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
+            nexus_domain,
             mod_id.trim(),
             file_id.trim()
         );
@@ -11973,23 +15661,27 @@ fn source_file_download_candidates(
     mod_id: &str,
     file_id: &str,
     download_url: Option<String>,
+    nexus_game_domain: Option<&str>,
 ) -> Vec<String> {
     let mut urls = Vec::new();
     let caller_url_allowed = !source.eq_ignore_ascii_case("nexus") && !source.eq_ignore_ascii_case("modworkshop");
     let trusted_download_url = if caller_url_allowed { download_url.clone() } else { None };
 
-    if let Ok(primary) = resolve_source_file_download_url(source, mod_id, file_id, trusted_download_url.clone()) {
+    if let Ok(primary) = resolve_source_file_download_url(source, mod_id, file_id, trusted_download_url.clone(), nexus_game_domain) {
         push_unique_url(&mut urls, primary);
     }
 
     if source.eq_ignore_ascii_case("nexus") {
         let clean_mod_id = mod_id.trim();
         let clean_file_id = file_id.trim();
+        let nexus_domain = safe_nexus_game_domain(nexus_game_domain)
+            .unwrap_or_else(|| "payday3".to_string());
 
         if !clean_mod_id.is_empty() && !clean_file_id.is_empty() && clean_file_id != "unknown" {
             if let Some(api_key) = load_settings_internal().nexus_api_key {
                 let endpoint = format!(
-                    "https://api.nexusmods.com/v1/games/payday3/mods/{}/files/{}/download_link.json",
+                    "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
+                    nexus_domain,
                     clean_mod_id,
                     clean_file_id
                 );
@@ -12004,7 +15696,8 @@ fn source_file_download_candidates(
             push_unique_url(
                 &mut urls,
                 format!(
-                    "https://www.nexusmods.com/payday3/mods/{}?tab=files&file_id={}",
+                    "https://www.nexusmods.com/{}/mods/{}?tab=files&file_id={}",
+                    nexus_domain,
                     clean_mod_id,
                     clean_file_id
                 ),
@@ -12237,8 +15930,33 @@ fn download_url_to_file_with_depth(url: &str, destination: &Path, depth: u8) -> 
     let mut output = File::create(destination)
         .map_err(|err| format!("Failed to create staged download: {}", err))?;
 
-    let bytes = io::copy(&mut response, &mut output)
-        .map_err(|err| format!("Failed to save download: {}", err))?;
+    let bandwidth_limit_mb_s = load_settings_internal().download_bandwidth_limit_mb_s;
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    let started = Instant::now();
+
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|err| format!("Failed to read download: {}", err))?;
+        if read == 0 {
+            break;
+        }
+
+        output
+            .write_all(&buffer[..read])
+            .map_err(|err| format!("Failed to save download: {}", err))?;
+        bytes = bytes.saturating_add(read as u64);
+
+        if bandwidth_limit_mb_s > 0 {
+            let bytes_per_second = bandwidth_limit_mb_s.saturating_mul(1024 * 1024).max(1) as f64;
+            let target_elapsed = bytes as f64 / bytes_per_second;
+            let actual_elapsed = started.elapsed().as_secs_f64();
+            if target_elapsed > actual_elapsed {
+                std::thread::sleep(Duration::from_secs_f64((target_elapsed - actual_elapsed).min(2.0)));
+            }
+        }
+    }
 
     Ok(DownloadHttpDiagnostic {
         url_host_path: final_url_host_path,
@@ -12505,6 +16223,9 @@ fn write_install_receipt(
         banner_url,
         page_url,
         installed_at_unix: SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs()),
+        enabled: None,
+        profile_id: Some(BUILTIN_PAYDAY3_PROFILE_ID.to_string()),
+        notes: None,
         files: files.iter().map(|file| {
             let destination_path = PathBuf::from(&file.destination);
             let sha256 = sha256_file(&destination_path).ok();
@@ -12513,6 +16234,8 @@ fn write_install_receipt(
                 relative_path: file.destination.clone(),
                 size_bytes: Some(file.size_bytes),
                 sha256,
+                original_path: None,
+                backup_path: None,
             }
         }).collect(),
     };
@@ -12524,6 +16247,7 @@ fn write_install_receipt(
     fs::write(&receipt_path, contents)
         .map_err(|err| format!("Failed to write install receipt: {}", err))?;
 
+    let _ = source_catalog::index_receipt(BUILTIN_PAYDAY3_PROFILE_ID, &receipt);
     let _ = sync_installed_state_database();
 
     Ok(receipt_path.display().to_string())
@@ -12597,6 +16321,7 @@ fn install_staged_file_to_game_internal(
     };
 
     let result = (|| -> Result<InstallApplyResult, String> {
+
         let paths = detect_payday3_paths_internal()
             .ok_or_else(|| "Payday 3 was not detected. Set the game path in Settings first.".to_string())?;
 
@@ -12616,6 +16341,7 @@ fn install_staged_file_to_game_internal(
         diagnostic.download_size_bytes = fs::metadata(&staged_file).ok().map(|value| value.len());
 
         let (archive_kind, entries, mut warnings) = inspect_staged_file(&paths, &staged_file, description)?;
+        validate_payday_ue5_dependencies(&paths, &entries)?;
 
         diagnostic.archive_kind = Some(archive_kind.clone());
         diagnostic.entries = entries.iter().map(archive_entry_to_diagnostic).collect();
@@ -12951,8 +16677,16 @@ async fn install_staged_file_to_game(
     page_url: Option<String>,
     description: String,
     replace_file_names: Vec<String>,
+    profile_id: Option<String>,
 ) -> Result<InstallApplyResult, String> {
+    let profile_id = require_game_profile_installation(profile_id.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
+        if !is_builtin_payday3_profile(Some(&profile_id)) {
+            if !replace_file_names.is_empty() {
+                return Err("Remove the previous receipt-owned mod before installing its replacement for this profile.".to_string());
+            }
+            return profile_installs::install_profile_source_file(&profile_id, Path::new(&staged_file_path), &source, &mod_id, &file_id, &mod_name, version, author, thumbnail_url, page_url);
+        }
         install_staged_file_to_game_internal(
             &staged_file_path,
             &mod_name,
@@ -12986,8 +16720,27 @@ async fn stage_source_file_download(
     download_url: Option<String>,
     mod_name: String,
     description: String,
+    game_domain: Option<String>,
+    profile_id: Option<String>,
 ) -> Result<StagedDownloadResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let profile_id = require_game_profile_installation(profile_id.as_deref())?;
+        if source.eq_ignore_ascii_case("modworkshop") {
+            let config = source_config_for_profile_id(Some(&profile_id));
+            let expected_game = modworkshop_game_route_from_source_config(&config).ok_or("This profile has no configured ModWorkshop game mapping.")?;
+            let version = modworkshop_profile_game_version(Some(&profile_id), &expected_game);
+            let value = http_get_json_fast(&format!("https://api.modworkshop.net/mods/{}", percent_encode_query(&mod_id)), 14)?;
+            let summary = modworkshop_summary_from_api_value_for_game(&unwrap_data(value), None).ok_or("Could not verify ModWorkshop engine compatibility before download.")?;
+            if !modworkshop_summary_matches_game(&summary, &expected_game) {
+                return Err(format!("This ModWorkshop mod does not belong to the selected game's verified mapping: {}.", expected_game));
+            }
+            if let Some(version) = version {
+                if !modworkshop_version_matches(&summary.tags, &version) {
+                    return Err(format!("This mod is incompatible with the selected PAYDAY 3 {} profile. Select the matching game version before downloading.", version));
+                }
+            }
+        }
+
         if is_image_or_page_asset_name(&file_name) || download_url.as_deref().map(is_image_or_page_asset_name).unwrap_or(false) {
             return Err("That item is a page image/thumbnail, not a downloadable mod file. Refresh this mod page with v0.59 so Tsuki can use the real Files endpoint.".to_string());
         }
@@ -13010,10 +16763,20 @@ async fn stage_source_file_download(
             ));
         }
 
-        let paths = detect_payday3_paths_internal()
-            .ok_or_else(|| "Payday 3 was not detected. Set the game path in Settings first.".to_string())?;
+        let settings = load_settings_internal();
+        let _download_guard = acquire_staged_download_guard(settings.simultaneous_downloads)?;
+        let paths = if is_builtin_payday3_profile(Some(&profile_id)) {
+            Some(detect_payday3_paths_internal().ok_or_else(|| "PAYDAY 3 was not detected. Set the game path in Settings first.".to_string())?)
+        } else { None };
 
-        let download_candidates = source_file_download_candidates(&source, &mod_id, &file_id, download_url.clone());
+        let source_config = if source.eq_ignore_ascii_case("nexus") {
+            source_config_for_profile_id(Some(&profile_id))
+        } else {
+            serde_json::Value::Null
+        };
+        let nexus_domain = safe_nexus_game_domain(game_domain.as_deref())
+            .or_else(|| nexus_domain_from_source_config(&source_config));
+        let download_candidates = source_file_download_candidates(&source, &mod_id, &file_id, download_url.clone(), nexus_domain.as_deref());
 
         if download_candidates.is_empty() {
             return Err("This source did not expose a download URL.".to_string());
@@ -13025,6 +16788,7 @@ async fn stage_source_file_download(
             .unwrap_or_else(|| "download.zip".to_string());
 
         let stage_root = downloads_cache_dir()?
+            .join(sanitize_file_component(&profile_id))
             .join(sanitize_file_component(&source))
             .join(sanitize_file_component(&mod_id))
             .join(sanitize_file_component(&file_id));
@@ -13055,22 +16819,38 @@ async fn stage_source_file_download(
         let mut size_bytes: Option<u64> = None;
         let mut download_http: Option<DownloadHttpDiagnostic> = None;
 
+        let attempts = settings.download_retry_count.saturating_add(1).clamp(1, 7);
         for candidate in download_candidates {
             if is_image_or_page_asset_name(&candidate) {
                 last_download_error = format!("Skipped page image/thumbnail URL instead of downloading it: {}", candidate);
                 continue;
             }
 
-            match download_url_to_file_with_diagnostic(&candidate, &staged_file) {
-                Ok(diagnostic) => {
-                    size_bytes = Some(diagnostic.size_bytes);
-                    download_http = Some(diagnostic);
-                    break;
+            for attempt in 0..attempts {
+                match download_url_to_file_with_diagnostic(&candidate, &staged_file) {
+                    Ok(diagnostic) => {
+                        size_bytes = Some(diagnostic.size_bytes);
+                        download_http = Some(diagnostic);
+                        break;
+                    }
+                    Err(error) => {
+                        last_download_error = format!(
+                            "{} attempt {}/{} -> {}",
+                            candidate,
+                            attempt + 1,
+                            attempts,
+                            error
+                        );
+                        let _ = fs::remove_file(&staged_file);
+                        if attempt + 1 < attempts {
+                            std::thread::sleep(Duration::from_millis(350 * (attempt as u64 + 1)));
+                        }
+                    }
                 }
-                Err(error) => {
-                    last_download_error = format!("{} -> {}", candidate, error);
-                    let _ = fs::remove_file(&staged_file);
-                }
+            }
+
+            if size_bytes.is_some() {
+                break;
             }
         }
 
@@ -13167,7 +16947,12 @@ async fn stage_source_file_download(
             }
         };
 
-        let (archive_kind, entries, mut warnings) = match inspect_staged_file(&paths, &staged_file, &description) {
+        let inspection = if let Some(paths) = paths.as_ref() {
+            inspect_staged_file(paths, &staged_file, &description)
+        } else {
+            profile_installs::inspect_profile_source_file(&profile_id, &staged_file)
+        };
+        let (archive_kind, entries, mut warnings) = match inspection {
             Ok(result) => result,
             Err(error) => {
                 write_stage_download_diagnostic(
@@ -13194,7 +16979,7 @@ async fn stage_source_file_download(
             warnings.push("One or more entries are blocked until the installer has safer handling for this route.".to_string());
         }
 
-        warnings.push("Downloaded to Tsuki staging and inspected. Install can now copy safe routes into detected PAYDAY 3 paths.".to_string());
+        warnings.push(format!("Downloaded to profile-scoped staging and inspected using {} install rules.", profile_id));
 
         write_stage_download_diagnostic(
             "staged",
@@ -13220,7 +17005,7 @@ async fn stage_source_file_download(
             staged_folder_path: stage_root.display().to_string(),
             size_bytes,
             archive_kind,
-            can_install_later: entries.iter().any(|entry| entry.route_kind != "folder" && !entry.blocked),
+            can_install_later: !entries.iter().any(|entry| entry.blocked) && entries.iter().any(|entry| entry.route_kind != "folder"),
             entries,
             warnings,
         })
@@ -14088,7 +17873,7 @@ fn diagnose_modworkshop_pairing_internal() -> Result<Vec<ModWorkshopPairingDiagn
     modworkshop_sources.sort_by(|a, b| a.source_id.cmp(&b.source_id));
     modworkshop_sources.dedup_by(|a, b| a.source_id == b.source_id);
 
-    let matches = match_installed_source_mods(modworkshop_sources.clone())?;
+    let matches = match_installed_source_mods(modworkshop_sources.clone(), None)?;
     let mut paired_files = std::collections::BTreeSet::new();
 
     for matched in matches.iter().filter(|item| item.installed) {
@@ -14336,7 +18121,12 @@ fn remove_raid_ww2_bad_install() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec<InstalledSourceMatch>, String> {
+fn match_installed_source_mods(source_mods: Vec<SourceModSummary>, profile_id: Option<String>) -> Result<Vec<InstalledSourceMatch>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return source_catalog::match_profile_sources(&source_mods, profile_id.as_deref().unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID));
+    }
+
+    let indexed_hash_matches = source_catalog::match_profile_sources(&source_mods, BUILTIN_PAYDAY3_PROFILE_ID)?;
     let installed_candidates = build_installed_match_candidates()?;
     let _ = prune_stale_receipts_internal();
     let receipts = list_install_receipts_internal().unwrap_or_default();
@@ -14556,10 +18346,22 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
             }
         }
 
+        if best_score < 100 {
+            if let Some(proof) = indexed_hash_matches.iter().find(|proof| proof.installed && proof.source == source_mod.source && proof.source_id == source_mod.source_id) {
+                best_score = 100;
+                best_reason = proof.reason.clone();
+                best_files = proof.matched_files.clone();
+                best_source_file_id = proof.source_file_id.clone();
+                best_source_file_name = proof.source_file_name.clone();
+                best_source_file_version = proof.source_file_version.clone();
+                best_enabled = proof.enabled;
+                match_kind = "sha256".to_string();
+            }
+        }
         let installed = if match_kind == "receipt" || match_kind == "receipt-hash" {
             best_receipt_live
         } else {
-            matches!(match_kind.as_str(), "source-id" | "proof-filename")
+            matches!(match_kind.as_str(), "source-id" | "proof-filename" | "sha256")
         };
 
         let source_update_unix = source_updated_unix(&source_mod);
@@ -14597,14 +18399,63 @@ fn match_installed_source_mods(source_mods: Vec<SourceModSummary>) -> Result<Vec
 
 
 #[tauri::command]
-async fn fetch_modworkshop_browse_live_page(page: u32, sort: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+async fn fetch_modworkshop_categories(game_id: String, profile_id: Option<String>, profile_name: Option<String>) -> Result<Vec<SourceCategory>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game_id = normalize_modworkshop_game_route(&game_id)?;
+        let url = format!("https://api.modworkshop.net/games/{}/categories", game_id);
+        let value = http_get_json_fast(&url, 10)
+            .map_err(|error| format!(
+                "ModWorkshop category request failed. Profile ID: {}. Profile name: {}. ModWorkshop game ID: {}. Request URL: {}. Cache available: unknown to backend. Cache used: false. Error: {}",
+                profile_id.as_deref().unwrap_or("unknown"),
+                profile_name.as_deref().unwrap_or("unknown"),
+                game_id,
+                url,
+                error,
+            ))?;
+        let categories = parse_modworkshop_categories(value);
+        if categories.is_empty() {
+            return Err(format!(
+                "ModWorkshop categories genuinely unavailable. Profile ID: {}. Profile name: {}. ModWorkshop game ID: {}. Request URL: {}. HTTP status: 200. Parsed zero usable categories.",
+                profile_id.as_deref().unwrap_or("unknown"),
+                profile_name.as_deref().unwrap_or("unknown"),
+                game_id,
+                url,
+            ));
+        }
+        Ok(categories)
+    })
+    .await
+    .map_err(|err| format!("ModWorkshop category task failed: {:?}", err))?
+}
+
+#[tauri::command]
+async fn fetch_modworkshop_browse_live_page(
+    page: u32,
+    sort: Option<String>,
+    query: Option<String>,
+    category_id: Option<String>,
+    game_id: Option<String>,
+    profile_id: Option<String>,
+) -> Result<Vec<SourceModSummary>, String> {
+    let requested_game_id = game_id
+        .or_else(|| {
+            if is_builtin_payday3_profile(profile_id.as_deref()) {
+                Some(MODWORKSHOP_PAYDAY3_GAME_ID.to_string())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "ModWorkshop browse needs a profile ModWorkshop game ID. Profile ID: {}.",
+                profile_id.as_deref().unwrap_or("unknown")
+            )
+        })?;
+
     tauri::async_runtime::spawn_blocking(move || {
         let sort_mode = sort.unwrap_or_else(|| "recent".to_string());
-        let mods = fetch_modworkshop_mods_page(page, &sort_mode)?;
-
-        if mods.is_empty() {
-            return Err("ModWorkshop direct live returned zero cards.".to_string());
-        }
+        let version = modworkshop_profile_game_version(profile_id.as_deref(), &requested_game_id);
+        let mods = fetch_modworkshop_mods_page_for_version(&requested_game_id, page, &sort_mode, query.as_deref(), category_id.as_deref(), version.as_deref())?;
 
         upsert_source_index_summaries(&mods);
         Ok(mods)
@@ -14614,7 +18465,11 @@ async fn fetch_modworkshop_browse_live_page(page: u32, sort: Option<String>) -> 
 }
 
 #[tauri::command]
-async fn diagnose_modworkshop_browse_live() -> Result<String, String> {
+async fn diagnose_modworkshop_browse_live(profile_id: Option<String>) -> Result<String, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok("ModWorkshop PAYDAY 3 diagnostics are disabled for this profile. Configure a profile-specific ModWorkshop game mapping before probing live routes.".to_string());
+    }
+
     tauri::async_runtime::spawn_blocking(move || {
         let url = "https://modworkshop.net/g/payday-3?page=1";
         let mut lines = Vec::new();
@@ -14662,22 +18517,70 @@ async fn fetch_source_mods_page(
     source: String,
     page: u32,
     sort: Option<String>,
+    profile_id: Option<String>,
+    source_id: Option<String>,
 ) -> Result<Vec<SourceModSummary>, String> {
-    tauri::async_runtime::spawn_blocking(move || fetch_source_mods_page_sync(source, page, sort))
+    let source_config = source_config_for_profile_source(profile_id.as_deref(), source_id.as_deref());
+    let diagnostic_config = source_config.clone();
+    let diagnostic_source = source.clone();
+    let diagnostic_profile_id = profile_id.clone().unwrap_or_else(|| "unknown".to_string());
+    let diagnostic_source_id = source_id.clone().unwrap_or_else(|| source.clone());
+    let result = tauri::async_runtime::spawn_blocking(move || fetch_source_mods_page_sync(source, page, sort, source_config))
         .await
-        .map_err(|err| format!("Source loader task failed: {:?}", err))?
+        .map_err(|err| format!("Source loader task failed: {:?}", err))?;
+    if let Err(error) = &result {
+        if diagnostic_source.eq_ignore_ascii_case("nexus") {
+            let domain = nexus_domain_from_source_config(&diagnostic_config).unwrap_or_else(|| "missing".to_string());
+            let game_id = config_string(&diagnostic_config, "nexusGameId").unwrap_or_else(|| "missing".to_string());
+            let profile_name = config_string(&diagnostic_config, "nexusGameName").unwrap_or_else(|| "unknown".to_string());
+            let api_key_present = load_settings_internal().nexus_api_key.as_deref().map(str::trim).map(|value| !value.is_empty()).unwrap_or(false);
+            let http_status = error
+                .split("HTTP ")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .unwrap_or("unavailable");
+            let route = error
+                .split_whitespace()
+                .find(|value| value.starts_with("https://"))
+                .map(|value| value.trim_end_matches(':'))
+                .unwrap_or("profile-specific Nexus metadata/listing route");
+            eprintln!(
+                "Nexus request failed | profile_id={} | profile_name={} | source_id={} | domain={} | numeric_game_id={} | route={} | http_status={} | api_key_present={} | live_data=false | cache_fallback=exact-profile-source-domain-game-id-only | cache_reason=live_request_failed | response_body_preview={}",
+                diagnostic_profile_id,
+                profile_name,
+                diagnostic_source_id,
+                domain,
+                game_id,
+                route,
+                http_status,
+                api_key_present,
+                error.chars().take(500).collect::<String>(),
+            );
+        }
+    }
+    result
 }
 
 fn fetch_source_mods_page_sync(
     source: String,
     page: u32,
     sort: Option<String>,
+    source_config: serde_json::Value,
 ) -> Result<Vec<SourceModSummary>, String> {
     let sort_mode = sort.unwrap_or_else(|| "recent".to_string());
 
     let result = match source.as_str() {
-        "nexus" => fetch_nexus_mods_page(page, &sort_mode),
-        "modworkshop" => fetch_modworkshop_mods_page(page, &sort_mode),
+        "nexus" => {
+            let domain = nexus_domain_from_source_config(&source_config)
+                .ok_or_else(|| "Nexus Browse needs a Nexus domain or full game page URL in this profile.".to_string())?;
+            validate_nexus_source_mapping(&domain, config_string(&source_config, "nexusGameId").as_deref())?;
+            fetch_nexus_mods_page_for_domain(&domain, page, &sort_mode)
+        }
+        "modworkshop" => {
+            let game_route = modworkshop_game_route_from_source_config(&source_config)
+                .ok_or_else(|| "ModWorkshop Browse needs a slug, numeric game ID, or full game page URL in this profile.".to_string())?;
+            fetch_modworkshop_mods_page_for_version(&game_route, page, &sort_mode, None, None, config_string(&source_config, "gameVersion").as_deref())
+        }
         other => Err(format!("Unknown source: {}", other)),
     };
 
@@ -14694,11 +18597,17 @@ fn fetch_source_mods_page_sync(
 
             let page_size = 24usize;
             let start = page.saturating_sub(1) as usize * page_size;
+            let nexus_domain = if source.eq_ignore_ascii_case("nexus") {
+                nexus_domain_from_source_config(&source_config)
+            } else {
+                None
+            };
             let cached = read_source_index_database()
                 .records
                 .into_values()
                 .filter(|record| record.source.eq_ignore_ascii_case(&source))
                 .map(|record| record.summary)
+                .filter(|summary| nexus_domain.as_deref().map(|domain| source_summary_matches_nexus_domain(summary, domain)).unwrap_or(true))
                 .collect::<Vec<_>>();
 
             let mut sorted = nexus_sort_browser_summaries(cached, &sort_mode);
@@ -14706,9 +18615,10 @@ fn fetch_source_mods_page_sync(
             if start < sorted.len() {
                 Ok(sorted.drain(start..sorted.len().min(start + page_size)).collect())
             } else if page == 1 {
-                Ok(sorted.into_iter().take(page_size).collect())
+                let exact = sorted.into_iter().take(page_size).collect::<Vec<_>>();
+                if exact.is_empty() { Err(error) } else { Ok(exact) }
             } else {
-                Ok(Vec::new())
+                Err(error)
             }
         }
     }
@@ -14811,6 +18721,69 @@ fn source_summary_is_payday3_safe(summary: &SourceModSummary) -> bool {
     true
 }
 
+fn classify_nexus_live_error(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    let cause = if lower.contains("http 401") || lower.contains("unauthorized") {
+        "Unauthorized Nexus API key"
+    } else if lower.contains("http 429") || lower.contains("rate limit") {
+        "Nexus API rate limited"
+    } else if lower.contains("http 404") || lower.contains("game not found") {
+        "Nexus game not found"
+    } else if lower.contains("timed out") || lower.contains("dns") || lower.contains("connect") || lower.contains("network") {
+        "Nexus network error"
+    } else {
+        "Nexus API request failed"
+    };
+    format!("{}: {}", cause, error)
+}
+
+fn validate_nexus_source_mapping(game_domain: &str, expected_game_id: Option<&str>) -> Result<(), String> {
+    let domain = clean_source_slug(game_domain).ok_or_else(|| format!("Invalid Nexus game domain: {}", game_domain))?;
+    let settings = load_settings_internal();
+    let api_key = settings
+        .nexus_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Missing Nexus API key. Paste it in Settings first.".to_string())?;
+    let route = format!("https://api.nexusmods.com/v1/games/{}.json", domain);
+    let metadata = http_get_json(&route, Some(api_key)).map_err(classify_nexus_live_error)?;
+    if let Some(expected) = expected_game_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if !source_id_is_numeric(expected) {
+            return Err(format!("Invalid numeric Nexus game ID: {}", expected));
+        }
+        let actual = json_id_string(&metadata, &["id"]).ok_or_else(|| format!("Nexus game metadata for {} did not include a numeric ID. Route: {}", domain, route))?;
+        if actual != expected {
+            return Err(format!("Nexus numeric game ID mismatch for domain {}: configured {}, API returned {}. Route: {}", domain, expected, actual, route));
+        }
+    }
+    Ok(())
+}
+
+fn source_summary_matches_nexus_domain(summary: &SourceModSummary, game_domain: &str) -> bool {
+    if source_summary_is_external_mod_manager(summary) {
+        return false;
+    }
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
+    if domain == "payday3" {
+        return source_summary_is_payday3_safe(summary);
+    }
+    if !summary.source.eq_ignore_ascii_case("nexus") {
+        return true;
+    }
+    let page_matches = summary
+        .page_url
+        .as_deref()
+        .map(|url| url.to_ascii_lowercase().contains(&format!("/{}/mods/", domain)))
+        .unwrap_or(false);
+    let game_matches = summary
+        .game_id
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case(&domain))
+        .unwrap_or(false);
+    page_matches || game_matches
+}
+
 fn source_date_score(summary: &SourceModSummary) -> i64 {
     summary
         .updated_at
@@ -14820,9 +18793,17 @@ fn source_date_score(summary: &SourceModSummary) -> i64 {
 }
 
 fn nexus_sort_browser_summaries(mut summaries: Vec<SourceModSummary>, sort: &str) -> Vec<SourceModSummary> {
-    match sort {
+    match canonical_nexus_sort(sort) {
+        "added" => summaries.sort_by(|a, b| {
+            b.source_id
+                .parse::<u64>()
+                .unwrap_or(0)
+                .cmp(&a.source_id.parse::<u64>().unwrap_or(0))
+                .then(source_date_score(b).cmp(&source_date_score(a)))
+        }),
         "downloads" => summaries.sort_by(|a, b| b.downloads.unwrap_or(0).cmp(&a.downloads.unwrap_or(0))),
-        "liked" | "popular" => summaries.sort_by(|a, b| b.likes.unwrap_or(0).cmp(&a.likes.unwrap_or(0))),
+        "liked" => summaries.sort_by(|a, b| b.likes.unwrap_or(0).cmp(&a.likes.unwrap_or(0))),
+        "name" => summaries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
         _ => summaries.sort_by(|a, b| source_date_score(b).cmp(&source_date_score(a))),
     }
 
@@ -15005,14 +18986,14 @@ fn nexus_dedupe_summaries(summaries: Vec<SourceModSummary>) -> Vec<SourceModSumm
 }
 
 fn nexus_rest_endpoint_order(sort: &str) -> Vec<&'static str> {
-    match sort {
+    match canonical_nexus_sort(sort) {
         "added" => vec![
             "latest_added.json",
             "updated.json?period=1w",
             "updated.json?period=1m",
             "trending.json",
         ],
-        "popular" | "downloads" => vec![
+        "downloads" => vec![
             "trending.json",
             "updated.json?period=1m",
             "updated.json?period=1w",
@@ -15033,11 +19014,12 @@ fn nexus_rest_endpoint_order(sort: &str) -> Vec<&'static str> {
     }
 }
 
-fn nexus_rest_collect(api_key: &str, sort: &str, enrich_limit: usize) -> Vec<SourceModSummary> {
+fn nexus_rest_collect_for_domain(api_key: &str, sort: &str, enrich_limit: usize, game_domain: &str) -> Vec<SourceModSummary> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let mut summaries = Vec::<SourceModSummary>::new();
 
     for endpoint in nexus_rest_endpoint_order(sort) {
-        let url = format!("https://api.nexusmods.com/v1/games/payday3/mods/{}", endpoint);
+        let url = format!("https://api.nexusmods.com/v1/games/{}/mods/{}", domain, endpoint);
 
         let Ok(value) = http_get_json(&url, Some(api_key)) else {
             continue;
@@ -15048,8 +19030,8 @@ fn nexus_rest_collect(api_key: &str, sort: &str, enrich_limit: usize) -> Vec<Sou
         };
 
         for item in array.iter().take(100) {
-            let summary = nexus_summary_from_value(item);
-            if is_clean_nexus_summary_for_browser(&summary) && source_summary_is_payday3_safe(&summary) {
+            let summary = force_nexus_game_summary(nexus_summary_from_value(item), &domain);
+            if is_clean_nexus_summary_for_browser(&summary) && source_summary_matches_nexus_domain(&summary, &domain) {
                 summaries.push(summary);
             }
         }
@@ -15064,7 +19046,7 @@ fn nexus_rest_collect(api_key: &str, sort: &str, enrich_limit: usize) -> Vec<Sou
             .enumerate()
             .map(|(index, summary)| {
                 if index < enrich_limit {
-                    nexus_enrich_summary(summary, api_key)
+                    nexus_enrich_summary_for_domain(summary, api_key, &domain)
                 } else {
                     summary
                 }
@@ -15075,7 +19057,12 @@ fn nexus_rest_collect(api_key: &str, sort: &str, enrich_limit: usize) -> Vec<Sou
     nexus_sort_browser_summaries(nexus_dedupe_summaries(summaries), sort)
 }
 
-fn nexus_cached_index_page(page: u32, sort: &str, page_size: usize) -> Vec<SourceModSummary> {
+fn nexus_rest_collect(api_key: &str, sort: &str, enrich_limit: usize) -> Vec<SourceModSummary> {
+    nexus_rest_collect_for_domain(api_key, sort, enrich_limit, "payday3")
+}
+
+fn nexus_cached_index_page_for_domain(page: u32, sort: &str, page_size: usize, game_domain: &str) -> Vec<SourceModSummary> {
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
     let start = page.saturating_sub(1) as usize * page_size;
 
     let cached = read_source_index_database()
@@ -15083,7 +19070,7 @@ fn nexus_cached_index_page(page: u32, sort: &str, page_size: usize) -> Vec<Sourc
         .into_values()
         .filter(|record| record.source.eq_ignore_ascii_case("nexus"))
         .map(|record| record.summary)
-        .filter(source_summary_is_payday3_safe)
+        .filter(|summary| source_summary_matches_nexus_domain(summary, &domain))
         .filter(is_clean_nexus_summary_for_browser)
         .collect::<Vec<_>>();
 
@@ -15098,11 +19085,16 @@ fn nexus_cached_index_page(page: u32, sort: &str, page_size: usize) -> Vec<Sourc
     }
 }
 
-fn nexus_website_collect(sort: &str, allow_adult: bool, max_pages: u32) -> Vec<SourceModSummary> {
+fn nexus_cached_index_page(page: u32, sort: &str, page_size: usize) -> Vec<SourceModSummary> {
+    nexus_cached_index_page_for_domain(page, sort, page_size, "payday3")
+}
+
+fn nexus_website_collect_for_domain(sort: &str, allow_adult: bool, max_pages: u32, game_domain: &str) -> Vec<SourceModSummary> {
     let mut combined = Vec::new();
+    let domain = clean_source_slug(game_domain).unwrap_or_else(|| "payday3".to_string());
 
     for page in 1..=max_pages {
-        if let Ok(mut web) = fetch_nexus_website_mods_page(page, sort, allow_adult) {
+        if let Ok(mut web) = fetch_nexus_website_mods_page_for_domain(page, sort, allow_adult, &domain) {
             combined.append(&mut web);
         }
     }
@@ -15110,9 +19102,14 @@ fn nexus_website_collect(sort: &str, allow_adult: bool, max_pages: u32) -> Vec<S
     nexus_sort_browser_summaries(nexus_dedupe_summaries(combined), sort)
 }
 
+fn nexus_website_collect(sort: &str, allow_adult: bool, max_pages: u32) -> Vec<SourceModSummary> {
+    nexus_website_collect_for_domain(sort, allow_adult, max_pages, "payday3")
+}
 
-fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>, String> {
+fn fetch_nexus_mods_page_for_domain(game_domain: &str, page: u32, sort: &str) -> Result<Vec<SourceModSummary>, String> {
+    let game_domain = clean_source_slug(game_domain).ok_or_else(|| format!("Invalid Nexus game domain: {}", game_domain))?;
     let page = page.max(1);
+    let sort = canonical_nexus_sort(sort);
     let settings = load_settings_internal();
     let api_key = settings
         .nexus_api_key
@@ -15124,7 +19121,7 @@ fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>,
     // v1.0.5: GraphQL Browse is now allowed to drive live Nexus cards because
     // diagnostics proved the minimal PAYDAY 3 query returns nodes. REST/cache remain
     // fallback and GraphQL errors must never blank Browse.
-    if let Ok(graphql_mods) = fetch_nexus_graphql_mods_page_paged(sort, api_key, page, page_size) {
+    if let Ok(graphql_mods) = fetch_nexus_graphql_mods_page_paged_for_domain(&game_domain, sort, api_key, page, page_size) {
         let visible = nexus_sort_browser_summaries(nexus_dedupe_summaries(graphql_mods), sort)
             .into_iter()
             .take(page_size)
@@ -15137,14 +19134,14 @@ fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>,
     }
 
     if page == 1 {
-        let mut combined = nexus_rest_collect(api_key, sort, 24);
-        let mut website = nexus_website_collect(sort, settings.show_age_restricted_nexus, 2);
+        let mut combined = nexus_rest_collect_for_domain(api_key, sort, 24, &game_domain);
+        let mut website = nexus_website_collect_for_domain(sort, settings.show_age_restricted_nexus, 2, &game_domain);
         combined.append(&mut website);
 
         let mut clean = nexus_sort_browser_summaries(nexus_dedupe_summaries(combined), sort);
 
         if clean.is_empty() {
-            clean = nexus_cached_index_page(page, sort, page_size);
+            clean = nexus_cached_index_page_for_domain(page, sort, page_size, &game_domain);
         }
 
         if !clean.is_empty() {
@@ -15153,15 +19150,19 @@ fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>,
             return Ok(visible);
         }
 
-        return Err("Nexus Browse rebuilt loader found no REST, website, or indexed PAYDAY 3 cards.".to_string());
+        return Err(format!("Nexus Browse found no REST, website, or indexed cards for {}.", game_domain));
     }
 
-    let mut indexed = nexus_cached_index_page(page, sort, page_size);
+    let mut indexed = nexus_cached_index_page_for_domain(page, sort, page_size, &game_domain);
 
     if indexed.is_empty() {
-        let mut website = fetch_nexus_website_mods_page(page, sort, settings.show_age_restricted_nexus)
+        let mut website = fetch_nexus_website_mods_page_for_domain(page, sort, settings.show_age_restricted_nexus, &game_domain)
             .unwrap_or_default();
-        website.retain(source_summary_is_payday3_safe);
+        website = website
+            .into_iter()
+            .map(|summary| force_nexus_game_summary(summary, &game_domain))
+            .filter(|summary| source_summary_matches_nexus_domain(summary, &game_domain))
+            .collect();
         indexed = nexus_sort_browser_summaries(nexus_dedupe_summaries(website), sort)
             .into_iter()
             .take(page_size)
@@ -15171,27 +19172,69 @@ fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>,
     Ok(indexed)
 }
 
-fn parse_modworkshop_list(value: serde_json::Value) -> Vec<SourceModSummary> {
-    let data = unwrap_data(value);
-    let mut candidates: Vec<&serde_json::Value> = Vec::new();
+fn fetch_nexus_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>, String> {
+    fetch_nexus_mods_page_for_domain("payday3", page, sort)
+}
 
+fn modworkshop_list_candidates(data: &serde_json::Value) -> Vec<&serde_json::Value> {
     if let Some(array) = data.as_array() {
-        candidates = array.iter().collect();
-    } else {
-        for key in ["mods", "results", "items", "data"] {
-            if let Some(array) = data.get(key).and_then(|v| v.as_array()) {
-                candidates = array.iter().collect();
-                break;
-            }
+        return array.iter().collect();
+    }
+
+    for key in ["mods", "results", "items", "data"] {
+        if let Some(array) = data.get(key).and_then(|v| v.as_array()) {
+            return array.iter().collect();
         }
     }
 
-    candidates
+    Vec::new()
+}
+
+fn parse_modworkshop_list_for_game(value: serde_json::Value, game_id: &str) -> Vec<SourceModSummary> {
+    let data = unwrap_data(value);
+    modworkshop_list_candidates(&data)
         .into_iter()
-        .filter_map(modworkshop_summary_from_api_value)
-        .filter(source_summary_is_payday3_safe)
+        .filter(|item| modworkshop_game_id_from_value(item).is_some())
+        .filter_map(|item| modworkshop_summary_from_api_value_for_game(item, Some(game_id)))
+        .filter(|summary| modworkshop_summary_matches_game(summary, game_id))
+        .map(|summary| force_modworkshop_game_summary(summary, game_id))
         .take(40)
         .collect()
+}
+
+fn parse_modworkshop_list(value: serde_json::Value) -> Vec<SourceModSummary> {
+    parse_modworkshop_list_for_game(value, MODWORKSHOP_PAYDAY3_GAME_ID)
+        .into_iter()
+        .filter(source_summary_is_payday3_safe)
+        .collect()
+}
+
+fn parse_modworkshop_categories(value: serde_json::Value) -> Vec<SourceCategory> {
+    let data = unwrap_data(value);
+    let candidates = if let Some(array) = data.as_array() {
+        array.iter().collect::<Vec<_>>()
+    } else {
+        json_array(&data, &["categories", "items", "results", "data"])
+    };
+    let mut categories = Vec::<SourceCategory>::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+
+    for item in candidates {
+        let Some(id) = json_modworkshop_id_string(item, &["id", "category_id", "categoryId"]) else {
+            continue;
+        };
+        let Some(label) = json_string(item, &["name", "label", "title"]) else {
+            continue;
+        };
+        let label = clean_html_text(&label);
+        if label.trim().is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        categories.push(SourceCategory { id, label });
+    }
+
+    categories.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    categories
 }
 
 
@@ -15284,7 +19327,83 @@ fn find_first_image_like_url(value: &serde_json::Value, depth: usize) -> Option<
 }
 
 
-fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<SourceModSummary> {
+fn modworkshop_game_display_label(game_id: &str) -> String {
+    let normalized = game_id.trim().to_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "payday-3" | "payday3" | "pd3" | MODWORKSHOP_PAYDAY3_NUMERIC_GAME_ID => "PAYDAY 3".to_string(),
+        "payday-2" | "payday2" | "pd2" | "1" => "PAYDAY 2".to_string(),
+        other => other
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn normalize_modworkshop_game_route(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("ModWorkshop game id is required.".to_string());
+    }
+
+    let normalized = trimmed.to_lowercase().replace('_', "-").replace(' ', "-");
+    let mapped = match normalized.as_str() {
+        "payday3" | "pd3" | "853" => "payday-3",
+        "payday2" | "pd2" | "1" => "payday-2",
+        "2" | "payday-the-heist" | "pdth" => "pdth",
+        other => other,
+    };
+
+    if mapped
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        Ok(mapped.to_string())
+    } else {
+        Err(format!("Invalid ModWorkshop game id: {}", trimmed))
+    }
+}
+
+fn modworkshop_summary_matches_game(summary: &SourceModSummary, requested_game_id: &str) -> bool {
+    let Ok(requested) = normalize_modworkshop_game_route(requested_game_id) else {
+        return false;
+    };
+
+    let Some(actual) = summary.game_id.as_deref() else {
+        return false;
+    };
+
+    normalize_modworkshop_game_route(actual)
+        .map(|actual| actual == requested)
+        .unwrap_or(false)
+}
+
+fn force_modworkshop_game_summary(mut summary: SourceModSummary, game_id: &str) -> SourceModSummary {
+    if !summary.source.eq_ignore_ascii_case("modworkshop") {
+        return summary;
+    }
+
+    let normalized = normalize_modworkshop_game_route(game_id).unwrap_or_else(|_| game_id.to_string());
+    let label = modworkshop_game_display_label(&normalized);
+    summary.game_id = Some(normalized);
+    summary.tags.retain(|tag| {
+        let clean = tag.trim().to_lowercase();
+        clean != "payday 3" && clean != "payday3" && clean != "payday 2" && clean != "payday2"
+    });
+    if !summary.tags.iter().any(|tag| tag.eq_ignore_ascii_case(&label)) {
+        summary.tags.push(label);
+    }
+    summary
+}
+
+fn modworkshop_summary_from_api_value_for_game(item: &serde_json::Value, fallback_game_id: Option<&str>) -> Option<SourceModSummary> {
     let id = json_modworkshop_id_string(item, &["id", "mod_id", "modId"])?;
 
     let name = json_string(item, &["name", "title"])
@@ -15292,18 +19411,21 @@ fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<Source
         .unwrap_or_else(|| format!("ModWorkshop Mod {}", id));
 
     let game_id = modworkshop_game_id_from_value(item)
-        .or_else(|| Some(MODWORKSHOP_PAYDAY3_GAME_ID.to_string()));
+        .or_else(|| fallback_game_id.map(|value| value.to_string()));
 
     let mut tags = vec!["ModWorkshop".to_string()];
-    if game_id
-        .as_deref()
-        .map(is_modworkshop_payday3_game_id)
-        .unwrap_or(true)
-    {
-        tags.push("PAYDAY 3".to_string());
+    if let Some(label) = game_id.as_deref().map(modworkshop_game_display_label) {
+        if !label.trim().is_empty() {
+            tags.push(label);
+        }
     }
 
     for tag in json_array(item, &["tags", "categories", "game", "games"]) {
+        if json_modworkshop_id_string(tag, &["id"]).as_deref() == Some("97")
+            && normalize_modworkshop_game_route(game_id.as_deref().unwrap_or_default()).ok().as_deref() == Some(MODWORKSHOP_PAYDAY3_GAME_ID)
+            && !tags.iter().any(|tag| tag.eq_ignore_ascii_case("UE4.27")) {
+            tags.push("UE4.27".to_string());
+        }
         if let Some(tag_name) = json_string(tag, &["name", "title", "slug"]) {
             if !tags.iter().any(|existing| existing.eq_ignore_ascii_case(&tag_name)) {
                 tags.push(tag_name);
@@ -15343,24 +19465,19 @@ fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<Source
         };
     }
 
+    let author = modworkshop_author_fields_from_value(item);
+
     Some(SourceModSummary {
         source: "modworkshop".to_string(),
         source_id: id.clone(),
         uid: None,
         game_id,
         name,
-        author: json_string(item, &["author", "user", "username", "submitter"])
-            .or_else(|| json_nested_string(
-                item,
-                &[
-                    &["author", "name"],
-                    &["author", "username"],
-                    &["user", "name"],
-                    &["user", "username"],
-                    &["submitter", "name"],
-                    &["submitter", "username"],
-                ],
-            )),
+        author: author.display_name,
+        author_username: author.username,
+        author_user_id: author.user_id,
+        author_profile_url: author.profile_url,
+        author_avatar_url: author.avatar_url,
         version: json_string(item, &["version"]),
         thumbnail_url: absolutize_source_url(
             "modworkshop",
@@ -15408,6 +19525,10 @@ fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<Source
         short_description,
         tags,
     })
+}
+
+fn modworkshop_summary_from_api_value(item: &serde_json::Value) -> Option<SourceModSummary> {
+    modworkshop_summary_from_api_value_for_game(item, Some(MODWORKSHOP_PAYDAY3_GAME_ID))
 }
 
 fn force_payday3_modworkshop_summary(mut summary: SourceModSummary) -> SourceModSummary {
@@ -15504,7 +19625,7 @@ fn score_search_result_for_query(summary: &SourceModSummary, query: &str) -> u32
 fn modworkshop_summary_with_file_aliases(mut summary: SourceModSummary) -> SourceModSummary {
     summary.game_id = summary.game_id.or_else(|| Some(MODWORKSHOP_PAYDAY3_GAME_ID.to_string()));
 
-    let Ok(detail) = fetch_modworkshop_mod_detail(summary.source_id.clone()) else {
+    let Ok(detail) = fetch_modworkshop_mod_detail(summary.source_id.clone(), None) else {
         return summary;
     };
 
@@ -15938,17 +20059,54 @@ fn fetch_modworkshop_filter_page_sync(filter: String, page: Option<u32>, sort: O
 }
 
 #[tauri::command]
-async fn fetch_modworkshop_filter_page(filter: String, page: Option<u32>, sort: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+async fn fetch_modworkshop_filter_page(filter: String, page: Option<u32>, sort: Option<String>, profile_id: Option<String>) -> Result<Vec<SourceModSummary>, String> {
+    if !is_builtin_payday3_profile(profile_id.as_deref()) {
+        return Ok(Vec::new());
+    }
+
     tauri::async_runtime::spawn_blocking(move || fetch_modworkshop_filter_page_sync(filter, page, sort))
         .await
         .map_err(|err| format!("ModWorkshop filter task failed: {:?}", err))?
 }
 
 #[tauri::command]
-async fn search_modworkshop_mods_for_query(query: String, page: Option<u32>) -> Result<Vec<SourceModSummary>, String> {
-    tauri::async_runtime::spawn_blocking(move || search_modworkshop_mods_for_query_sync(query, page))
-        .await
-        .map_err(|err| format!("ModWorkshop search task failed: {:?}", err))?
+async fn search_modworkshop_mods_for_query(
+    query: String,
+    page: Option<u32>,
+    profile_id: Option<String>,
+    game_id: Option<String>,
+    category_id: Option<String>,
+) -> Result<Vec<SourceModSummary>, String> {
+    let requested_game_id = game_id
+        .or_else(|| {
+            if is_builtin_payday3_profile(profile_id.as_deref()) {
+                Some(MODWORKSHOP_PAYDAY3_GAME_ID.to_string())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "ModWorkshop search needs a profile ModWorkshop game ID. Profile ID: {}.",
+                profile_id.as_deref().unwrap_or("unknown")
+            )
+        })?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let normalized_game_id = normalize_modworkshop_game_route(&requested_game_id)?;
+        let page_number = page.unwrap_or(1).max(1);
+        let version = modworkshop_profile_game_version(profile_id.as_deref(), &normalized_game_id);
+        match fetch_modworkshop_mods_page_for_version(&normalized_game_id, page_number, "best_match", Some(query.as_str()), category_id.as_deref(), version.as_deref()) {
+            Ok(mods) => Ok(mods),
+            Err(error) if normalized_game_id == MODWORKSHOP_PAYDAY3_GAME_ID && version.is_none() => {
+                eprintln!("ModWorkshop scoped search failed, falling back to legacy PAYDAY 3 probes: {}", error);
+                search_modworkshop_mods_for_query_sync(query, Some(page_number))
+            }
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .map_err(|err| format!("ModWorkshop search task failed: {:?}", err))?
 }
 
 
@@ -15982,7 +20140,18 @@ fn http_get_json_fast_with_api_key(url: &str, timeout_secs: u64, api_key: Option
         .map_err(|err| format!("Failed to read response body: {}", err))?;
 
     if !status.is_success() {
-        return Err(format!("{} returned HTTP {}", url, status));
+        let preview = text
+            .chars()
+            .take(600)
+            .collect::<String>()
+            .replace('\n', " ")
+            .replace('\r', " ");
+        return Err(format!(
+            "{} returned HTTP {}. Body preview: {}",
+            url,
+            status,
+            if preview.trim().is_empty() { "<empty>" } else { preview.trim() }
+        ));
     }
 
     serde_json::from_str(&text)
@@ -16129,6 +20298,10 @@ fn scrape_modworkshop_summary_from_segment(full_html: &str, segment: &str, id: &
         game_id: Some("payday-3".to_string()),
         name,
         author: None,
+        author_username: None,
+        author_user_id: None,
+        author_profile_url: None,
+        author_avatar_url: None,
         version: None,
         thumbnail_url: thumbnail.clone(),
         banner_url: thumbnail,
@@ -16249,6 +20422,137 @@ fn scrape_modworkshop_public_page_cards_by_block(html: &str, page_size: usize) -
     cards
 }
 
+fn modworkshop_api_sort_value(sort: &str) -> &'static str {
+    match sort {
+        "published_at" | "added" => "published_at",
+        "bumped_at" | "updated" | "recent" => "bumped_at",
+        "downloads" => "downloads",
+        "likes" | "liked" => "likes",
+        "views" => "views",
+        "score" | "popular" => "score",
+        "name" => "name",
+        "best_match" => "score",
+        _ => "bumped_at",
+    }
+}
+
+fn modworkshop_api_browse_urls_for_game(game_id: &str, page: u32, sort: &str, query: Option<&str>, category_id: Option<&str>) -> Vec<String> {
+    let page = page.max(1);
+    let sort_name = modworkshop_api_sort_value(sort);
+    let root = format!("https://api.modworkshop.net/games/{}/mods?page={}&sort={}", game_id, page, sort_name);
+    let mut urls = Vec::new();
+    let mut add_url = |base: String| {
+        let mut url = base;
+        if let Some(category_id) = category_id.map(str::trim).filter(|value| !value.is_empty()) {
+            url.push_str("&category_id=");
+            url.push_str(&percent_encode_query(category_id));
+        }
+        if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+            url.push_str("&query=");
+            url.push_str(&percent_encode_query(query));
+        }
+        urls.push(url);
+    };
+
+    add_url(root.clone());
+
+    if query.map(str::trim).filter(|value| !value.is_empty()).is_some() {
+        let mut search_url = format!("https://api.modworkshop.net/games/{}/mods?page={}&sort={}", game_id, page, sort_name);
+        if let Some(category_id) = category_id.map(str::trim).filter(|value| !value.is_empty()) {
+            search_url.push_str("&category_id=");
+            search_url.push_str(&percent_encode_query(category_id));
+        }
+        search_url.push_str("&search=");
+        search_url.push_str(&percent_encode_query(query.unwrap_or_default().trim()));
+        urls.push(search_url);
+    }
+
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn modworkshop_public_browse_urls_for_game(game_id: &str, page: u32, sort: &str, query: Option<&str>, category_id: Option<&str>) -> Vec<String> {
+    let page = page.max(1);
+    let sort_value = modworkshop_sort_query_value(sort);
+    let root = format!("https://modworkshop.net/g/{}/mods", game_id);
+    let legacy_root = format!("https://modworkshop.net/g/{}", game_id);
+    let mut urls = vec![format!("{}?page={}&sort={}", root, page, sort_value)];
+
+    if let Some(category_id) = category_id.map(str::trim).filter(|value| !value.is_empty()) {
+        urls.push(format!("{}?category_id={}&page={}&sort={}", root, percent_encode_query(category_id), page, sort_value));
+    }
+
+    if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        let encoded = percent_encode_query(query);
+        urls.push(format!("{}?query={}&page={}&sort={}", root, encoded, page, sort_value));
+        urls.push(format!("{}?search={}&page={}&sort={}", root, encoded, page, sort_value));
+    }
+
+    urls.push(format!("{}?page={}&sort={}", legacy_root, page, sort_value));
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn modworkshop_profile_game_version(profile_id: Option<&str>, game_id: &str) -> Option<String> {
+    let is_payday3 = normalize_modworkshop_game_route(game_id).ok().as_deref() == Some(MODWORKSHOP_PAYDAY3_GAME_ID);
+    if !is_payday3 { return None; }
+    let profile_id = profile_id.unwrap_or(BUILTIN_PAYDAY3_PROFILE_ID);
+    let version = load_profile_settings_internal(profile_id).game_version
+        .or_else(|| read_game_profile_draft(profile_id).ok().and_then(|draft| draft_overview_string(&draft, "gameVersion")))
+        .filter(|version| matches!(version.as_str(), "UE4.27" | "UE5.5"))
+        .unwrap_or_else(|| "UE5.5".to_string());
+    Some(version)
+}
+
+fn modworkshop_version_matches(tags: &[String], version: &str) -> bool {
+    let legacy = tags.iter().any(|tag| tag.eq_ignore_ascii_case("UE4.27"));
+    if version == "UE4.27" { legacy } else { !legacy }
+}
+
+fn fetch_modworkshop_mods_page_for_version(game_id: &str, page: u32, sort: &str, query: Option<&str>, category_id: Option<&str>, version: Option<&str>) -> Result<Vec<SourceModSummary>, String> {
+    let game_id = normalize_modworkshop_game_route(game_id)?;
+    let Some(version) = version.filter(|_| game_id == MODWORKSHOP_PAYDAY3_GAME_ID) else {
+        return fetch_modworkshop_mods_page_for_game(&game_id, page, sort, query, category_id);
+    };
+    let filter = if version == "UE4.27" { "tags%5B%5D=97" } else { "block_tags%5B%5D=97" };
+    let url = modworkshop_api_browse_urls_for_game(&game_id, page, sort, query, category_id).into_iter().next().ok_or("No ModWorkshop API URL")?;
+    let value = http_get_json_fast(&format!("{}&{}&limit=20", url, filter), 14)?;
+    // Do not fall back to scraped pages: they omit engine tags and bypass compatibility filtering.
+    Ok(parse_modworkshop_list_for_game(value, &game_id).into_iter().filter(|summary| modworkshop_version_matches(&summary.tags, version)).collect())
+}
+
+fn fetch_modworkshop_mods_page_for_game(game_id: &str, page: u32, sort: &str, query: Option<&str>, category_id: Option<&str>) -> Result<Vec<SourceModSummary>, String> {
+    let game_id = normalize_modworkshop_game_route(game_id)?;
+    let page = page.max(1);
+    let page_size = 24usize;
+    let query = query.map(str::trim).filter(|value| !value.is_empty());
+    let category_id = category_id.map(str::trim).filter(|value| !value.is_empty());
+    let mut notes = Vec::new();
+
+    for url in modworkshop_api_browse_urls_for_game(&game_id, page, sort, query, category_id) {
+        match http_get_json_fast(&url, 10) {
+            Ok(value) => {
+                let mut mods = parse_modworkshop_list_for_game(value, &game_id);
+                if let Some(query) = query {
+                    mods.retain(|summary| modworkshop_search_matches(summary, query));
+                }
+                let mods = modworkshop_sort_browser_summaries(dedupe_modworkshop_summaries_preserve_order(mods), sort)
+                    .into_iter()
+                    .take(page_size)
+                    .collect::<Vec<_>>();
+                return Ok(mods);
+            }
+            Err(error) => notes.push(format!("{} failed: {}", url, error)),
+        }
+    }
+
+    // HTML cards do not prove game identity; never relabel them as the requested game.
+
+    Err(format!("ModWorkshop live browser failed for game {} page {}. {}", game_id, page, notes.join(" | ")))
+}
+
 fn fetch_modworkshop_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSummary>, String> {
     let page = page.max(1);
     let page_size = 24usize;
@@ -16335,10 +20639,12 @@ fn fetch_modworkshop_mods_page(page: u32, sort: &str) -> Result<Vec<SourceModSum
 
 
 
+
 #[tauri::command]
 fn window_minimize(app: tauri::AppHandle) -> Result<String, String> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
+        .or_else(|| app.windows().into_values().next())
         .ok_or_else(|| "Main window was not found.".to_string())?;
 
     window.minimize().map_err(|err| format!("Failed to minimize window: {}", err))?;
@@ -16348,7 +20654,8 @@ fn window_minimize(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn window_toggle_maximize(app: tauri::AppHandle) -> Result<String, String> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
+        .or_else(|| app.windows().into_values().next())
         .ok_or_else(|| "Main window was not found.".to_string())?;
 
     if window.is_maximized().unwrap_or(false) {
@@ -16363,7 +20670,8 @@ fn window_toggle_maximize(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn window_close(app: tauri::AppHandle) -> Result<String, String> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
+        .or_else(|| app.windows().into_values().next())
         .ok_or_else(|| "Main window was not found.".to_string())?;
 
     window.close().map_err(|err| format!("Failed to close window: {}", err))?;
@@ -16373,7 +20681,8 @@ fn window_close(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn window_start_dragging(app: tauri::AppHandle) -> Result<String, String> {
     let window = app
-        .get_webview_window("main")
+        .get_window("main")
+        .or_else(|| app.windows().into_values().next())
         .ok_or_else(|| "Main window was not found.".to_string())?;
 
     window.start_dragging().map_err(|err| format!("Failed to start dragging window: {}", err))?;
@@ -16381,22 +20690,615 @@ fn window_start_dragging(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 
+fn saved_window_state_is_visible(state: &SavedWindowState) -> bool {
+    state.width >= 900
+        && state.height >= 600
+        && state.width <= 8000
+        && state.height <= 5000
+        && state.x > -32000
+        && state.y > -32000
+}
+
+fn default_window_size_for(settings: &AppSettings) -> (u32, u32) {
+    match settings.interface_density.as_str() {
+        "compact" => (1360, 820),
+        "spacious" => (1600, 940),
+        _ => (1500, 900),
+    }
+}
+
+fn apply_initial_window_state(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let settings = load_settings_internal();
+    let _ = window.set_decorations(false);
+    let _ = window.set_resizable(true);
+    let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+        width: 1100.0,
+        height: 700.0,
+    })));
+
+    if settings.remember_window_state {
+        if let Some(state) = settings.window_state.as_ref().filter(|state| saved_window_state_is_visible(state)) {
+            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+                width: state.width,
+                height: state.height,
+            }));
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: state.x,
+                y: state.y,
+            }));
+            if state.maximized.unwrap_or(false) {
+                let _ = window.maximize();
+            }
+            return Ok(());
+        }
+    }
+
+    let (width, height) = default_window_size_for(&settings);
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize { width, height }));
+    let _ = window.center();
+    Ok(())
+}
+
+fn persist_window_state(window: &tauri::WebviewWindow) {
+    let mut settings = load_settings_internal();
+    if !settings.remember_window_state {
+        return;
+    }
+
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+
+    settings.window_state = Some(SavedWindowState {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized: Some(window.is_maximized().unwrap_or(false)),
+    });
+
+    let _ = save_settings_internal(&settings);
+}
+
+fn register_window_state_persistence(window: &tauri::WebviewWindow) {
+    let window_for_events = window.clone();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::CloseRequested { .. } => {
+            persist_window_state(&window_for_events);
+        }
+        _ => {}
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(test)]
+mod profile_settings_tests {
+    #[test]
+    fn allowmods_runtime_diagnostics_use_the_latest_recorded_session() {
+        assert!(allowmods_patch_failed("Starting C++ mod 'AllowModsMod'\n[AllowModsMod]: Delegate not found. Unable to patch."));
+        assert!(!allowmods_patch_failed("Starting C++ mod 'AllowModsMod'\n[AllowModsMod]: Unable to patch.\nStarting C++ mod 'AllowModsMod'\n[AllowModsMod]: Init."));
+        assert!(!allowmods_patch_failed("[OtherMod]: Unable to patch."));
+    }
+    #[test]
+    fn app_update_version_matches_package_metadata() {
+        assert_eq!(super::APP_VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(!super::version_is_newer(super::APP_VERSION, super::APP_VERSION));
+    }
+    use super::*;
+
+    #[test]
+    fn payday_engine_versions_route_distinct_ue4ss_trees() {
+        let root = std::env::temp_dir().join("tsuki-pd3-layout-fixture");
+        let ue5 = payday_paths_for_version(&root, "UE5.5");
+        let ue4 = payday_paths_for_version(&root, "UE4.27");
+        for (input, output) in [
+            ("Mods/MyMod/Scripts/main.lua", "UE4SS/Mods/MyMod/Scripts/main.lua"),
+            ("MyMod/Scripts/main.lua", "UE4SS/Mods/MyMod/Scripts/main.lua"),
+            ("UE4SS/UE4SS_Signatures/GNatives.lua", "UE4SS/UE4SS_Signatures/GNatives.lua"),
+            ("UE4SS/Mods/AllowModsMod/dlls/AllowModsMod.dll", "UE4SS/Mods/AllowModsMod/dlls/AllowModsMod.dll"),
+            ("UE4SS/Mods/mods.txt", "UE4SS/Mods/mods.txt"),
+            ("MyMod/enabled.txt", "UE4SS/Mods/MyMod/enabled.txt"),
+            ("dwmapi.dll", "dwmapi.dll"),
+            ("UE4SS.dll", "UE4SS/UE4SS.dll"),
+        ] {
+            let entry = infer_archive_entry_destination(&ue5, input, "UE4SS");
+            assert!(!entry.blocked, "{}: {}", input, entry.reason);
+            assert_eq!(Path::new(&entry.destination), ue5.win64.join(output));
+        }
+        assert_eq!(payday_ue4ss_relative_path(&ue4, "Mods/MyMod/Scripts/main.lua"), "Mods/MyMod/Scripts/main.lua");
+        assert!(common_archive_root(&["MyMod/Scripts/main.lua".to_string()]).is_none());
+        assert!(common_archive_root(&["UE4SS/UE4SS.dll".to_string()]).is_none());
+        let pak = infer_archive_entry_destination(&ue5, "Example_P.pak", "");
+        assert!(validate_payday_ue5_dependencies(&ue5, &[pak]).is_err());
+    }
+
+    #[test]
+    fn payday_missing_receipt_is_not_live_even_when_disabled() {
+        let root = std::env::temp_dir().join(format!("tsuki-receipt-presence-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let paths = payday_paths_for_version(&root, "UE5.5");
+        let original = paths.ue4ss_mods.join("Example/Scripts/main.lua");
+        let receipt: InstallReceipt = serde_json::from_value(serde_json::json!({
+            "id": "fixture", "displayName": "Example", "source": "local", "modType": "ue4ss", "enabled": false,
+            "files": [{"relativePath": original.display().to_string()}]
+        })).unwrap();
+        let record = installed_state_record_from_receipt(&paths, &receipt);
+        assert!(!record.files.iter().any(|file| file.live));
+        let disabled = disabled_destination_for_receipt_file(&paths, &receipt, &original, &receipt.files[0]);
+        fs::create_dir_all(disabled.parent().unwrap()).unwrap();
+        fs::write(&disabled, b"fixture").unwrap();
+        assert!(installed_state_record_from_receipt(&paths, &receipt).files.iter().any(|file| file.live));
+        fs::remove_file(disabled).unwrap();
+        assert!(!installed_state_record_from_receipt(&paths, &receipt).files.iter().any(|file| file.live));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn modworkshop_lists_reject_other_games_and_unidentified_cards() {
+        let fixture = serde_json::json!({ "data": [
+            { "id": 10, "name": "Legacy PD3", "game_id": 853, "tags": [{ "id": 97 }] },
+            { "id": 11, "name": "PD2", "game_id": 1, "tags": [{ "id": 97, "name": "UE4.27" }] },
+            { "id": 12, "name": "Unknown", "category": { "name": "PAYDAY 3" } },
+            { "id": 13, "name": "PDTH", "game_id": 2 }
+        ] });
+        let payday3 = parse_modworkshop_list_for_game(fixture.clone(), "853");
+        assert_eq!(payday3.len(), 1);
+        assert_eq!(payday3[0].source_id, "10");
+        assert!(modworkshop_version_matches(&payday3[0].tags, "UE4.27"));
+        assert!(!modworkshop_version_matches(&payday3[0].tags, "UE5.5"));
+        let payday2 = parse_modworkshop_list_for_game(fixture.clone(), "payday-2");
+        assert_eq!(payday2.len(), 1);
+        assert_eq!(payday2[0].source_id, "11");
+        let heist = parse_modworkshop_list_for_game(fixture, "pdth");
+        assert_eq!(heist.len(), 1);
+        assert_eq!(heist[0].source_id, "13");
+    }
+
+    #[test]
+    fn structured_builtin_sources_resolve_without_legacy_fields() {
+        for (profile, expected) in [("builtin.payday2", "payday-2"), ("builtin.payday-the-heist", "pdth"), ("builtin.payday3", "payday-3")] {
+            let config = builtin_profile_source_config(profile).unwrap();
+            assert_eq!(modworkshop_game_route_from_source_config(&config).as_deref(), Some(expected));
+        }
+        let config = builtin_profile_source_config("builtin.outlast-trials").unwrap();
+        assert_eq!(nexus_domain_from_source_config(&config).as_deref(), Some("theoutlasttrials"));
+        let mut config = builtin_profile_source_config("builtin.payday3").unwrap();
+        config["modworkshopSlug"] = serde_json::json!("payday-2");
+        assert_eq!(modworkshop_game_route_from_source_config(&config).as_deref(), Some("payday-3"));
+    }
+
+    #[test]
+    fn payday3_engine_filter_distinguishes_ue4ss_from_ue427() {
+        assert!(modworkshop_version_matches(&["UE4SS".to_string()], "UE5.5"));
+        assert!(!modworkshop_version_matches(&["UE4.27".to_string()], "UE5.5"));
+        assert!(modworkshop_version_matches(&["ue4.27".to_string()], "UE4.27"));
+        assert!(!modworkshop_version_matches(&["UE4SS".to_string()], "UE4.27"));
+    }
+
+    #[test]
+    fn payday3_game_version_migrates_to_ue5_and_preserves_legacy_choice() {
+        let current = normalize_profile_settings(ProfileSettings::default(), BUILTIN_PAYDAY3_PROFILE_ID);
+        assert_eq!(current.game_version.as_deref(), Some("UE5.5"));
+        let legacy = normalize_profile_settings(ProfileSettings { game_version: Some("UE4.27".to_string()), ..Default::default() }, BUILTIN_PAYDAY3_PROFILE_ID);
+        let saved = serde_json::to_string(&legacy).unwrap();
+        let restored: ProfileSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.game_version.as_deref(), Some("UE4.27"));
+    }
+
+    #[test]
+    fn steam_manifest_value_reads_exact_quoted_keys() {
+        let manifest = r#"
+        "AppState"
+        {
+            "appid"        "218620"
+            "installdir"   "PAYDAY 2"
+        }
+        "#;
+
+        assert_eq!(steam_manifest_value(manifest, "installdir").as_deref(), Some("PAYDAY 2"));
+        assert_eq!(steam_manifest_value(manifest, "app").as_deref(), None);
+    }
+
+    #[test]
+    fn spider_man_2_launch_mapping_prefers_current_executable() {
+        assert_eq!(profile_installs::builtin_profile_executable_markers("builtin.spider-man-2"), &["Spider-Man2.exe", "SpiderMan2.exe"]);
+        assert_eq!(builtin_profile_steam_app_ids("builtin.spider-man-2"), &["2651280"]);
+        assert_eq!(split_launch_arguments(r#"-windowed "profile test""#), vec!["-windowed", "profile test"]);
+    }
+
+    #[test]
+    fn normalize_profile_settings_forces_requested_profile_id() {
+        let settings = ProfileSettings {
+            profile_id: "wrong.profile".to_string(),
+            browser_mode_override: "sideways".to_string(),
+            preferred_browser_source: "nexus".to_string(),
+            enabled_sources: vec!["nexus".to_string(), "bad".to_string(), "nexus".to_string()],
+            backup_retention_count: 900,
+            game_root_override: Some("  C:\\Games\\Example  ".to_string()),
+            executable_override: Some("   ".to_string()),
+            ..ProfileSettings::default()
+        };
+
+        let normalized = normalize_profile_settings(settings, "profile.two");
+
+        assert_eq!(normalized.profile_id, "profile.two");
+        assert_eq!(normalized.browser_mode_override, "inherit");
+        assert_eq!(normalized.preferred_browser_source, "nexus");
+        assert_eq!(normalized.enabled_sources, vec!["nexus".to_string()]);
+        assert_eq!(normalized.backup_retention_count, 50);
+        assert_eq!(normalized.game_root_override.as_deref(), Some("C:\\Games\\Example"));
+        assert!(normalized.executable_override.is_none());
+    }
+
+    #[test]
+    fn reset_profile_settings_scope_keeps_profile_isolated() {
+        let mut settings = normalize_profile_settings(ProfileSettings::default(), "profile.alpha");
+        settings.browser_mode_override = "embedded".to_string();
+        settings.preferred_browser_source = "modworkshop".to_string();
+        settings.remember_last_website = false;
+        let defaults = normalize_profile_settings(ProfileSettings::default(), "profile.alpha");
+
+        reset_profile_settings_scope(&mut settings, &defaults, "browsing").unwrap();
+
+        assert_eq!(settings.profile_id, "profile.alpha");
+        assert_eq!(settings.browser_mode_override, "inherit");
+        assert_eq!(settings.preferred_browser_source, "auto");
+        assert!(settings.remember_last_website);
+    }
+
+    #[test]
+    fn modworkshop_game_routes_normalize_profile_mappings() {
+        assert_eq!(normalize_modworkshop_game_route("853").unwrap(), "payday-3");
+        assert_eq!(normalize_modworkshop_game_route("PAYDAY 2").unwrap(), "payday-2");
+        assert_eq!(normalize_modworkshop_game_route("ready_or_not").unwrap(), "ready-or-not");
+        assert!(normalize_modworkshop_game_route("../payday-2").is_err());
+    }
+
+    #[test]
+    fn profile_source_config_splits_names_slugs_ids_and_urls() {
+        let draft = serde_json::json!({
+            "overview": {},
+            "sections": {
+                "sources": [
+                    {
+                        "title": "Nexus Mods",
+                        "fields": [
+                            { "label": "Source Type", "value": "nexus" },
+                            { "label": "Display Name", "value": "Nexus Mods" },
+                            { "label": "Human Game Name", "value": "Ready or Not" },
+                            { "label": "Nexus Game ID", "value": "1234" },
+                            { "label": "Nexus Game Page URL", "value": "https://www.nexusmods.com/readyornot/mods/?tab=popular" }
+                        ]
+                    },
+                    {
+                        "title": "ModWorkshop",
+                        "fields": [
+                            { "label": "Source Type", "value": "modworkshop" },
+                            { "label": "Display Name", "value": "ModWorkshop" },
+                            { "label": "Human Game Name", "value": "The Outlast Trials" },
+                            { "label": "ModWorkshop Game ID", "value": "999" },
+                            { "label": "ModWorkshop Game Page URL", "value": "https://modworkshop.net/g/the-outlast-trials/mods/?category_id=7" }
+                        ]
+                    }
+                ]
+            }
+        });
+        let config = source_config_from_draft(&draft);
+
+        assert_eq!(config.get("nexusGameName").and_then(|value| value.as_str()), Some("Ready or Not"));
+        assert_eq!(config.get("nexusDomain").and_then(|value| value.as_str()), Some("readyornot"));
+        assert_eq!(config.get("nexusGameId").and_then(|value| value.as_str()), Some("1234"));
+        assert_eq!(config.get("modworkshopGameName").and_then(|value| value.as_str()), Some("The Outlast Trials"));
+        assert_eq!(config.get("modworkshopSlug").and_then(|value| value.as_str()), Some("the-outlast-trials"));
+        assert_eq!(config.get("modworkshopGameId").and_then(|value| value.as_str()), Some("999"));
+        let sources = config.get("sources").and_then(|value| value.as_array()).expect("ordered sources");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].get("gamePageUrl").and_then(|value| value.as_str()), Some("https://www.nexusmods.com/readyornot/mods/?tab=popular"));
+        assert_eq!(sources[0].get("gameName").and_then(|value| value.as_str()), Some("Ready or Not"));
+        assert_eq!(sources[1].get("gameName").and_then(|value| value.as_str()), Some("The Outlast Trials"));
+    }
+
+    #[test]
+    fn four_profile_sources_keep_stable_identity_and_order() {
+        let source = |id: &str, title: &str, provider: &str, mode: &str, url: &str| serde_json::json!({
+            "id": id,
+            "title": title,
+            "enabled": true,
+            "fields": [
+                { "label": "Source Instance ID", "value": id },
+                { "label": "Source Type", "value": provider },
+                { "label": "Display Name", "value": title },
+                { "label": "Browse Mode", "value": mode },
+                { "label": if provider == "nexus" { "Nexus Domain" } else { "ModWorkshop Slug" }, "value": if provider == "nexus" { "payday2" } else { "payday-2" } },
+                { "label": if provider == "nexus" { "Nexus Game ID" } else { "ModWorkshop Game ID" }, "value": if provider == "nexus" { "305" } else { "1" } },
+                { "label": if provider == "nexus" { "Nexus Game Page URL" } else { "ModWorkshop Game Page URL" }, "value": url },
+                { "label": "Embedded Start URL", "value": url }
+            ]
+        });
+        let draft = serde_json::json!({ "sections": { "sources": [
+            source("source-payday2-modworkshop-api", "ModWorkshop", "modworkshop", "Built-in/API", "https://modworkshop.net/g/payday-2/mods"),
+            source("source-payday2-nexus-api", "Nexus Mods", "nexus", "Built-in/API", "https://www.nexusmods.com/payday2"),
+            source("source-payday2-modworkshop-browser", "ModWorkshop Browser", "modworkshop", "Embedded", "https://modworkshop.net/g/payday-2/mods"),
+            source("source-payday2-nexus-browser", "Nexus Browser", "nexus", "Embedded", "https://www.nexusmods.com/payday2/mods")
+        ] } });
+        let config = source_config_from_draft(&draft);
+        let sources = config.get("sources").and_then(|value| value.as_array()).expect("ordered source array");
+        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.iter().filter(|source| source.get("provider").and_then(|value| value.as_str()) == Some("nexus")).count(), 2);
+        assert_eq!(sources.iter().filter(|source| source.get("provider").and_then(|value| value.as_str()) == Some("modworkshop")).count(), 2);
+        assert_eq!(sources.iter().filter_map(|source| source.get("id").and_then(|value| value.as_str())).collect::<Vec<_>>(), vec![
+            "source-payday2-modworkshop-api",
+            "source-payday2-nexus-api",
+            "source-payday2-modworkshop-browser",
+            "source-payday2-nexus-browser",
+        ]);
+        assert_eq!(source_names_from_config(&config, None).len(), 4);
+    }
+
+    #[test]
+    fn builtin_borderlands_sources_keep_variant_specific_nexus_identity() {
+        let config = builtin_profile_source_config("builtin.borderlands").expect("Borderlands source config");
+        let sources = config.get("sources").and_then(|value| value.as_array()).expect("source array");
+        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.iter().filter_map(|source| json_string(source, "id")).collect::<Vec<_>>(), vec![
+            "borderlands-nexus-api",
+            "borderlands-nexus-browser",
+            "borderlands-enhanced-nexus-api",
+            "borderlands-enhanced-nexus-browser",
+        ]);
+        assert_eq!(sources[0].get("providerSlug").and_then(|value| value.as_str()), Some("borderlands"));
+        assert_eq!(sources[0].get("providerGameId").and_then(|value| value.as_str()), Some("360"));
+        assert_eq!(sources[2].get("providerSlug").and_then(|value| value.as_str()), Some("borderlandsgotyenhanced"));
+        assert_eq!(sources[2].get("providerGameId").and_then(|value| value.as_str()), Some("2776"));
+    }
+
+    #[test]
+    fn builtin_borderlands2_sources_never_fall_back_to_payday() {
+        let config = builtin_profile_source_config("builtin.borderlands2").expect("Borderlands 2 source config");
+        let sources = config.get("sources").and_then(|value| value.as_array()).expect("source array");
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(|source| source.get("providerSlug").and_then(|value| value.as_str()) == Some("borderlands2")));
+        assert!(sources.iter().all(|source| source.get("providerGameId").and_then(|value| value.as_str()) == Some("428")));
+        assert!(sources.iter().all(|source| !source.to_string().contains("payday")));
+    }
+
+    #[test]
+    fn every_builtin_profile_has_exact_catalog_sources() {
+        let expected = [
+            ("builtin.cyberpunk2077", "cyberpunk2077", "3333"),
+            ("builtin.outlast-trials", "theoutlasttrials", "5376"),
+            ("builtin.payday-the-heist", "paydaytheheist", "4339"),
+            ("builtin.payday2", "payday2", "648"),
+            (BUILTIN_PAYDAY3_PROFILE_ID, "payday3", "5717"),
+            ("builtin.resident-evil-7", "residentevil7", "3111"),
+            ("builtin.resident-evil-village", "residentevilvillage", "3669"),
+            ("builtin.resident-evil-requiem", "residentevilrequiem", "8863"),
+            ("builtin.borderlands2", "borderlands2", "428"),
+            ("builtin.borderlands3", "borderlands3", "2953"),
+            ("builtin.borderlands4", "borderlands4", "8148"),
+            ("builtin.tiny-tinas-wonderlands", "tinytinaswonderlands", "4394"),
+            ("builtin.spider-man-remastered", "marvelsspidermanremastered", "4536"),
+            ("builtin.spider-man-2", "marvelsspiderman2", "6082"),
+            ("builtin.monster-hunter-wilds", "monsterhunterwilds", "6993"),
+        ];
+        for (profile_id, domain, game_id) in expected {
+            let config = builtin_profile_source_config(profile_id).unwrap_or_else(|| panic!("missing source config for {}", profile_id));
+            let sources = config.get("sources").and_then(|value| value.as_array()).expect("source array");
+            let nexus = sources.iter().find(|source| json_string(source, "provider").as_deref() == Some("nexus") && json_string(source, "browseMode").as_deref() == Some("api")).unwrap_or_else(|| panic!("missing Nexus API source for {}", profile_id));
+            assert_eq!(json_string(nexus, "providerSlug").as_deref(), Some(domain));
+            assert_eq!(json_string(nexus, "providerGameId").as_deref(), Some(game_id));
+        }
+
+        for (profile_id, slug, game_id) in [
+            ("builtin.payday-the-heist", "pdth", "2"),
+            ("builtin.payday2", "payday-2", "1"),
+            (BUILTIN_PAYDAY3_PROFILE_ID, "payday-3", "853"),
+        ] {
+            let config = builtin_profile_source_config(profile_id).expect("PAYDAY source config");
+            let sources = config.get("sources").and_then(|value| value.as_array()).expect("source array");
+            let modworkshop = sources.iter().find(|source| json_string(source, "provider").as_deref() == Some("modworkshop") && json_string(source, "browseMode").as_deref() == Some("api")).expect("ModWorkshop API source");
+            assert_eq!(json_string(modworkshop, "providerSlug").as_deref(), Some(slug));
+            assert_eq!(json_string(modworkshop, "providerGameId").as_deref(), Some(game_id));
+        }
+    }
+
+    #[test]
+    fn legacy_nexus_api_source_recovers_its_saved_browser_source() {
+        let draft = serde_json::json!({
+            "sourceConfigMigrationVersion": 2,
+            "sections": { "sources": [{
+                "id": "source-payday2-nexus-api",
+                "title": "Nexus Mods",
+                "enabled": true,
+                "fields": [
+                    { "label": "Source Instance ID", "value": "source-payday2-nexus-api" },
+                    { "label": "Source Type", "value": "nexus" },
+                    { "label": "Display Name", "value": "Nexus Mods" },
+                    { "label": "Browse Mode", "value": "Built-in/API" },
+                    { "label": "Human Game Name", "value": "PAYDAY 2" },
+                    { "label": "Nexus Domain", "value": "games" },
+                    { "label": "Nexus Game ID", "value": "648" },
+                    { "label": "Nexus Game Page URL", "value": "https://www.nexusmods.com/games/payday2" },
+                    { "label": "Embedded Start URL", "value": "https://www.nexusmods.com/payday2/mods" },
+                    { "label": "Allowed Domains", "value": "nexusmods.com, www.nexusmods.com" }
+                ]
+            }] }
+        });
+
+        let config = source_config_from_draft(&draft);
+        let sources = config.get("sources").and_then(|value| value.as_array()).expect("source array");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].get("id").and_then(|value| value.as_str()), Some("source-payday2-nexus-api"));
+        assert_eq!(sources[0].get("providerSlug").and_then(|value| value.as_str()), Some("payday2"));
+        assert_eq!(sources[1].get("id").and_then(|value| value.as_str()), Some("source-payday2-nexus-api.browser"));
+        assert_eq!(sources[1].get("displayName").and_then(|value| value.as_str()), Some("Nexus Browser"));
+        assert_eq!(sources[1].get("browseMode").and_then(|value| value.as_str()), Some("webview_window"));
+    }
+
+    #[test]
+    fn legacy_modworkshop_game_id_slug_migrates_without_breaking_payday2() {
+        let draft = serde_json::json!({
+            "overview": {},
+            "sections": {
+                "sources": [{
+                    "title": "ModWorkshop",
+                    "fields": [
+                        { "label": "Source Type", "value": "modworkshop" },
+                        { "label": "Selected ModWorkshop Game", "value": "PAYDAY 2" },
+                        { "label": "ModWorkshop Game ID", "value": "payday-2" }
+                    ]
+                }]
+            }
+        });
+        let config = source_config_from_draft(&draft);
+
+        assert_eq!(config.get("modworkshopGameName").and_then(|value| value.as_str()), Some("PAYDAY 2"));
+        assert_eq!(config.get("modworkshopSlug").and_then(|value| value.as_str()), Some("payday-2"));
+        assert!(config.get("modworkshopGameId").is_none());
+        assert_eq!(modworkshop_game_route_from_source_config(&config).as_deref(), Some("payday-2"));
+    }
+
+    #[test]
+    fn modworkshop_payday_alias_url_is_canonicalized_for_managed_browsing() {
+        let parsed = parse_modworkshop_game_url_fields("https://modworkshop.net/g/payday2/mods")
+            .expect("ModWorkshop PAYDAY 2 URL should parse");
+
+        assert_eq!(parsed.0.as_deref(), Some("payday-2"));
+        assert_eq!(parsed.2, "https://modworkshop.net/g/payday-2/mods");
+
+        let draft = serde_json::json!({
+            "overview": {},
+            "sections": {
+                "sources": [{
+                    "title": "ModWorkshop Browser",
+                    "fields": [
+                        { "label": "Source Type", "value": "embedded" },
+                        { "label": "Starting Page URL", "value": "https://modworkshop.net/g/payday2/mods" }
+                    ]
+                }]
+            }
+        });
+        let config = source_config_from_draft(&draft);
+        let source = config.get("sources").and_then(|value| value.as_array()).and_then(|sources| sources.first()).expect("managed source");
+        assert_eq!(source.get("startUrl").and_then(|value| value.as_str()), Some("https://modworkshop.net/g/payday-2/mods"));
+    }
+
+    #[test]
+    fn github_source_survives_runtime_config_conversion() {
+        let draft = serde_json::json!({
+            "overview": {},
+            "sections": {
+                "sources": [{
+                    "id": "github-source",
+                    "title": "GitHub Releases",
+                    "fields": [
+                        { "label": "Source Type", "value": "github" },
+                        { "label": "Repository URL", "value": "https://github.com/owner/repository/releases" },
+                        { "label": "Browse Mode", "value": "Built-in/API" }
+                    ]
+                }]
+            }
+        });
+        let config = source_config_from_draft(&draft);
+        let source = config.get("sources").and_then(|value| value.as_array()).and_then(|sources| sources.first()).expect("GitHub source");
+
+        assert_eq!(source.get("provider").and_then(|value| value.as_str()), Some("github"));
+        assert_eq!(source.get("providerSlug").and_then(|value| value.as_str()), Some("owner"));
+        assert_eq!(source.get("providerGameId").and_then(|value| value.as_str()), Some("repository"));
+        assert_eq!(source.get("gamePageUrl").and_then(|value| value.as_str()), Some("https://github.com/owner/repository"));
+    }
+
+    #[test]
+    fn modworkshop_categories_parse_real_api_shape() {
+        let categories = parse_modworkshop_categories(serde_json::json!({
+            "data": [
+                { "id": 20, "name": "HUD", "game_id": 853 },
+                { "id": "5", "name": "Audio" },
+                { "id": "20", "name": "HUD Duplicate" },
+                { "id": "", "name": "Broken" }
+            ]
+        }));
+
+        assert_eq!(categories.len(), 2);
+        assert!(categories.iter().any(|category| category.id == "5" && category.label == "Audio"));
+        assert!(categories.iter().any(|category| category.id == "20" && category.label == "HUD"));
+    }
+
+    #[test]
+    fn modworkshop_browse_urls_use_scoped_game_and_category_id() {
+        let urls = modworkshop_api_browse_urls_for_game("payday-2", 2, "updated", Some("hud names"), Some("17"));
+
+        assert!(urls.iter().any(|url| url.starts_with("https://api.modworkshop.net/games/payday-2/mods?page=2")));
+        assert!(urls.iter().all(|url| url.contains("category_id=17")));
+        assert!(urls.iter().all(|url| !url.contains("category=17")));
+        assert!(urls.iter().any(|url| url.contains("query=hud+names")));
+    }
+
+    #[test]
+    fn modworkshop_summary_uses_nested_user_author_fields() {
+        assert_eq!(extract_modworkshop_api_description(&serde_json::json!({
+            "desc": "Actual mod description",
+            "files": [{"description": "Filename only"}]
+        })).as_deref(), Some("Actual mod description"));
+        let summary = modworkshop_summary_from_api_value_for_game(&serde_json::json!({
+            "id": 12345,
+            "name": "Better Masks",
+            "game_id": 1,
+            "user": {
+                "id": 77,
+                "name": "Actual Author",
+                "unique_name": "actual_author",
+                "avatar": "avatar.webp",
+                "avatar_has_thumb": true
+            }
+        }), Some("payday-2")).expect("summary");
+
+        assert_eq!(summary.source_id, "12345");
+        assert_eq!(summary.game_id.as_deref(), Some("1"));
+        assert_eq!(summary.author.as_deref(), Some("Actual Author"));
+        assert_eq!(summary.author_username.as_deref(), Some("actual_author"));
+        assert_eq!(summary.author_user_id.as_deref(), Some("77"));
+        assert_eq!(summary.author_profile_url.as_deref(), Some("https://modworkshop.net/user/77"));
+        assert_eq!(summary.author_avatar_url.as_deref(), Some("https://storage.modworkshop.net/users/images/thumbnail_avatar.webp"));
+    }
+
+    #[test]
+    fn nexus_frontend_sort_names_map_to_api_sort_names() {
+        assert_eq!(canonical_nexus_sort("published_at"), "added");
+        assert_eq!(canonical_nexus_sort("bumped_at"), "updated");
+        assert_eq!(canonical_nexus_sort("likes"), "liked");
+        assert_eq!(canonical_nexus_sort("downloads"), "downloads");
+    }
+
+    #[test]
+    fn nexus_newest_uses_created_at_and_latest_added() {
+        assert_eq!(
+            nexus_graphql_sort_value("published_at"),
+            serde_json::json!({ "createdAt": { "direction": "DESC" } })
+        );
+        assert_eq!(nexus_rest_endpoint_order("published_at")[0], "latest_added.json");
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(BackupState {
             progress: Mutex::new(BackupProgress::default()),
         })
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-        // v1.8.2: restore any crashed vanilla temp session when Tsuki starts and PAYDAY 3 is not running.
-            if read_vanilla_launch_session().is_some() && !payday_process_running() {
-                let _ = restore_mods_after_vanilla_launch();
+            if let Ok(root) = ensure_app_data_dirs() {
+                if let Err(err) = text_encoding::run_persisted_text_encoding_migration(&root) {
+                    eprintln!("Text encoding migration skipped: {}", err);
+                }
             }
 
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+            // Restore any crashed vanilla temp session when Tsuki starts and PAYDAY 3 is not running.
+            if read_vanilla_launch_session().is_some() && !payday_process_running() {
+                let _ = restore_mods_after_vanilla_launch();
             }
 
             if should_auto_relaunch_as_admin() {
@@ -16406,22 +21308,55 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_decorations(false);
-                let _ = window.set_resizable(true);
-                let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
-                    width: 960.0,
-                    height: 640.0,
-                })));
+                let _ = apply_initial_window_state(&window);
+                register_window_state_persistence(&window);
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            managed_loaders::managed_loader_status,
+            managed_loaders::managed_loader_action,
             window_minimize,
             window_toggle_maximize,
             window_close,
             window_start_dragging,
             get_app_settings,
+            save_app_settings,
+            get_profile_settings,
+            save_profile_settings,
+            reset_profile_settings,
+            open_profile_settings_folder,
+            open_game_profile_data_folder,
+            list_game_profile_drafts,
+            create_game_profile_draft,
+            save_game_profile_draft,
+            delete_game_profile_draft,
+            duplicate_game_profile_draft,
+            detect_game_profile_installations,
+            export_game_profile_draft_to_path,
+            activate_game_profile_runtime,
+            get_profile_launch_mapping,
+            launch_active_profile_vanilla,
+            launch_active_profile_modded,
+            open_game_profile_draft_runtime,
+            preview_game_profile_setup,
+            run_profile_creator_test_action,
+            save_profile_artwork_data_url,
+            cache_profile_artwork_remote_url,
+            import_profile_artwork_image,
+            resolve_profile_artwork_image_src,
+            scan_game_folder_basic,
+            read_profile_creator_import_file,
+            write_profile_creator_text_file,
+            test_profile_source_config,
+            test_github_public_repository,
+            export_app_settings_to_path,
+            import_app_settings_from_path,
+            reset_app_settings,
+            migrate_text_encoding_stores,
             save_game_path,
             clear_game_path,
             save_theme,
@@ -16431,6 +21366,11 @@ pub fn run() {
             check_app_update,
             download_and_launch_app_update,
             open_external_url,
+            open_embedded_browser_window,
+            is_embedded_browser_window_open,
+            get_embedded_browser_status,
+            set_embedded_browser_bounds,
+            control_embedded_browser_window,
             open_installed_mod_file_location,
             launch_payday3_vanilla,
             launch_payday3_modded,
@@ -16441,15 +21381,25 @@ pub fn run() {
             open_source_file_download,
             stage_source_file_download,
             install_staged_file_to_game,
+            profile_installs::analyze_drag_drop_install,
+            profile_installs::install_drag_drop_item,
+            profile_installs::prepare_external_manager_handoff,
+            profile_installs::get_external_manager_target,
+            fetch_modworkshop_categories,
             fetch_source_mods_page,
             fetch_modworkshop_browse_live_page,
             fetch_modworkshop_filter_page,
             diagnose_modworkshop_browse_live,
+            diagnose_modworkshop_categories,
             match_installed_source_mods,
+            source_catalog::match_installed_source_index_v2,
             diagnose_modworkshop_pairing,
             remove_raid_ww2_bad_install,
             list_source_index,
             get_source_index_status,
+            get_source_index_diagnostics,
+            refresh_source_index_v2_remote,
+            refresh_source_index_v2_remote_if_stale,
             fetch_nexus_updated_mods,
             fetch_nexus_mod_detail,
             nexus_graphql_v2_status,
@@ -16486,12 +21436,20 @@ pub fn run() {
             record_runtime_process_diagnostic,
             run_health_check,
             detect_payday3_path,
+            detect_active_profile_path,
             scan_pak_mods,
             set_pak_mod_files_enabled,
             uninstall_pak_mod_files,
             open_pak_mods_folder,
             open_backups_folder,
             open_mod_profiles_folder,
+            open_downloads_folder,
+            open_extraction_cache_folder,
+            open_receipts_folder,
+            open_indexes_folder,
+            open_uninstalled_folder,
+            open_logs_folder,
+            open_thumbnails_folder,
             open_app_data_folder,
             open_cache_folder,
             get_cache_stats,

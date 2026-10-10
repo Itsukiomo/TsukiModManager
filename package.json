@@ -1,17 +1,28 @@
 {
   "name": "tsuki-mod-manager",
   "private": true,
-  "version": "1.8.3",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "validate:source-index": "node scripts/build-source-index-v2.mjs",
+    "test:encoding": "node scripts/encoding-roundtrip-self-test.mjs",
+    "test:workflow": "node scripts/profile-workflow-self-test.mjs",
+    "test:versions": "node scripts/profile-version-self-test.mjs",
+    "test:universal-runtime": "node scripts/universal-profile-runtime-self-test.mjs",
+    "test:source-auth": "node scripts/source-auth-self-test.mjs",
+    "test:profile-research": "node scripts/profile-research/validate-game-profile-research.mjs",
+    "test:dependencies": "node scripts/dependency-link-self-test.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.16",
+    "lucide-react": "^1.54.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

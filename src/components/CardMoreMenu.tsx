@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Children, isValidElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { Ellipsis } from "lucide-react";
 
 interface CardMoreMenuProps {
   children: ReactNode;
@@ -12,6 +13,9 @@ export function CardMoreMenu({ children, label = "More options" }: CardMoreMenuP
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0 });
+  const menuChildren = useMemo(() => Children.toArray(children).filter((child) => {
+    return !(isValidElement(child) && child.type === "summary");
+  }), [children]);
 
   useLayoutEffect(() => {
     if (!open || !buttonRef.current) return;
@@ -72,10 +76,11 @@ export function CardMoreMenu({ children, label = "More options" }: CardMoreMenuP
         className="card-more-menu-trigger"
         type="button"
         aria-label={label}
+        title={label}
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        ...
+        <Ellipsis size={16} aria-hidden="true" />
       </button>
       {open && createPortal(
         <div
@@ -84,7 +89,7 @@ export function CardMoreMenu({ children, label = "More options" }: CardMoreMenuP
           style={{ top: position.top, left: position.left }}
           onClick={() => setOpen(false)}
         >
-          <div>{children}</div>
+          <div>{menuChildren}</div>
         </div>,
         document.body,
       )}
