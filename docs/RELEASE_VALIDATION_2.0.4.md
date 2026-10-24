@@ -1,4 +1,4 @@
-# Release 2.0.4 And Native Runtime 1.0.3 Validation
+# Release 2.0.4 And Native Runtime Updates
 
 ## Cause And Recovery
 
@@ -24,3 +24,9 @@ Audit files are under `D:/TsukiReleaseQualification/outlast-update-20261024`. No
 - Installer SHA-256: `eef4c4b6a9c1211cc75dca0ebc0085a663f1045d32dc7dbe1b327740ed4a2cf6`. The installer-only ZIP was copied and hash-verified in the owner's specified Honk folder.
 
 The game update must complete before the new build can be tested with the selected mods. No universal mod compatibility, successful new-build gameplay or completed catalog qualification is claimed. The Windows installer is not Authenticode-signed.
+
+## Final Public Update Follow-Up
+
+Tsuki 2.0.4 was published and its public updater metadata verified. The runtime channel published 1.0.4 to handle the additional live-observed single-file update phase where Steam temporarily removes the main archive. A pending update now produces `update-required` even with an absent archive; absent archives without an update remain errors. Compiled PAK/movie protocols and production signed-bundle verification passed again. Runtime archive SHA-256: `30a1182f761716d4d971316dab10a6dc6df5aed58ede77239b561c0bd7d77404`.
+
+The installed 2.0.4 app then fetched public runtime 1.0.4 and upgraded 1.0.3 through its actual Update action, with every payload verified: `D:/TsukiReleaseQualification/outlast-update-20261024/public-update-1792861866048/report.json`. A final source preservation check confirmed all 52 recorded files unchanged. Steam resumed downloading after staging the reusable game data; in-game launch verification remains pending until that external update completes. The original release repository was not made public or renamed.
