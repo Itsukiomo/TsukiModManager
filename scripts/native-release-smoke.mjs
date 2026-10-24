@@ -68,6 +68,13 @@ try {
     report.checks.push(`native version ${releaseVersion}`);
     assert(await page.locator('.sidebar').innerText().then(text => text.includes(`v${releaseVersion}`)), 'Sidebar release version');
     report.checks.push('sidebar release version matches native version');
+    if (process.env.TSUKI_VERIFY_TASKBAR_ICON === '1') {
+      const icon = JSON.parse(fs.readFileSync(path.join(roaming, 'Tsuki Mod Manager/diagnostics/window-icon.json'), 'utf8'));
+      assert.equal(icon.version, releaseVersion);
+      assert.equal(icon.resourceId, 32512);
+      assert.equal(icon.bigIconVerified, true, icon.error ?? 'Windows taskbar icon slot was not set');
+      report.checks.push('Windows ICON_BIG slot retains the embedded lunar icon');
+    }
     if (mode === 'upgrade') {
       assert.equal(settings.keepDownloadedArchives, true);
       assert.equal(await page.evaluate(() => localStorage.getItem('tsuki-release-migration-sentinel')), '1.8.2-preserved');

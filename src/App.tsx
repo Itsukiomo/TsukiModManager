@@ -881,7 +881,7 @@ export function BootScreen({ message = "Starting Tsuki..." }: { message?: string
         </div>
         <div className="boot-status">
           <span>{message}</span>
-          <strong>v2.0.3</strong>
+          <strong>v2.0.4</strong>
         </div>
         <div className="boot-progress" role="progressbar" aria-label="Starting Tsuki">
           <div />

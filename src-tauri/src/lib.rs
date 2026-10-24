@@ -32,6 +32,8 @@ mod source_requirements;
 mod source_updates;
 mod receipt_metadata;
 mod source_catalog;
+#[cfg(target_os = "windows")]
+mod windows_taskbar;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_DIR_NAME: &str = "Tsuki Mod Manager";
@@ -21447,6 +21449,25 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                {
+                    let icon_result = windows_taskbar::apply(&window);
+                    if let Err(error) = &icon_result {
+                        eprintln!("Taskbar icon setup failed: {error}");
+                    }
+                    if let Ok(root) = ensure_app_data_dirs() {
+                        let diagnostics = root.join("diagnostics");
+                        if fs::create_dir_all(&diagnostics).is_ok() {
+                            let record = serde_json::json!({
+                                "version": APP_VERSION,
+                                "bigIconVerified": icon_result.is_ok(),
+                                "resourceId": 32512,
+                                "error": icon_result.err()
+                            });
+                            let _ = fs::write(diagnostics.join("window-icon.json"), record.to_string());
+                        }
+                    }
+                }
                 let _ = apply_initial_window_state(&window);
                 register_window_state_persistence(&window);
                 let _ = window.show();

@@ -149,7 +149,19 @@ fn owned_tree(runtime: &Path, manifest: &Manifest) -> Result<(), String> {
 }
 fn installed(dir: &Path, config: &ReleaseSource) -> Result<(Installed, Manifest), String> {
     let record: Installed = serde_json::from_slice(&fs::read(dir.join("installed.json")).map_err(|_| "Loader is not installed.")?).map_err(|_| "Loader receipt is damaged.")?;
-    let manifest = verify(&record.manifest, &record.signature, config)?; Ok((record, manifest))
+    let manifest = verify_installed(&record.manifest, &record.signature, config)?; Ok((record, manifest))
+}
+fn verify_installed(raw: &[u8], signature: &str, config: &ReleaseSource) -> Result<Manifest, String> {
+    verify(raw, signature, config).or_else(|error| {
+        // Only existing local receipts may migrate from the former channel.
+        // Remote releases still require the new repository and the pinned key.
+        if config.repository != "Itsukiomo/runtime-channel-7f3a" { return Err(error); }
+        let legacy = ReleaseSource {
+            repository: "Itsukiomo/OutlastTrialsNativePakLoader".into(),
+            public_key: config.public_key.clone(),
+        };
+        verify(raw, signature, &legacy).map_err(|_| error)
+    })
 }
 // The runtime and its receipt share one directory swap; a durable marker keeps rollback deterministic.
 fn recover(game: &Path) -> Result<(), String> {
@@ -533,5 +545,21 @@ mod tests {
         let config = ReleaseSource { repository: "test/releases".into(), public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes()) };
         let sig = base64::engine::general_purpose::STANDARD.encode(signing.sign(raw).to_bytes());
         assert!(verify(b"{ }", &sig, &config).unwrap_err().contains("signature"));
+    }
+    #[test] fn channel_migration_trusts_only_old_signed_local_receipts() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let (_, _, mut manifest, _) = release();
+        manifest.archive_url = "https://github.com/Itsukiomo/OutlastTrialsNativePakLoader/releases/download/v1.2.3/runtime.zip".into();
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let config = ReleaseSource { repository: "Itsukiomo/runtime-channel-7f3a".into(), public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().as_bytes()) };
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        let signature = base64::engine::general_purpose::STANDARD.encode(signing.sign(&raw).to_bytes());
+        assert!(verify(&raw, &signature, &config).is_err());
+        assert!(verify_installed(&raw, &signature, &config).is_ok());
+        assert!(verify_installed(b"{}", &signature, &config).is_err());
+        manifest.archive_url = "https://github.com/untrusted/repository/releases/download/v1.2.3/runtime.zip".into();
+        let raw = serde_json::to_vec(&manifest).unwrap();
+        let signature = base64::engine::general_purpose::STANDARD.encode(signing.sign(&raw).to_bytes());
+        assert!(verify_installed(&raw, &signature, &config).is_err());
     }
 }

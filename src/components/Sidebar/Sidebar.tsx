@@ -96,7 +96,7 @@ export function Sidebar({ activePage, currentGameProfile, onChangePage, taskProg
       )}
 
       <div className="sidebar-footer" onDoubleClick={onOpenDebug} title="Double-click to open debug panel">
-        <strong>v2.0.3</strong>
+        <strong>v2.0.4</strong>
       </div>
     </aside>
   );
