@@ -1,7 +1,7 @@
 {
-  "version": "2.0.3",
-  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.3/Tsuki.Mod.Manager_2.0.3_x64-setup.exe",
-  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.3",
-  "sha256": "2edb9bf9c340d0bbb0572f8cb43ec85f5f645130e8b7968a0897be10361ec034",
-  "notes": "Fixes Nexus downloads, profile dependencies, exact update matching, Creator install routes, mod enable/disable and Outlast Steam launching. Supports signed Outlast loader 1.0.2 movie and No-Intro fixes."
+  "version": "2.0.4",
+  "downloadUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/download/v2.0.4/Tsuki.Mod.Manager_2.0.4_x64-setup.exe",
+  "releaseUrl": "https://github.com/Itsukiomo/TsukiModManager/releases/tag/v2.0.4",
+  "sha256": "eef4c4b6a9c1211cc75dca0ebc0085a663f1045d32dc7dbe1b327740ed4a2cf6",
+  "notes": "Restores signed Outlast loader downloads through a public compiled-runtime channel while preserving existing signed installations. Includes the native taskbar icon fix and supports loader 1.0.3 Steam update diagnostics."
 }

@@ -7,7 +7,7 @@ import {createRequire} from 'node:module';
 const require = createRequire('C:/Users/jeffe/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/runtime.cjs');
 const {chromium} = require('playwright');
 const executable = path.resolve(process.argv[2]);
-const version = '1.0.3';
+const version = process.argv[3] ?? '1.0.3';
 const game = 'D:/SteamLibrary/steamapps/common/The Outlast Trials';
 const root = `D:/TsukiReleaseQualification/outlast-update-20261024/public-update-${Date.now()}`;
 for (const name of ['roaming', 'local']) fs.mkdirSync(`${root}/${name}`, {recursive: true});
@@ -42,7 +42,7 @@ try {
     assert.equal(bytes.length, file.size);
     assert.equal(createHash('sha256').update(bytes).digest('hex'), file.sha256);
   }
-  report.checks.push('actual packaged in-app Update fetches public signed 1.0.3 release and installs matching payloads');
+  report.checks.push(`actual packaged in-app Update fetches public signed ${version} release and installs matching payloads`);
   report.passed = true;
 } catch (error) {report.error = String(error.stack ?? error); process.exitCode = 1;}
 finally {
